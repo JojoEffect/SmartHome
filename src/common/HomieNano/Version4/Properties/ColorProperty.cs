@@ -10,7 +10,7 @@ namespace HomieNano.Version4.Properties
         public byte R { get; set; }
         public byte G { get; set; }
         public byte B { get; set; }
-        public override string ToString() => $"{R:X2}{G:X2}{B:X2}";
+        public override readonly string ToString() => $"{R:X2}{G:X2}{B:X2}";
         public static bool TryParse(string value, out HomieColor color)
         {
             color = default;
@@ -25,8 +25,6 @@ namespace HomieNano.Version4.Properties
             catch { return false; }
         }
     }
-
-    public delegate void ColorPropertySetHandler(ColorPropertySetEventArgs args);
 
     public class ColorProperty : PropertyBase
     {
@@ -45,9 +43,9 @@ namespace HomieNano.Version4.Properties
 
         public HomieColor Value { get; private set; }
 
-        public event ColorPropertySetHandler? OnSet;
-
         public override event PropertyUpdateHandler? OnUpdate;
+
+        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value.ToString());
 
         public void Update(HomieColor newValue)
         {
@@ -60,9 +58,7 @@ namespace HomieNano.Version4.Properties
         {
             if (HomieColor.TryParse(value, out var parsed))
             {
-                Value = parsed;
-                ColorPropertySetEventArgs colorArgs = new(this, parsed);
-                OnSet?.Invoke(colorArgs);
+                Update(parsed);
             }
         }
     }

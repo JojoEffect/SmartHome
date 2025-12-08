@@ -1,4 +1,5 @@
 ﻿using HomieNano.Version4.Enums;
+using System.Text;
 
 namespace HomieNano.Version4.Attributes
 {
@@ -12,6 +13,6 @@ namespace HomieNano.Version4.Attributes
 
         public Unit Value { get; internal set; }
 
-        public override string GetPayload() => Value.ToString().ToLower();
+        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value.ToString().ToLower());
     }
 }

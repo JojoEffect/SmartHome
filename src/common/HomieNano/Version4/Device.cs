@@ -1,11 +1,14 @@
 ﻿using HomieNano.Version4.Attributes;
 using HomieNano.Version4.Enums;
+using HomieNano.Version4.EventArgs;
 using HomieNano.Version4.Properties;
 using System;
 using System.Collections;
 
 namespace HomieNano.Version4
 {
+    public delegate void DeviceStateChangeHandler(DeviceStateChangeEventArgs args);
+
     public class Device : NamedHomieEntityBase
     {
         private readonly object _lock = new();
@@ -21,10 +24,12 @@ namespace HomieNano.Version4
         {
             _homieAttribute = new(this, Constants.Version4);
             _nodesAttribute = new(this, new string[0]);
-            _stateAttribute = new(this, State.Init);
+            _stateAttribute = new(this, State.Disconnected);
             _extensionsAttribute = new(this, extensions);
             ImplementationAttribute = implementation == null ? null : new(this, implementation);
         }
+
+        public event DeviceStateChangeHandler? OnDeviceStateChange;
 
         public HomieAttribute HomieAttribute => _homieAttribute;
 
@@ -49,9 +54,9 @@ namespace HomieNano.Version4
             }
         }
 
-        public void AddNode(Node node) => AddNodes(new Node[] { node });
+        internal void AddNode(Node node) => AddNodes(new Node[] { node });
 
-        public void AddNodes(Node[] nodes)
+        internal void AddNodes(Node[] nodes)
         {
             lock (_lock)
             {
@@ -68,6 +73,29 @@ namespace HomieNano.Version4
                 }
             }
         }
+
+        internal bool TryChangeState(State newState)
+        {
+            if (CanChangeState(newState))
+            {
+                var oldState = _stateAttribute.Value;
+                _stateAttribute.Value = newState;
+                OnDeviceStateChange?.Invoke(new DeviceStateChangeEventArgs(this, oldState, newState));
+                return true;
+            }
+            return false;
+        }
+
+        private bool CanChangeState(State newState) => StateAttribute.Value switch
+        {
+            State.Init => newState == State.Ready || newState == State.Alert || newState == State.Disconnected,
+            State.Ready => newState == State.Sleeping || newState == State.Alert || newState == State.Disconnected,
+            State.Sleeping => newState == State.Ready || newState == State.Alert || newState == State.Disconnected,
+            State.Alert => newState == State.Ready || newState == State.Disconnected,
+            State.Disconnected => newState == State.Init || newState == State.Ready,
+            State.Lost => newState == State.Init || newState == State.Ready,
+            _ => false,
+        };
 
         internal PropertyBase[] GetAllSettableProperties()
         {

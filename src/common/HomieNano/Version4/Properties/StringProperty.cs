@@ -4,8 +4,6 @@ using System.Text;
 
 namespace HomieNano.Version4.Properties
 {
-    public delegate void StringPropertySetHandler(StringPropertySetEventArgs args);
-
     public class StringProperty : PropertyBase
     {
         public StringProperty(
@@ -23,13 +21,10 @@ namespace HomieNano.Version4.Properties
 
         public string Value { get; private set; }
 
-        /// <summary>
-        /// Event raised when the property is set by an external source.
-        /// </summary>
-        public event StringPropertySetHandler? OnSet;
-
         /// <inheritdoc/>
         public override event PropertyUpdateHandler? OnUpdate;
+
+        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value);
 
         public void Update(string newValue)
         {
@@ -38,11 +33,6 @@ namespace HomieNano.Version4.Properties
             OnUpdate?.Invoke(args);
         }
 
-        internal override void SetInternal(string value)
-        {
-            Value = value;
-            StringPropertySetEventArgs stringArgs = new(this, value);
-            OnSet?.Invoke(stringArgs);      
-        }
+        internal override void SetInternal(string value) => Update(value);
     }
 }

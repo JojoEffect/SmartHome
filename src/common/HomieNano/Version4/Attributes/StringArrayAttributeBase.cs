@@ -1,4 +1,6 @@
-﻿namespace HomieNano.Version4.Attributes
+﻿using System.Text;
+
+namespace HomieNano.Version4.Attributes
 {
     public abstract class StringArrayAttributeBase : AttributeBase
     {
@@ -12,14 +14,14 @@
 
         public virtual string[] Value { get => _value; private set => _value = value; }
 
-        public override string GetPayload()
+        public override byte[] GetPayload()
         {
             if (Value == null || Value.Length == 0)
             {
-                return string.Empty;
+                return Encoding.UTF8.GetBytes(string.Empty);
             }
 
-            var payload = new System.Text.StringBuilder();
+            var payload = new StringBuilder();
             for (int i = 0; i < Value.Length; i++)
             {
                 if (i > 0)
@@ -28,7 +30,7 @@
                 }
                 payload.Append(Value[i]);
             }
-            return payload.ToString();
+            return Encoding.UTF8.GetBytes(payload.ToString());
         }
 
         public void Add(string value)

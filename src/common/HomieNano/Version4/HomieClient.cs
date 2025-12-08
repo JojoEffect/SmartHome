@@ -1,5 +1,9 @@
-﻿using HomieNano.Version4.EventArgs;
+﻿using HomieNano.Version4.Enums;
+using HomieNano.Version4.EventArgs;
 using HomieNano.Version4.Properties;
+using HomieNano.Version4.Settings;
+using Microsoft.Extensions.Logging;
+using nanoFramework.Logging;
 using nanoFramework.M2Mqtt;
 using nanoFramework.M2Mqtt.Messages;
 using System.Collections;
@@ -9,42 +13,88 @@ namespace HomieNano.Version4
     public class HomieClient
     {
         private readonly Device _device;
-        private readonly HomieClientConfiguration _deviceClientConfiguration;
+        private readonly HomieClientSettings _deviceClientSettings;
+        private readonly ILogger _logger;
         private readonly IMqttClient _mqttClient;
         private readonly IDictionary _settablePropertiesTable;
 
-        public HomieClient(Device device, IMqttClient mqttClient, HomieClientConfiguration? deviceClientConfiguration = null)
+        public HomieClient(Device device, IMqttClient mqttClient, HomieClientSettings? deviceClientSettings = null)
         {
             _device = device;
             _mqttClient = mqttClient;
-            _deviceClientConfiguration = deviceClientConfiguration ?? new HomieClientConfiguration();
+            _deviceClientSettings = deviceClientSettings ?? new HomieClientSettings();
+            _logger = this.GetCurrentClassLogger();
             _settablePropertiesTable = InitializeSettablePropertiesTable(device);
         }
 
         public void Connect()
         {
+            _device.OnDeviceStateChange += HandleDeviceStateChange;
+
             _mqttClient.Connect(
-                _deviceClientConfiguration.ClientId,
-                _deviceClientConfiguration.UserName,
-                _deviceClientConfiguration.Password,
-                _deviceClientConfiguration.WillRetain,
-                _deviceClientConfiguration.WillQosLevel,
-                _deviceClientConfiguration.WillFlag,
-                _deviceClientConfiguration.WillTopic,
-                _deviceClientConfiguration.WillMessage,
-                _deviceClientConfiguration.CleanSession,
-                _deviceClientConfiguration.KeepAlivePeriod
+                _deviceClientSettings.ClientId,
+                _deviceClientSettings.UserName,
+                _deviceClientSettings.Password,
+                _deviceClientSettings.WillRetain,
+                _deviceClientSettings.WillQosLevel,
+                _deviceClientSettings.WillFlag,
+                _deviceClientSettings.WillTopic,
+                _deviceClientSettings.WillMessage,
+                _deviceClientSettings.CleanSession,
+                _deviceClientSettings.KeepAlivePeriod
                 );
 
             RegisterPropertyUpdateHandlers();
             SubscribeSettablePropertyTopics();
+
+            if (!_device.TryChangeState(State.Init))
+            {
+                Disconnect();
+                _logger.LogError("Failed to connect: unable to change device state to 'init' after connecting. Disconnecting.");
+            }
         }
 
         public void Disconnect()
         {
+            if (!_device.TryChangeState(State.Disconnected))
+            {
+                _logger.LogError("Failed to disconnect: unable to change device state to 'disconnected'. Disconnected MQTT client anyways.");
+            }
+        }
+
+        private void DisconnectInternal()
+        {
             UnsubscribeSettablePropertyTopics();
             UnregisterPropertyUpdateHandlers();
             _mqttClient.Disconnect();
+            _device.OnDeviceStateChange -= HandleDeviceStateChange;
+        }
+
+        private void HandleDeviceStateChange(DeviceStateChangeEventArgs args)
+        {
+            LogDeviceStateChange(args);
+            switch (args.CurrentState)
+            {
+                case State.Disconnected:
+                    DisconnectInternal();
+                    return;
+                case State.Init:
+                    _mqttClient.PublishHomieDeviceInfo(_device, _deviceClientSettings.PublishSettings, _logger);
+                    if (!_device.TryChangeState(State.Ready))
+                    {
+                        LogDeviceStateChangeError(State.Init, State.Ready);
+                        Disconnect();
+                    }
+                    return;
+                case State.Ready:
+                    return;
+                case State.Sleeping:
+                    return;
+                case State.Lost:
+                    return;
+                case State.Alert:
+                    return;
+            }
         }
 
         private void SubscribeSettablePropertyTopics()
@@ -113,13 +163,7 @@ namespace HomieNano.Version4
             var retained = property.RetainedAttribute.Value;
             string topic = property.GetTopic();
 
-            _mqttClient.Publish(
-                topic,
-                message,
-                _deviceClientConfiguration.UpdatePropertyPublishContentType,
-                _deviceClientConfiguration.UpdatePropertyPublishUserProperties,
-                _deviceClientConfiguration.UpdatePropertyPublishQosLevel,
-                retained);
+            _mqttClient.PublishHomiePropertyValue(topic, message, _deviceClientSettings.PublishSettings.PropertyUpdatePublishSettings, retained, _logger);
         }
 
         private static IDictionary InitializeSettablePropertiesTable(Device device)
@@ -135,5 +179,15 @@ namespace HomieNano.Version4
 
             return settablePropertiesTable;
         }
-    }  
+
+        private void LogDeviceStateChange(DeviceStateChangeEventArgs args)
+        {
+            _logger.LogInformation($"Device '{_device.TopicId}' state changed from '{args.PreviousState.ToHomieString()}' to '{args.CurrentState.ToHomieString()}'.");
+        }
+
+        private void LogDeviceStateChangeError(State fromState, State toState)
+        {
+            _logger.LogError($"Device '{_device.TopicId}' failed to change state from '{fromState.ToHomieString()}' to '{toState.ToHomieString()}'.");
+        }
+    }
 }

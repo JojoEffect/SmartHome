@@ -4,7 +4,7 @@ namespace HomieNano.Version4.EventArgs
 {
     public class PropertyUpdateEventArgs : System.EventArgs
     {
-        public PropertyUpdateEventArgs(PropertyBase property, byte[] value)
+        internal PropertyUpdateEventArgs(PropertyBase property, byte[] value)
         {
             Property = property;
             Value = value;

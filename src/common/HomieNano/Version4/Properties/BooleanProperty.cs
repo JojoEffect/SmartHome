@@ -4,8 +4,6 @@ using System.Text;
 
 namespace HomieNano.Version4.Properties
 {
-    public delegate void BooleanPropertySetHandler(BooleanPropertySetEventArgs args);
-
     public class BooleanProperty : PropertyBase
     {
         public BooleanProperty(
@@ -23,9 +21,9 @@ namespace HomieNano.Version4.Properties
 
         public bool Value { get; private set; }
 
-        public event BooleanPropertySetHandler? OnSet;
-
         public override event PropertyUpdateHandler? OnUpdate;
+
+        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value.ToString());
 
         public void Update(bool newValue)
         {
@@ -37,9 +35,7 @@ namespace HomieNano.Version4.Properties
         internal override void SetInternal(string value)
         {
             bool parsed = value == "true" || value == "1" || value == "True";
-            Value = parsed;
-            BooleanPropertySetEventArgs boolArgs = new(this, parsed);
-            OnSet?.Invoke(boolArgs);
+            Update(parsed);
         }
     }
 }

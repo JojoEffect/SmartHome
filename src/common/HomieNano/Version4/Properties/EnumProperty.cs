@@ -4,8 +4,6 @@ using System.Text;
 
 namespace HomieNano.Version4.Properties
 {
-    public delegate void EnumPropertySetHandler(EnumPropertySetEventArgs args);
-
     public class EnumProperty : PropertyBase
     {
         public EnumProperty(
@@ -23,9 +21,9 @@ namespace HomieNano.Version4.Properties
 
         public string Value { get; private set; }
 
-        public event EnumPropertySetHandler? OnSet;
-
         public override event PropertyUpdateHandler? OnUpdate;
+
+        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value);
 
         public void Update(string newValue)
         {
@@ -36,9 +34,7 @@ namespace HomieNano.Version4.Properties
 
         internal override void SetInternal(string value)
         {
-            Value = value;
-            EnumPropertySetEventArgs enumArgs = new(this, value);
-            OnSet?.Invoke(enumArgs);
+            Update(value);
         }
     }
 }

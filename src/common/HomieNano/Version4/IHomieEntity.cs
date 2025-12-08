@@ -8,6 +8,6 @@
 
         public string GetTopic();
 
-        public string GetPayload();
+        public byte[] GetPayload();
     }
 }

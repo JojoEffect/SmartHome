@@ -1,4 +1,6 @@
-﻿namespace HomieNano.Version4
+﻿using System.Text;
+
+namespace HomieNano.Version4
 {
     public abstract class HomieEntityBase : IHomieEntity
     {
@@ -19,7 +21,7 @@
 
         public virtual string TopicId => _topicId;
 
-        public virtual string GetPayload() => string.Empty;
+        public virtual byte[] GetPayload() => Encoding.UTF8.GetBytes(string.Empty);
 
         public virtual string GetTopic()
         {

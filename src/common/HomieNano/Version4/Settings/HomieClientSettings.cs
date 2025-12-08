@@ -1,10 +1,9 @@
 ﻿using nanoFramework.M2Mqtt.Messages;
 using System;
-using System.Collections;
 
-namespace HomieNano.Version4
+namespace HomieNano.Version4.Settings
 {
-    public class HomieClientConfiguration
+    public class HomieClientSettings
     {
         public string ClientId { get; set; } = Guid.NewGuid().ToString();
 
@@ -28,10 +27,12 @@ namespace HomieNano.Version4
 
         public MqttQoSLevel SettablePropertySubscriptionQosLevel { get; set; } = MqttQoSLevel.AtLeastOnce;
 
-        public MqttQoSLevel UpdatePropertyPublishQosLevel { get; set; } = MqttQoSLevel.AtLeastOnce;
-
-        public string UpdatePropertyPublishContentType { get; set; } = string.Empty;
-
-        public ArrayList UpdatePropertyPublishUserProperties { get; set; } = new ArrayList();
+        /// <summary>
+        /// Gets or sets the settings used to configure publishing behavior for Homie messages.
+        /// </summary>
+        /// <remarks>Use this property to customize parameters such as topic formatting, message
+        /// retention, and quality of service when publishing Homie messages. Changes to these settings affect how
+        /// messages are sent to the broker.</remarks>
+        public HomiePublishSettings PublishSettings { get; set; } = new HomiePublishSettings();
     }
 }

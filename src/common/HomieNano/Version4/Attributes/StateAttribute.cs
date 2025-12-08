@@ -1,10 +1,11 @@
 ﻿using HomieNano.Version4.Enums;
+using System.Text;
 
 namespace HomieNano.Version4.Attributes
 {
     public class StateAttribute : AttributeBase
     {
-        private readonly State _value;
+        private State _value;
 
         public StateAttribute(IHomieEntity parent, State state)
             : base($"{Constants.StateAttributeTopicId}", parent)
@@ -12,8 +13,8 @@ namespace HomieNano.Version4.Attributes
             _value = state;
         }
 
-        public State Value => _value;
+        public State Value { get { return _value; } internal set { _value = value; } }
 
-        public override string GetPayload() => Value.ToString().ToLower();
+        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value.ToString().ToLower());
     }
 }

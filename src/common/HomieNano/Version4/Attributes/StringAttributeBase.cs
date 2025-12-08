@@ -1,4 +1,6 @@
-﻿namespace HomieNano.Version4.Attributes
+﻿using System.Text;
+
+namespace HomieNano.Version4.Attributes
 {
     public abstract class StringAttributeBase : AttributeBase
     {
@@ -12,6 +14,6 @@
 
         public virtual string Value { get => _value; set => _value = value; }
 
-        public override string GetPayload() => Value;
+        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value);
     }
 }

@@ -25,9 +25,9 @@ namespace HomieNano.Version4
 
         public PropertyBase[] Properties => _properties;
 
-        public void AddProperty(PropertyBase property) => AddProperties(new PropertyBase[] { property });
+        internal void AddProperty(PropertyBase property) => AddProperties(new PropertyBase[] { property });
 
-        public void AddProperties(PropertyBase[] properties)
+        internal void AddProperties(PropertyBase[] properties)
         {
             lock (_lock)
             {

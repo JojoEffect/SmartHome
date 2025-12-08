@@ -4,8 +4,6 @@ using System.Text;
 
 namespace HomieNano.Version4.Properties
 {
-    public delegate void FloatPropertySetHandler(FloatPropertySetEventArgs args);
-
     public class FloatProperty : PropertyBase
     {
         public FloatProperty(
@@ -23,9 +21,9 @@ namespace HomieNano.Version4.Properties
 
         public double Value { get; private set; }
 
-        public event FloatPropertySetHandler? OnSet;
-
         public override event PropertyUpdateHandler? OnUpdate;
+
+        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value.ToString());
 
         public void Update(double newValue)
         {
@@ -38,9 +36,7 @@ namespace HomieNano.Version4.Properties
         {
             if (double.TryParse(value, out var parsed))
             {
-                Value = parsed;
-                FloatPropertySetEventArgs floatArgs = new(this, parsed);
-                OnSet?.Invoke(floatArgs);
+                Update(parsed);
             }
         }
     }

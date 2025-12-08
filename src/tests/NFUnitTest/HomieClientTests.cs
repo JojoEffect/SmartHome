@@ -1,8 +1,8 @@
 using HomieNano.Version4;
 using HomieNano.Version4.Builder;
-using HomieNano.Version4.Enums;
 using HomieNano.Version4.Properties;
-using nanoFramework.M2Mqtt;
+using nanoFramework.Logging;
+using nanoFramework.Logging.Debug;
 using nanoFramework.M2Mqtt.Messages;
 using nanoFramework.TestFramework;
 using System.Text;
@@ -45,16 +45,28 @@ namespace NFUnitTest
         private const string _testPropertyColorTopicId = "color";
         private const string _testPropertyColorName = "Color";
 
+        [Setup]
+        public void Setup()
+        {
+            LogDispatcher.LoggerFactory = new DebugLoggerFactory();
+        }
+
+        [Cleanup]
+        public void Cleanup()
+        {
+            LogDispatcher.LoggerFactory = null;
+        }
 
         [TestMethod]
         public void HomieClient_Publish_On_Property_Update()
         {
             // Arrange
-            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
             int expectedPublishCount = 1;
             int expectedSubscriptionCount = 0;
 
             var mqttClient = new MockMqttClient();
+
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
             var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
                         .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, 0.0)
                         .BuildProperty(out FloatProperty property)
@@ -78,13 +90,14 @@ namespace NFUnitTest
         public void HomieClient_Property_Is_Set_On_Property_Set_Message()
         {
             // Arrange
-            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
             int expectedPublishCount = 0;
             int expectedSubscriptionCount = 1;
             double initialValue = 0.0;
             double expectedValue = 25;
 
             var mqttClient = new MockMqttClient();
+
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
             var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
                         .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, initialValue)
                             .WithSettable(true)
@@ -105,6 +118,41 @@ namespace NFUnitTest
             Assert.AreEqual(expectedValue, property.Value);
             Assert.AreEqual(expectedPublishCount, mqttClient.PublishCount);
             Assert.AreEqual(expectedSubscriptionCount, mqttClient.SubscriptionCount);
+        }
+
+        [TestMethod]
+        public void HomieClient_Connect_Disconnect()
+        {
+            // Arrange
+            int expectedSubscriptionCountConnected = 2;
+            int expectedSubscriptionCountDisconnected = 0;
+
+            var mqttClient = new MockMqttClient();
+
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
+            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
+                        .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, 0.0)
+                            .WithSettable(true)
+                        .BuildProperty()
+                        .AddFloatProperty(_testPropertyIntensityTopicId, _testPropertyIntensityName, 100.0)
+                            .WithSettable(true)
+                        .BuildProperty()
+                    .BuildNode()
+                .BuildDevice();
+
+            var homieClient = new HomieClient(device, mqttClient);
+
+            // Act
+            homieClient.Connect();
+
+            // Assert
+            Assert.AreEqual(expectedSubscriptionCountConnected, mqttClient.SubscriptionCount);
+
+            // Act
+            homieClient.Disconnect();
+
+            // Assert
+            Assert.AreEqual(expectedSubscriptionCountDisconnected, mqttClient.SubscriptionCount);
         }
     }
 }

@@ -19,8 +19,9 @@
   </PropertyGroup>
   <Import Project="$(NanoFrameworkProjectSystemPath)NFProjectSystem.props" Condition="Exists('$(NanoFrameworkProjectSystemPath)NFProjectSystem.props')" />
   <ItemGroup>
+    <Compile Include="Version4\EventArgs\DeviceStateChangeEventArgs.cs" />
     <Compile Include="Version4\HomieClient.cs" />
-    <Compile Include="Version4\HomieClientConfiguration.cs" />
+    <Compile Include="Version4\Settings\HomieClientSettings.cs" />
     <Compile Include="Version4\Builder\HomieBooleanPropertyBuilder.cs" />
     <Compile Include="Version4\Builder\HomieDeviceBuilder.cs" />
     <Compile Include="Version4\Builder\HomieEnumPropertyBuilder.cs" />
@@ -52,14 +53,9 @@
     <Compile Include="Version4\Enums\DataType.cs" />
     <Compile Include="Version4\Device.cs" />
     <Compile Include="Version4\Attributes\HomieAttribute.cs" />
-    <Compile Include="Version4\EventArgs\BooleanPropertySetEventArgs.cs" />
-    <Compile Include="Version4\EventArgs\ColorPropertySetEventArgs.cs" />
-    <Compile Include="Version4\EventArgs\EnumPropertySetEventArgs.cs" />
-    <Compile Include="Version4\EventArgs\FloatPropertySetEventArgs.cs" />
-    <Compile Include="Version4\EventArgs\IntegerPropertySetEventArgs.cs" />
-    <Compile Include="Version4\EventArgs\PropertySetEventArgs.cs" />
-    <Compile Include="Version4\EventArgs\StringPropertySetEventArgs.cs" />
+    <Compile Include="Version4\EventArgs\PropertyUpdateEventArgs.cs" />
     <Compile Include="Version4\HomieEntityBase.cs" />
+    <Compile Include="Version4\HomieMqttClientHelpers.cs" />
     <Compile Include="Version4\IHomieEntity.cs" />
     <Compile Include="Version4\NamedHomieEntityBase.cs" />
     <Compile Include="Version4\Node.cs" />
@@ -71,11 +67,16 @@
     <Compile Include="Version4\Properties\PropertyBase.cs" />
     <Compile Include="Version4\Enums\Unit.cs" />
     <Compile Include="Version4\Properties\StringProperty.cs" />
+    <Compile Include="Version4\Settings\HomiePublishSettings.cs" />
+    <Compile Include="Version4\Settings\PublishSettings.cs" />
     <Compile Include="Version4\Utils.cs" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="mscorlib">
       <HintPath>..\..\..\packages\nanoFramework.CoreLibrary.1.17.11\lib\mscorlib.dll</HintPath>
+    </Reference>
+    <Reference Include="nanoFramework.Logging">
+      <HintPath>..\..\..\packages\nanoFramework.Logging.1.1.161\lib\nanoFramework.Logging.dll</HintPath>
     </Reference>
     <Reference Include="nanoFramework.M2Mqtt">
       <HintPath>..\..\..\packages\nanoFramework.M2Mqtt.5.1.206\lib\nanoFramework.M2Mqtt.dll</HintPath>

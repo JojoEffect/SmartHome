@@ -216,7 +216,7 @@ namespace NFUnitTest
         }
 
         [TestMethod]
-        public void Property_Set_RaiseOnSet()
+        public void Property_Set_RaiseOnUpdate()
         {
             // Arrange
             var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
@@ -231,7 +231,7 @@ namespace NFUnitTest
                     .BuildNode()
                 .BuildDevice();
 
-            property.OnSet += (args) =>
+            property.OnUpdate += (args) =>
             {
                 handlerCalled = true;
             };

@@ -1,6 +1,7 @@
 ﻿using HomieNano.Version4.Attributes;
 using HomieNano.Version4.Enums;
 using HomieNano.Version4.EventArgs;
+using System;
 using System.Text;
 
 namespace HomieNano.Version4.Properties
@@ -37,6 +38,8 @@ namespace HomieNano.Version4.Properties
         /// </summary>
         public abstract event PropertyUpdateHandler? OnUpdate;
 
+        public abstract override byte[] GetPayload();
+
         public DataTypeAttribute DataTypeAttribute => _dataTypeAttribute;
         
         public FormatAttribute FormatAttribute => _formatAttribute;
@@ -53,6 +56,10 @@ namespace HomieNano.Version4.Properties
             {
                 var str = Encoding.UTF8.GetString(value, 0, value.Length);
                 SetInternal(str);
+            }
+            else
+            {
+                throw new InvalidOperationException($"Property '{TopicId}' is not settable.");
             }
         }
 

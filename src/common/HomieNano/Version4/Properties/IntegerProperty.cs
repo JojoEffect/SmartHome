@@ -4,8 +4,6 @@ using System.Text;
 
 namespace HomieNano.Version4.Properties
 {
-    public delegate void IntegerPropertySetHandler(IntegerPropertySetEventArgs args);
-
     public class IntegerProperty : PropertyBase
     {
         public IntegerProperty(
@@ -23,9 +21,9 @@ namespace HomieNano.Version4.Properties
 
         public int Value { get; private set; }
 
-        public event IntegerPropertySetHandler? OnSet;
-
         public override event PropertyUpdateHandler? OnUpdate;
+
+        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value.ToString());
 
         public void Update(int newValue)
         {
@@ -38,9 +36,7 @@ namespace HomieNano.Version4.Properties
         {
             if (int.TryParse(value, out var parsed))
             {
-                Value = parsed;
-                IntegerPropertySetEventArgs intArgs = new(this, parsed);
-                OnSet?.Invoke(intArgs);
+                Update(parsed);
             }
         }
     }
