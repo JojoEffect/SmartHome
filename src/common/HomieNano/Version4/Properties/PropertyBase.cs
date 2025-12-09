@@ -1,6 +1,8 @@
 ﻿using HomieNano.Version4.Attributes;
 using HomieNano.Version4.Enums;
 using HomieNano.Version4.EventArgs;
+using Microsoft.Extensions.Logging;
+using nanoFramework.Logging;
 using System;
 using System.Text;
 
@@ -15,6 +17,7 @@ namespace HomieNano.Version4.Properties
         private readonly SettableAttribute _settableAttribute;
         private readonly RetainedAttribute _retainedAttribute;
         private readonly UnitAttribute _unitAttribute;
+        private readonly ILogger _logger;
 
         protected PropertyBase(string topicId,
             string name,
@@ -30,6 +33,7 @@ namespace HomieNano.Version4.Properties
             _settableAttribute = new(this, settable);
             _retainedAttribute = new(this, retained);
             _unitAttribute = new(this, unit);
+            _logger = this.GetCurrentClassLogger();
         }
 
 
@@ -55,6 +59,7 @@ namespace HomieNano.Version4.Properties
             if (SettableAttribute.Value)
             {
                 var str = Encoding.UTF8.GetString(value, 0, value.Length);
+                _logger.LogDebug($"Setting property '{TopicId}' to value '{str}'.");
                 SetInternal(str);
             }
             else

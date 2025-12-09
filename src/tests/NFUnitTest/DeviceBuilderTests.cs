@@ -49,8 +49,7 @@ namespace NFUnitTest
         {
             // Arrange
             var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
-            var expectedTopic = $"{Constants.RootTopicId}{Constants.TopicSeparator}{Constants.Version4}" +
-                $"{Constants.TopicSeparator}{_testDeviceTopicId}";
+            var expectedTopic = $"{Constants.RootTopicId}{Constants.TopicSeparator}{_testDeviceTopicId}";
 
             // Act
             var device = builder.BuildDevice();
@@ -64,8 +63,7 @@ namespace NFUnitTest
         {
             // Arrange
             var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
-            var expectedTopic = $"{Constants.RootTopicId}{Constants.TopicSeparator}{Constants.Version4}" +
-                $"{Constants.TopicSeparator}{_testDeviceTopicId}" +
+            var expectedTopic = $"{Constants.RootTopicId}{Constants.TopicSeparator}{_testDeviceTopicId}" +
                 $"{Constants.TopicSeparator}{_testNodeEngineTopicId}";
 
             // Act
@@ -82,8 +80,7 @@ namespace NFUnitTest
         {
             // Arrange
             var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
-            var expectedTopic = $"{Constants.RootTopicId}{Constants.TopicSeparator}{Constants.Version4}" +
-                $"{Constants.TopicSeparator}{_testDeviceTopicId}" +
+            var expectedTopic = $"{Constants.RootTopicId}{Constants.TopicSeparator}{_testDeviceTopicId}" +
                 $"{Constants.TopicSeparator}{_testNodeLightsTopicId}" +
                 $"{Constants.TopicSeparator}{Constants.TypeAttributeTopicId}";
 
@@ -101,8 +98,7 @@ namespace NFUnitTest
         {
             // Arrange
             var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
-            var expectedTopic = $"{Constants.RootTopicId}{Constants.TopicSeparator}{Constants.Version4}" +
-                $"{Constants.TopicSeparator}{_testDeviceTopicId}" +
+            var expectedTopic = $"{Constants.RootTopicId}{Constants.TopicSeparator}{_testDeviceTopicId}" +
                 $"{Constants.TopicSeparator}{_testNodeEngineTopicId}" +
                 $"{Constants.TopicSeparator}{_testPropertyTemperatureTopicId}";
 
@@ -122,8 +118,7 @@ namespace NFUnitTest
         {
             // Arrange
             var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
-            var expectedTopic = $"{Constants.RootTopicId}{Constants.TopicSeparator}{Constants.Version4}" +
-                $"{Constants.TopicSeparator}{_testDeviceTopicId}" +
+            var expectedTopic = $"{Constants.RootTopicId}{Constants.TopicSeparator}{_testDeviceTopicId}" +
                 $"{Constants.TopicSeparator}{_testNodeEngineTopicId}" +
                 $"{Constants.TopicSeparator}{_testPropertyIntensityTopicId}" +
                 $"{Constants.TopicSeparator}{Constants.UnitAttributeTopicId}";
@@ -159,8 +154,7 @@ namespace NFUnitTest
             // Arrange
             var expectedImplementation = "impl";
             var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
-            var expectedTopic = $"{Constants.RootTopicId}{Constants.TopicSeparator}{Constants.Version4}" +
-                $"{Constants.TopicSeparator}{_testDeviceTopicId}" +
+            var expectedTopic = $"{Constants.RootTopicId}{Constants.TopicSeparator}{_testDeviceTopicId}" +
                 $"{Constants.TopicSeparator}{Constants.ImplementationAttributeTopicId}";
 
             // Act

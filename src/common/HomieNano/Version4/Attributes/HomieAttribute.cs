@@ -1,4 +1,6 @@
-﻿namespace HomieNano.Version4.Attributes
+﻿using System.Text;
+
+namespace HomieNano.Version4.Attributes
 {
     public class HomieAttribute : StringAttributeBase
     {
@@ -6,5 +8,7 @@
             : base($"{Constants.HomieAttributeTopicId}", parent, version)
         {
         }
+
+        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value);
     }
 }

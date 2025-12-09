@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Text;
 
 namespace HomieNano.Version4.Attributes
 {
@@ -7,6 +8,11 @@ namespace HomieNano.Version4.Attributes
         public NodesAttribute(IHomieEntity parent, string[] nodes) 
             : base($"{Constants.NodesAttributeTopicId}", parent, nodes)
         {
+        }
+
+        public override byte[] GetPayload()
+        {
+            return Encoding.UTF8.GetBytes(Join(",", Value));
         }
     }
 }

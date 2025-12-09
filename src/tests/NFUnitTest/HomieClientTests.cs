@@ -61,7 +61,7 @@ namespace NFUnitTest
         public void HomieClient_Publish_On_Property_Update()
         {
             // Arrange
-            int expectedPublishCount = 1;
+            int expectedPublishCount = 14;
             int expectedSubscriptionCount = 0;
 
             var mqttClient = new MockMqttClient();
@@ -90,7 +90,7 @@ namespace NFUnitTest
         public void HomieClient_Property_Is_Set_On_Property_Set_Message()
         {
             // Arrange
-            int expectedPublishCount = 0;
+            int expectedPublishCount = 14;
             int expectedSubscriptionCount = 1;
             double initialValue = 0.0;
             double expectedValue = 25;
@@ -124,6 +124,8 @@ namespace NFUnitTest
         public void HomieClient_Connect_Disconnect()
         {
             // Arrange
+            int expectedPublishCountAfterConnect = 19;
+            int expectedPublishCountAfterDisconnect = 19;
             int expectedSubscriptionCountConnected = 2;
             int expectedSubscriptionCountDisconnected = 0;
 
@@ -147,12 +149,14 @@ namespace NFUnitTest
 
             // Assert
             Assert.AreEqual(expectedSubscriptionCountConnected, mqttClient.SubscriptionCount);
+            Assert.AreEqual(expectedPublishCountAfterConnect, mqttClient.PublishCount);
 
             // Act
             homieClient.Disconnect();
 
             // Assert
             Assert.AreEqual(expectedSubscriptionCountDisconnected, mqttClient.SubscriptionCount);
+            Assert.AreEqual(expectedPublishCountAfterDisconnect, mqttClient.PublishCount);
         }
     }
 }

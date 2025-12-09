@@ -72,7 +72,6 @@ namespace HomieNano.Version4
 
         private void HandleDeviceStateChange(DeviceStateChangeEventArgs args)
         {
-            LogDeviceStateChange(args);
             switch (args.CurrentState)
             {
                 case State.Disconnected:
@@ -82,8 +81,8 @@ namespace HomieNano.Version4
                     _mqttClient.PublishHomieDeviceInfo(_device, _deviceClientSettings.PublishSettings, _logger);
                     if (!_device.TryChangeState(State.Ready))
                     {
-                        LogDeviceStateChangeError(State.Init, State.Ready);
-                        Disconnect();
+                        _logger.LogError("Failed to change device state to 'ready' after publishing device info. Disconnecting.");
+                        DisconnectInternal();
                     }
                     return;
                 case State.Ready:
@@ -178,16 +177,6 @@ namespace HomieNano.Version4
             }
 
             return settablePropertiesTable;
-        }
-
-        private void LogDeviceStateChange(DeviceStateChangeEventArgs args)
-        {
-            _logger.LogInformation($"Device '{_device.TopicId}' state changed from '{args.PreviousState.ToHomieString()}' to '{args.CurrentState.ToHomieString()}'.");
-        }
-
-        private void LogDeviceStateChangeError(State fromState, State toState)
-        {
-            _logger.LogError($"Device '{_device.TopicId}' failed to change state from '{fromState.ToHomieString()}' to '{toState.ToHomieString()}'.");
         }
     }
 }

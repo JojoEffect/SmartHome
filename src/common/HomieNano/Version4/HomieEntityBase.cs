@@ -27,7 +27,7 @@ namespace HomieNano.Version4
         {
             if (Parent is null)
             {
-                return $"{Constants.RootTopicId}{Constants.TopicSeparator}{Constants.Version4}{Constants.TopicSeparator}{TopicId}";
+                return $"{Constants.RootTopicId}{Constants.TopicSeparator}{TopicId}";
             }
 
             return $"{Parent.GetTopic()}{Constants.TopicSeparator}{TopicId}";

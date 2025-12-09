@@ -2,6 +2,8 @@
 using HomieNano.Version4.Enums;
 using HomieNano.Version4.EventArgs;
 using HomieNano.Version4.Properties;
+using Microsoft.Extensions.Logging;
+using nanoFramework.Logging;
 using System;
 using System.Collections;
 
@@ -18,6 +20,7 @@ namespace HomieNano.Version4
         private readonly StateAttribute _stateAttribute;
         private readonly ExtensionsAttribute _extensionsAttribute;
         private readonly IDictionary _nodes = new Hashtable();
+        private readonly ILogger _logger;
 
         public Device(string topicId, string name, string[] extensions, string? implementation = null)
             : base(topicId, name)
@@ -27,6 +30,7 @@ namespace HomieNano.Version4
             _stateAttribute = new(this, State.Disconnected);
             _extensionsAttribute = new(this, extensions);
             ImplementationAttribute = implementation == null ? null : new(this, implementation);
+            _logger = this.GetCurrentClassLogger();
         }
 
         public event DeviceStateChangeHandler? OnDeviceStateChange;
@@ -62,9 +66,10 @@ namespace HomieNano.Version4
             {
                 foreach (var node in nodes)
                 {
-                    if(_nodes.Contains(node.TopicId))
+                    _logger.LogDebug($"Adding node '{node.TopicId}' to device '{TopicId}'.");
+                    if (_nodes.Contains(node.TopicId))
                     {
-                        throw new ArgumentException($"A node with the topic ID '{node.TopicId}' already exists in the device '{this.TopicId}'.");
+                        throw new ArgumentException($"A node with the topic ID '{node.TopicId}' already exists in the device '{TopicId}'.");
                     }
 
                     node.Parent = this;
@@ -76,13 +81,20 @@ namespace HomieNano.Version4
 
         internal bool TryChangeState(State newState)
         {
+            _logger.LogDebug($"Attempting to change state of device '{TopicId}' from '{_stateAttribute.Value.ToHomieString()}' to '{newState.ToHomieString()}'.");
             if (CanChangeState(newState))
             {
                 var oldState = _stateAttribute.Value;
                 _stateAttribute.Value = newState;
+
+                _logger.LogInformation($"Device '{TopicId}' state changed from '{oldState.ToHomieString()}' to '{newState.ToHomieString()}'.");
+
                 OnDeviceStateChange?.Invoke(new DeviceStateChangeEventArgs(this, oldState, newState));
                 return true;
             }
+
+            _logger.LogWarning($"Invalid state transition attempted for device '{TopicId}' from '{_stateAttribute.Value.ToHomieString()}' to '{newState.ToHomieString()}'.");
+
             return false;
         }
 

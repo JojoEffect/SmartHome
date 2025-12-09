@@ -1,4 +1,6 @@
-﻿namespace HomieNano.Version4.Attributes
+﻿using System.Text;
+
+namespace HomieNano.Version4.Attributes
 {
     public abstract class BoolAttributeBase : AttributeBase
     {
@@ -9,5 +11,7 @@
         }
 
         public virtual bool Value { get; internal set; }
+
+        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value ? "true" : "false");
     }
 }
