@@ -65,6 +65,11 @@ namespace HomieNano.Version4
             foreach (var property in node.Properties)
             {
                 mqttClient.PublishHomiePropertyInfo(property, homiePublishSettings, logger);
+                mqttClient.PublishHomiePropertyValue(property.GetTopic(),
+                    property.GetPayload(),
+                    homiePublishSettings.PropertyUpdatePublishSettings,
+                    property.RetainedAttribute.Value,
+                    logger);
             }
         }
 

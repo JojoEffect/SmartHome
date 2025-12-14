@@ -1,4 +1,5 @@
 ﻿using HomieNano.Version4.Enums;
+using HomieNano.Version4.Extensions;
 using System.Text;
 
 namespace HomieNano.Version4.Attributes
@@ -15,6 +16,6 @@ namespace HomieNano.Version4.Attributes
 
         public DataType Value => _value;
 
-        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value.ToString().ToLower());
+        public override byte[] GetPayload() => Encoding.UTF8.GetBytes(Value.GetString());
     }
 }

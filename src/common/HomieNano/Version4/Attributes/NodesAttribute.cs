@@ -1,5 +1,5 @@
-﻿using System;
-using System.Text;
+﻿using System.Text;
+using Utils;
 
 namespace HomieNano.Version4.Attributes
 {
@@ -12,7 +12,7 @@ namespace HomieNano.Version4.Attributes
 
         public override byte[] GetPayload()
         {
-            return Encoding.UTF8.GetBytes(Join(",", Value));
+            return Encoding.UTF8.GetBytes(StringUtils.Join(",", Value));
         }
     }
 }

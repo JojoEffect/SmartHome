@@ -1,5 +1,4 @@
 ﻿using HomieNano.Version4.Enums;
-using HomieNano.Version4.Properties;
 
 namespace HomieNano.Version4.Builder
 {

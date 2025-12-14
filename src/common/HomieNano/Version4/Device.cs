@@ -1,7 +1,9 @@
 ﻿using HomieNano.Version4.Attributes;
 using HomieNano.Version4.Enums;
 using HomieNano.Version4.EventArgs;
+using HomieNano.Version4.Extensions;
 using HomieNano.Version4.Properties;
+using HomieNano.Version4.Settings;
 using Microsoft.Extensions.Logging;
 using nanoFramework.Logging;
 using System;
@@ -81,19 +83,19 @@ namespace HomieNano.Version4
 
         internal bool TryChangeState(State newState)
         {
-            _logger.LogDebug($"Attempting to change state of device '{TopicId}' from '{_stateAttribute.Value.ToHomieString()}' to '{newState.ToHomieString()}'.");
+            _logger.LogDebug($"Attempting to change state of device '{TopicId}' from '{_stateAttribute.Value.GetString()}' to '{newState.GetString()}'.");
             if (CanChangeState(newState))
             {
                 var oldState = _stateAttribute.Value;
                 _stateAttribute.Value = newState;
 
-                _logger.LogInformation($"Device '{TopicId}' state changed from '{oldState.ToHomieString()}' to '{newState.ToHomieString()}'.");
+                _logger.LogInformation($"Device '{TopicId}' state changed from '{oldState.GetString()}' to '{newState.GetString()}'.");
 
                 OnDeviceStateChange?.Invoke(new DeviceStateChangeEventArgs(this, oldState, newState));
                 return true;
             }
 
-            _logger.LogWarning($"Invalid state transition attempted for device '{TopicId}' from '{_stateAttribute.Value.ToHomieString()}' to '{newState.ToHomieString()}'.");
+            _logger.LogWarning($"Invalid state transition attempted for device '{TopicId}' from '{_stateAttribute.Value.GetString()}' to '{newState.GetString()}'.");
 
             return false;
         }
