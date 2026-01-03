@@ -3,7 +3,7 @@
     internal class Constants
     {
         public const string DeviceTopicId = "room-sensor-office";
-        public const string DeviceName = "Raumsensor Büro";
+        public const string DeviceName = "Raumsensor Buero";
         public const string DeviceType = "Sensor";
         
         public const string NodeSensorTopicId = "sensor";

@@ -5,7 +5,6 @@ using HomieNano.Version4.Properties;
 using HomieNano.Version4.Settings;
 using Microsoft.Extensions.Logging;
 using nanoFramework.Logging;
-using nanoFramework.M2Mqtt;
 using nanoFramework.M2Mqtt.Messages;
 using System;
 using System.Collections;
@@ -19,11 +18,11 @@ namespace HomieNano.Version4
         private readonly HomiePublishSettings _homiePublishSettings;
         private readonly HomieLastWillSettings _homieLastWillSettings;
         private readonly ILogger _logger;
-        private readonly IMqttClient _mqttClient;
+        private readonly IHomieMqttClient _mqttClient;
         private readonly IDictionary _settablePropertiesTable;
 
         public HomieClient(Device device,
-            IMqttClient mqttClient,
+            IHomieMqttClient mqttClient,
             HomieClientSettings? deviceClientSettings = null,
             HomiePublishSettings? homiePublishSettings = null,
             HomieLastWillSettings? homieLastWillSettings = null)
@@ -39,22 +38,23 @@ namespace HomieNano.Version4
 
         public void Connect()
         {
+            _logger.LogDebug("Connect...");
+
             try
             {
                 _device.OnDeviceStateChange += HandleDeviceStateChange;
 
-                _mqttClient.Connect(
-                    _homieClientSettings.ClientId,
-                    _homieClientSettings.UserName,
-                    _homieClientSettings.Password,
-                    _homieLastWillSettings.WillRetain,
-                    _homieLastWillSettings.WillQosLevel,
-                    _homieLastWillSettings.WillFlag,
-                    _homieLastWillSettings.WillTopic,
-                    _homieLastWillSettings.WillMessage,
-                    _homieClientSettings.CleanSession,
-                    _homieClientSettings.KeepAlivePeriod
-                    );
+                if (!_mqttClient.IsConnected)
+                {
+                    ConnectInternal();
+                }
+                else
+                {
+                    _logger.LogInformation("MQTT client is already connected. Continue...");
+                }
+
+                
+                RegisterConnectionChangeHandlers();
 
                 RegisterPropertyUpdateHandlers();
                 SubscribeSettablePropertyTopics();
@@ -71,12 +71,32 @@ namespace HomieNano.Version4
             }
         }
 
+        private void ConnectInternal()
+        {
+            var mqttCode = _mqttClient.Connect(
+                                _homieClientSettings.ClientId,
+                                _homieClientSettings.UserName,
+                                _homieClientSettings.Password,
+                                _homieLastWillSettings.WillRetain,
+                                _homieLastWillSettings.WillQosLevel,
+                                _homieLastWillSettings.WillFlag,
+                                _homieLastWillSettings.WillTopic,
+                                _homieLastWillSettings.WillMessage,
+                                _homieClientSettings.CleanSession,
+                                _homieClientSettings.KeepAlivePeriod
+                                );
+        }
+
         public void Disconnect()
         {
+            _logger.LogDebug("Disconnect...");
+
             if (!_device.TryChangeState(State.Disconnected))
             {
                 _logger.LogError("Failed to disconnect: unable to change device state to 'disconnected'. Disconnected MQTT client anyways.");
             }
+
+            UnregisterConnectionChangeHandlers();
         }
 
         private void DisconnectInternal()
@@ -115,11 +135,18 @@ namespace HomieNano.Version4
 
         private void SubscribeSettablePropertyTopics()
         {
+            _logger.LogDebug("Subscribing to settable property topics...");
+
+            if (_settablePropertiesTable.Count == 0)
+            {
+                _logger.LogDebug("No settable properties found. Skipping MQTT subscribe.");
+                return;
+            }
+
             var topics = new string[_settablePropertiesTable.Count];
             _settablePropertiesTable.Keys.CopyTo(topics, 0);
 
             var qosLevels = new MqttQoSLevel[topics.Length];
-
             for (int i = 0; i < qosLevels.Length; i++)
             {
                 qosLevels[i] = MqttQoSLevel.AtLeastOnce;
@@ -131,6 +158,13 @@ namespace HomieNano.Version4
 
         private void UnsubscribeSettablePropertyTopics()
         {
+            _logger.LogDebug("Unsubscribing from settable property topics...");
+
+            if (_settablePropertiesTable.Count == 0)
+            {
+                return;
+            }
+
             var topics = new string[_settablePropertiesTable.Count];
             _settablePropertiesTable.Keys.CopyTo(topics, 0);
 
@@ -148,10 +182,43 @@ namespace HomieNano.Version4
                 var property = (PropertyBase)_settablePropertiesTable[topic];
                 property.Set(message);
             }
-        }  
+        }
+
+        private void HandleConnectionOpen(object sender, ConnectionOpenedEventArgs e)
+        {
+            _logger.LogInformation("MQTT connection opened handler called.");
+
+            RegisterPropertyUpdateHandlers();
+        }
+
+        private void HandleConnectionClosed(object sender, System.EventArgs e)
+        {
+            _logger.LogInformation("MQTT connection closed handler called.");
+
+            UnregisterPropertyUpdateHandlers();
+        }
+
+        private void RegisterConnectionChangeHandlers()
+        {
+            _logger.LogDebug("Registering connection change handlers...");
+
+            _mqttClient.ConnectionClosed += HandleConnectionClosed;
+            _mqttClient.ConnectionOpened += HandleConnectionOpen;
+        }
+
+
+        private void UnregisterConnectionChangeHandlers()
+        {
+            _logger.LogDebug("Unregistering connection change handlers...");
+
+            _mqttClient.ConnectionClosed -= HandleConnectionClosed;
+            _mqttClient.ConnectionOpened -= HandleConnectionOpen;
+        }
 
         private void RegisterPropertyUpdateHandlers()
         {
+            _logger.LogDebug("Registering property update handlers...");
+
             foreach (var node in _device.Nodes)
             {
                 foreach (var property in node.Properties)
@@ -163,6 +230,8 @@ namespace HomieNano.Version4
 
         private void UnregisterPropertyUpdateHandlers()
         {
+            _logger.LogDebug("Unregistering property update handlers...");
+
             foreach (var node in _device.Nodes)
             {
                 foreach (var property in node.Properties)
@@ -178,6 +247,8 @@ namespace HomieNano.Version4
             var message = args.Value;
             var retained = property.RetainedAttribute.Value;
             string topic = property.GetTopic();
+
+            _logger.LogDebug($"Publishing property update. Topic: {topic}, Retained: {retained}, Message: {System.Text.Encoding.UTF8.GetString(message, 0, message.Length)}");
 
             _mqttClient.PublishHomiePropertyValue(topic, message, _homiePublishSettings.PropertyUpdatePublishSettings, retained, _logger);
         }

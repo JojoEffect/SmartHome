@@ -1,11 +1,12 @@
-﻿using nanoFramework.M2Mqtt;
+﻿using HomieNano.Version4;
+using nanoFramework.M2Mqtt;
 using nanoFramework.M2Mqtt.Messages;
 using System;
 using System.Collections;
 
 namespace NFUnitTest
 {
-    internal class MockMqttClient : IMqttClient
+    internal class MockMqttClient : IHomieMqttClient
     {
         public int PublishCount { get; private set; } = 0;
         public int SubscriptionCount { get; private set; } = 0;
@@ -17,6 +18,7 @@ namespace NFUnitTest
         public event IMqttClient.MqttMsgSubscribedEventHandler MqttMsgSubscribed;
         public event IMqttClient.MqttMsgUnsubscribedEventHandler MqttMsgUnsubscribed;
         public event IMqttClient.ConnectionClosedEventHandler ConnectionClosed;
+        public event MqttClient.ConnectionOpenedEventHandler ConnectionOpened;
 
         public void RaisePublishReceived(MqttMsgPublishEventArgs eventArgs)
         {
@@ -26,6 +28,11 @@ namespace NFUnitTest
         public void Close()
         {
             throw new NotImplementedException();
+        }
+
+        public MqttReasonCode Connect(string clientId)
+        {
+            return MqttReasonCode.Success;
         }
 
         public MqttReasonCode Connect(string clientId, string username, string password, bool willRetain, MqttQoSLevel willQosLevel, bool willFlag, string willTopic, string willMessage, bool cleanSession, ushort keepAlivePeriod)

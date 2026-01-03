@@ -7,14 +7,12 @@ namespace HomieNano.Version4.Settings
     {
         public string ClientId { get; set; } = Guid.NewGuid().ToString();
 
-        public string UserName { get; set; } = string.Empty;
+        public string? UserName { get; set; } = null;
 
-        public string Password { get; set; } = string.Empty;
+        public string? Password { get; set; } = null;
 
-        public bool CleanSession { get; set; } = false;
+        public bool CleanSession { get; set; } = true;
 
-        public ushort KeepAlivePeriod {  get; set; } = ushort.MaxValue;
-
-        public MqttQoSLevel SettablePropertySubscriptionQosLevel { get; set; } = MqttQoSLevel.AtLeastOnce;
+        public ushort KeepAlivePeriod {  get; set; } = 10;
     }
 }

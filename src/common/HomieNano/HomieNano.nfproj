@@ -25,6 +25,8 @@
     <Compile Include="Version4\EventArgs\DeviceStateChangeEventArgs.cs" />
     <Compile Include="Version4\Extensions\UnitExtensions.cs" />
     <Compile Include="Version4\HomieClient.cs" />
+    <Compile Include="Version4\HomieMqttClient.cs" />
+    <Compile Include="Version4\IHomieMqttClient.cs" />
     <Compile Include="Version4\Settings\HomieClientSettings.cs" />
     <Compile Include="Version4\Builder\HomieBooleanPropertyBuilder.cs" />
     <Compile Include="Version4\Builder\HomieDeviceBuilder.cs" />
