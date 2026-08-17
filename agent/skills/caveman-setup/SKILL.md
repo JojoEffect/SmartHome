@@ -1,4 +1,5 @@
 ---
+name: caveman-setup
 description: "Wire the current repository through the Caveman Cloud gateway so every LLM request is measured — cost, tokens, latency — with zero behavior change. Use when the user pastes the Caveman setup prompt, says \"set up caveman\", or wants LLM spend observability added to an app. Requires the gateway URL and a Cave API key (the setup prompt carries both).\n"
 ---
 You are wiring this repository through the Caveman gateway. Caveman is a

@@ -1,4 +1,5 @@
 ---
+name: safe-refactor
 description: "Restructure code while preserving behavior. Use for extraction, consolidation, ownership moves, or cleanup where verification must bracket structural edits."
 ---
 # Safe refactor

@@ -1,4 +1,5 @@
 ---
+name: migration
 description: "Implement reversible compatibility-safe transitions. Use for schema, data, API, protocol, configuration, or dependency migrations requiring rollback and preservation proof."
 ---
 # Migration
