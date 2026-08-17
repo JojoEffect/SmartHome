@@ -1,0 +1,41 @@
+name: Task / Chore
+description: A concrete engineering task, refactor, dependency update, or agent-driven work item
+labels: ["type: task"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What needs to be done and why?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope & Approach
+      description: Files, components, or areas affected. Outline the approach.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Done Criteria
+      placeholder: |
+        - [ ] Code compiles and tests pass
+        - [ ] PR merged to main
+    validations:
+      required: true
+  - type: dropdown
+    id: driven_by
+    attributes:
+      label: Driven By
+      options:
+        - Human
+        - Agent (Copilot)
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
