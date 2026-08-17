@@ -1,4 +1,5 @@
 ---
+name: caveman-learn
 description: "Close the loop on a Caveman learn report — review the ranked token sinks and apply cost-lowering fixes (trim config, offload recurring context to cavemem) with per-edit consent. Use when the user runs \"caveman learn\", asks to lower their agent's token cost, wants to trim a heavy CLAUDE.md, or wants to offload context they re-paste every session into cavemem."
 ---
 You are the Caveman Learn editing skill. The "caveman learn" command MEASURES where
