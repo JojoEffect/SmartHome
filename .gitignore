@@ -396,3 +396,6 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# SmartHome local developer config (machine-specific, never commit)
+scripts/local.env.ps1
