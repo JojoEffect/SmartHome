@@ -6,6 +6,7 @@ Usage:
     python scripts/compress.py <filepath>
 """
 
+import hashlib
 import os
 import re
 import shutil
@@ -78,9 +79,12 @@ def backup_dir_for(filepath: Path) -> Path:
       - else:    $XDG_DATA_HOME/caveman-compress/backups if set,
                  else ~/.local/share/caveman-compress/backups
 
-    The source file's parent-dir name is mirrored under the base to reduce
-    cross-project collisions (e.g. two `task.md` files in different repos).
+    The source file's parent-dir name is mirrored under the base, plus a short
+    hash of the full resolved parent path, so same-named folders in different
+    repos do not collide.
     """
+    filepath = filepath.resolve()
+
     if os.name == "nt" or sys.platform == "win32":
         local_appdata = os.environ.get("LOCALAPPDATA")
         base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
@@ -89,7 +93,11 @@ def backup_dir_for(filepath: Path) -> Path:
         xdg = os.environ.get("XDG_DATA_HOME")
         base = Path(xdg) if xdg else Path.home() / ".local" / "share"
         base = base / "caveman-compress" / "backups"
-    return base / filepath.parent.name
+    parent_name = filepath.parent.name or "_root"
+    parent_hash = hashlib.sha256(
+        str(filepath.parent).encode("utf-8")
+    ).hexdigest()[:12]
+    return base / parent_name / parent_hash
 
 
 def is_sensitive_path(filepath: Path) -> bool:
@@ -304,7 +312,8 @@ def compress_file(filepath: Path) -> bool:
     original_text = filepath.read_text(encoding="utf-8", errors="ignore")
     # Store backup outside the source directory so skill auto-loaders don't
     # re-ingest the `.original.md` copy as a live file. Mirror the source's
-    # parent-dir name + stem under a platform-aware base to reduce collisions.
+    # parent-dir name + a hash of its full parent path under a platform-aware
+    # base to avoid cross-project collisions.
     backup_dir = backup_dir_for(filepath)
     backup_path = backup_dir / (filepath.stem + ".original.md")
 
