@@ -1,0 +1,17 @@
+# GitHub Copilot App Configuration
+# Reference: https://docs.github.com/copilot/reference/github-copilot-app-reference/repository-configuration
+
+instructions: |
+  This is a single-developer IoT / SmartHome project written in C# targeting ESP32 (nanoFramework) and similar embedded hardware.
+  The primary protocol integration is MQTT using the Homie v4 convention.
+  When working on this repo:
+  - Prefer small, focused commits with descriptive messages referencing the related GitHub Issue (e.g. "feat: add reconnect logic (#12)").
+  - Every non-trivial change should be on a feature branch and merged via PR.
+  - Agent-driven branches should use the prefix "copilot/".
+  - Prefer async/await patterns where the runtime supports them.
+  - Do not add third-party packages without justification in the PR description.
+
+automation:
+  auto_issue_session: true
+  remote_control: true
+

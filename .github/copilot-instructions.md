@@ -14,15 +14,15 @@ The local agent workflow is built around:
 
 ```text
 src/
-  common/HomieNano/       # Shared Homie v4 client library (nanoFramework)
-  devices/
-    RoomSensor/           # Primary device: temperature/humidity/pressure via BMP280
-    IrrigationControl/
-    OvenControl/
-    Test/
-  tests/
-    NFUnitTest/
-    TestRunner/
+common/HomieNano/       # Shared Homie v4 client library (nanoFramework)
+devices/
+   RoomSensor/           # Primary device: temperature/humidity/pressure via BMP280
+   IrrigationControl/
+   OvenControl/
+   Test/
+tests/
+   NFUnitTest/
+   TestRunner/
 Utils/                    # Shared utilities
 scripts/                  # Dev-environment and agent helper scripts
 SmartHome.sln
@@ -33,10 +33,10 @@ SmartHome.sln
 ## First-time local setup
 
 1. Copy the machine-local config files:
-   ```powershell
-   Copy-Item scripts\local.env.template.ps1 scripts\local.env.ps1
-   Copy-Item scripts\nanoFramework.local.env.template.ps1 scripts\nanoFramework.local.env.ps1
-   ```
+ ```powershell
+ Copy-Item scripts\local.env.template.ps1 scripts\local.env.ps1
+ Copy-Item scripts\nanoFramework.local.env.template.ps1 scripts\nanoFramework.local.env.ps1
+ ```
 
 2. Edit `scripts\local.env.ps1`:
    - `SMARTHOME_COM_PORT`
@@ -139,10 +139,10 @@ These should be cloned **beside** `SmartHome` and kept up to date by `.\scripts\
 ### Version-alignment policy
 
 - This repo currently references package baselines such as:
-  - `nanoFramework.CoreLibrary` `1.17.11`
-  - `nanoFramework.Hardware.Esp32` `1.6.37`
-  - `nanoFramework.Logging` `1.1.161`
-  - `nanoFramework.M2Mqtt` `5.1.206`
+- `nanoFramework.CoreLibrary` `1.17.11`
+- `nanoFramework.Hardware.Esp32` `1.6.37`
+- `nanoFramework.Logging` `1.1.161`
+- `nanoFramework.M2Mqtt` `5.1.206`
 - Companion repos should default to the configured branch in `scripts\nanoFramework.local.env.ps1`.
 - If you adopt a tagged release workflow later, update the sync script/config to target matching release branches or tags.
 
@@ -165,8 +165,8 @@ For embedded AI-agent integration, the important pieces are:
 - Register them with `SkillRegistry.DiscoverSkills(...)`
 - Host `SkillDiscoveryController`
 - Discover with:
-  - `GET /.well-known/agent-card.json`
-  - `POST /skills/invoke`
+- `GET /.well-known/agent-card.json`
+- `POST /skills/invoke`
 
 ### MCP
 
@@ -253,3 +253,22 @@ If this repo grows more agent-driven device work, good candidates for future scr
 - RoomSensor skills/MCP sample scaffolding
 - test-runner deploy shortcuts
 - package-version/report generation against sibling nanoFramework repos
+
+## Response style
+
+Respond terse like smart caveman. All technical substance stay. Only fluff die.
+
+Rules:
+- Drop: articles (a/an/the), filler (just/really/basically), pleasantries, hedging
+- Fragments OK. Short synonyms. Technical terms exact. Code unchanged.
+- Pattern: [thing] [action] [reason]. [next step].
+- Not: "Sure! I'd be happy to help you with that."
+- Yes: "Bug in auth middleware. Fix:"
+
+Switch level: /caveman lite|full|ultra|wenyan-lite|wenyan-full|wenyan-ultra
+Stop: "stop caveman" or "normal mode"
+
+Auto-Clarity: drop caveman for security warnings, irreversible actions, user confused. Resume after.
+
+Boundaries: code/commits/PRs written normal.
+
