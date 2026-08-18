@@ -22,60 +22,42 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# ── Locate the repo root (one level up from the scripts folder) ──────────────
-$repoRoot   = Split-Path $PSScriptRoot -Parent
-$localEnv   = Join-Path $PSScriptRoot 'local.env.ps1'
-$template   = Join-Path $PSScriptRoot 'local.env.template.ps1'
+. (Join-Path $PSScriptRoot 'Common.ps1')
+Import-SmartHomeLocalEnv
 
-if (-not (Test-Path $localEnv)) {
-    Write-Error @"
-Missing: $localEnv
-Copy the template and fill in your machine settings:
-    Copy-Item "$template" "$localEnv"
-Then edit local.env.ps1 before running this script.
-"@
-    exit 1
-}
+$mosquittoDir = Get-RequiredEnvValue -Name 'SMARTHOME_MOSQUITTO_DIR'
+$mqttBroker = Get-OptionalEnvValue -Name 'SMARTHOME_MQTT_BROKER' -DefaultValue 'localhost'
+$mqttPort = Get-OptionalEnvValue -Name 'SMARTHOME_MQTT_PORT' -DefaultValue '1883'
+$mosquittoExe = Join-Path $mosquittoDir 'mosquitto.exe'
+$mosquittoSub = Join-Path $mosquittoDir 'mosquitto_sub.exe'
 
-. $localEnv   # dot-source to populate env vars
-
-$mosquittoDir  = $env:SMARTHOME_MOSQUITTO_DIR
-$mqttBroker    = if ($env:SMARTHOME_MQTT_BROKER) { $env:SMARTHOME_MQTT_BROKER } else { 'localhost' }
-$mqttPort      = if ($env:SMARTHOME_MQTT_PORT)   { $env:SMARTHOME_MQTT_PORT }   else { '1883' }
-$mosquittoExe  = Join-Path $mosquittoDir 'mosquitto.exe'
-$mosquittoSub  = Join-Path $mosquittoDir 'mosquitto_sub.exe'
-
-foreach ($exe in $mosquittoExe, $mosquittoSub) {
+foreach ($exe in @($mosquittoExe, $mosquittoSub)) {
     if (-not (Test-Path $exe)) {
-        Write-Error "Not found: $exe`nCheck SMARTHOME_MOSQUITTO_DIR in local.env.ps1."
+        Write-Error ("Not found: {0}`nCheck SMARTHOME_MOSQUITTO_DIR in local.env.ps1." -f $exe)
         exit 1
     }
 }
 
-# ── Start Mosquitto broker ───────────────────────────────────────────────────
-Write-Host "Starting Mosquitto broker on port $mqttPort ..." -ForegroundColor Cyan
+Write-Host ("Starting Mosquitto broker on port {0} ..." -f $mqttPort) -ForegroundColor Cyan
 $mosquittoArgs = @('-p', $mqttPort, '-v')
 $broker = Start-Process -FilePath $mosquittoExe `
                         -ArgumentList $mosquittoArgs `
                         -PassThru `
                         -WindowStyle Minimized
-Write-Host "  Broker PID: $($broker.Id)" -ForegroundColor Green
+Write-Host ("  Broker PID: {0}" -f $broker.Id) -ForegroundColor Green
 
-# Give it a moment to bind the port
 Start-Sleep -Seconds 2
 
-# ── Subscribe to all Homie topics ────────────────────────────────────────────
 Write-Host ""
-Write-Host "Subscribing to homie/# on $mqttBroker:$mqttPort  (Ctrl+C to stop)" -ForegroundColor Cyan
-Write-Host "─────────────────────────────────────────────────────────────────────"
+Write-Host ("Subscribing to homie/# on {0}:{1}  (Ctrl+C to stop)" -f $mqttBroker, $mqttPort) -ForegroundColor Cyan
+Write-Host ('-' * 69)
 
 try {
     & $mosquittoSub -h $mqttBroker -p $mqttPort -t 'homie/#' -v
 }
 finally {
-    # Clean up the broker when the user exits the subscriber
     if (-not $broker.HasExited) {
-        Write-Host "`nStopping Mosquitto (PID $($broker.Id))..." -ForegroundColor Yellow
+        Write-Host ("`nStopping Mosquitto (PID {0})..." -f $broker.Id) -ForegroundColor Yellow
         Stop-Process -Id $broker.Id -Force
     }
 }

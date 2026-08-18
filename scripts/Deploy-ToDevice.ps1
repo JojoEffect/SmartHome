@@ -38,23 +38,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# ── Config ────────────────────────────────────────────────────────────────────
-$repoRoot    = Split-Path $PSScriptRoot -Parent
-$localEnv    = Join-Path $PSScriptRoot 'local.env.ps1'
-$template    = Join-Path $PSScriptRoot 'local.env.template.ps1'
+. (Join-Path $PSScriptRoot 'Common.ps1')
+Import-SmartHomeLocalEnv
 
-if (-not (Test-Path $localEnv)) {
-    Write-Error @"
-Missing: $localEnv
-Copy the template and fill in your machine settings:
-    Copy-Item "$template" "$localEnv"
-"@
-    exit 1
-}
-
-. $localEnv
-
-$comPort     = $env:SMARTHOME_COM_PORT
+$repoRoot    = Get-SmartHomeRepoRoot
+$comPort     = Get-RequiredEnvValue -Name 'SMARTHOME_COM_PORT'
 $projectPath = Join-Path $repoRoot $Project
 
 if (-not (Test-Path $projectPath)) {
@@ -63,14 +51,7 @@ if (-not (Test-Path $projectPath)) {
 }
 
 # ── Locate MSBuild ────────────────────────────────────────────────────────────
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$msbuild = if (Test-Path $vswhere) {
-    & $vswhere -latest -requires Microsoft.Component.MSBuild `
-               -find 'MSBuild\**\Bin\MSBuild.exe' 2>$null |
-    Select-Object -First 1
-} else { $null }
-
-if (-not $msbuild) { $msbuild = 'msbuild' }   # fall back to PATH
+$msbuild = Get-MSBuildPath
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 Write-Host "Building $Project ($Configuration)..." -ForegroundColor Cyan
