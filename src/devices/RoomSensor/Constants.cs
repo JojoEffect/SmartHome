@@ -8,7 +8,7 @@
         
         public const string NodeSensorTopicId = "sensor";
         public const string NodeSensorName = "Sensor";
-        public const string NodeSensorType = "BMP260";
+        public const string NodeSensorType = "BMP280";
 
         public const string PropertyTemperatureTopicId = "temperature";
         public const string PropertyTemperatureName = "Temperatur";
