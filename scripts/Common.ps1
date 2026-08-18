@@ -115,6 +115,9 @@ function Invoke-GitCloneOrUpdate {
         git clone --branch $Branch --single-branch $repoUrl $targetPath
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Branch '$Branch' not found for $Repository. Falling back to default branch."
+            if (Test-Path $targetPath) {
+                Remove-Item $targetPath -Recurse -Force
+            }
             git clone $repoUrl $targetPath
         }
         if ($LASTEXITCODE -ne 0) {
@@ -134,6 +137,11 @@ function Invoke-GitCloneOrUpdate {
     git -C $targetPath checkout $Branch
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Branch '$Branch' not found in $Repository. Keeping repository on its current/default branch."
+        git -C $targetPath pull --ff-only
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to pull $Repository"
+            exit $LASTEXITCODE
+        }
         return
     }
 
