@@ -16,7 +16,7 @@ The local agent workflow is built around:
 src/
   common/HomieNano/       # Shared Homie v4 client library (nanoFramework)
   devices/
-    RoomSensor/           # Primary device: temperature/humidity/pressure via BMP260
+    RoomSensor/           # Primary device: temperature/humidity/pressure via BMP280
     IrrigationControl/
     OvenControl/
     Test/
@@ -233,7 +233,7 @@ Current script set:
 | Device Homie ID | `room-sensor-office` |
 | MQTT broker in code | `192.168.1.240` in `Program.cs` |
 | Sensor node | `sensor` |
-| Sensor type | `BMP260` |
+| Sensor type | `BMP280` |
 | Properties | `temperature`, `humidity`, `pressure` |
 | Update interval | `5000 ms` |
 
