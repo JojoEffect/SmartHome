@@ -16,7 +16,7 @@ The local agent workflow is built around:
 src/
   common/HomieNano/       # Shared Homie v4 client library (nanoFramework)
   devices/
-    RoomSensor/           # Primary device: temperature/humidity/pressure via BMP280
+    RoomSensor/           # Primary device: temperature/humidity/pressure via BMP260
     IrrigationControl/
     OvenControl/
     Test/

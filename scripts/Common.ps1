@@ -89,6 +89,11 @@ function Get-MSBuildPath {
 }
 
 function Get-SiblingRoot {
+    $override = [Environment]::GetEnvironmentVariable('SMARTHOME_NANOFW_ROOT')
+    if (-not [string]::IsNullOrWhiteSpace($override)) {
+        return $override
+    }
+
     return (Split-Path (Get-SmartHomeRepoRoot) -Parent)
 }
 
