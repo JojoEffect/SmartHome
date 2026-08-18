@@ -114,6 +114,10 @@ function Invoke-GitCloneOrUpdate {
         Write-Host "Cloning $Repository..." -ForegroundColor Cyan
         git clone --branch $Branch --single-branch $repoUrl $targetPath
         if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Branch '$Branch' not found for $Repository. Falling back to default branch."
+            git clone $repoUrl $targetPath
+        }
+        if ($LASTEXITCODE -ne 0) {
             Write-Error "Failed to clone $Repository"
             exit $LASTEXITCODE
         }
@@ -129,8 +133,8 @@ function Invoke-GitCloneOrUpdate {
 
     git -C $targetPath checkout $Branch
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to checkout $Branch in $Repository"
-        exit $LASTEXITCODE
+        Write-Warning "Branch '$Branch' not found in $Repository. Keeping repository on its current/default branch."
+        return
     }
 
     git -C $targetPath pull --ff-only origin $Branch
