@@ -21,7 +21,9 @@ Modes:
   /caveman              full (default)
   /caveman lite         lighter
   /caveman ultra        extreme
-  /caveman wenyan       classical Chinese
+  /caveman wenyan-lite  classical Chinese, light
+  /caveman wenyan-full  full classical Chinese
+  /caveman wenyan-ultra maximum classical compression
 
 Skills:
   /caveman-commit       terse Conventional Commits
