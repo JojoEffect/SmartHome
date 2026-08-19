@@ -49,11 +49,11 @@ Write-Host ("  Broker PID: {0}" -f $broker.Id) -ForegroundColor Green
 Start-Sleep -Seconds 2
 
 Write-Host ""
-Write-Host ("Subscribing to homie/# on {0}:{1}  (Ctrl+C to stop)" -f $mqttBroker, $mqttPort) -ForegroundColor Cyan
+Write-Host ("Subscribing to homie/# on localhost:{0}  (Ctrl+C to stop)" -f $mqttPort) -ForegroundColor Cyan
 Write-Host ('-' * 69)
 
 try {
-    & $mosquittoSub -h $mqttBroker -p $mqttPort -t 'homie/#' -v
+    & $mosquittoSub -h 'localhost' -p $mqttPort -t 'homie/#' -v
 }
 finally {
     if (-not $broker.HasExited) {

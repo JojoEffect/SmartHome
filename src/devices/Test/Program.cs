@@ -13,7 +13,6 @@ using nanoFramework.Hardware.Esp32;
 using System.Device.I2c;
 using Iot.Device.Bmxx80;
 using Iot.Device.Common;
-using UnitsNet;
 using Iot.Device.Bmxx80.FilteringMode;
 
 
@@ -51,7 +50,7 @@ namespace Test
             // bus id on the MCU
             const int busId = 1;
             // set this to the current sea level pressure in the area for correct altitude readings
-            Pressure defaultSeaLevelPressure = WeatherHelper.MeanSeaLevel;
+            UnitsNet.Pressure defaultSeaLevelPressure = WeatherHelper.MeanSeaLevel;
 
             I2cConnectionSettings i2cSettings = new(busId, Bme280.SecondaryI2cAddress);
             using I2cDevice i2cDevice = I2cDevice.Create(i2cSettings);

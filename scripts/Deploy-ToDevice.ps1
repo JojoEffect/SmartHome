@@ -65,6 +65,7 @@ Write-Host "  Build succeeded." -ForegroundColor Green
 # ── Locate build output ───────────────────────────────────────────────────────
 $projectDir = Split-Path $projectPath -Parent
 $binDir     = Join-Path $projectDir "bin\$Configuration"
+$projectName = [System.IO.Path]::GetFileNameWithoutExtension($projectPath)
 
 if (-not (Test-Path $binDir)) {
     Write-Error "Build output directory not found: $binDir"
@@ -85,7 +86,13 @@ Then restart this shell so the new PATH takes effect.
     exit 1
 }
 
-nanoff --deploy --serialport $comPort --binfile "$binDir"
+$deployImage = Join-Path $binDir ($projectName + '.bin')
+if (-not (Test-Path $deployImage)) {
+    Write-Error "Deploy image not found: $deployImage"
+    exit 1
+}
+
+nanoff --deploy --serialport $comPort --image "$deployImage"
 if ($LASTEXITCODE -ne 0) {
     Write-Error "nanoff deploy failed (exit code $LASTEXITCODE)."
     exit $LASTEXITCODE

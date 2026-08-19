@@ -10,6 +10,7 @@ using System.Device.Wifi;
 using System.Diagnostics;
 using System.Net.NetworkInformation;
 using System.Threading;
+using nanoFramework.M2Mqtt.Exceptions;
 
 namespace RoomSensor
 {
@@ -33,7 +34,7 @@ namespace RoomSensor
 
                 var device = SetupHomieDevice();
                 var mqttClient = SetupMqttClient();
-                mqttClient.Connect(Constants.DeviceName);
+                ConnectMqttWithRetry(mqttClient, Constants.DeviceName);
                 var homieClient = new HomieClient(device, mqttClient);
 
                 homieClient.Connect();
@@ -76,9 +77,36 @@ namespace RoomSensor
 
         public static IHomieMqttClient SetupMqttClient()
         {
-            var mqttClient = new HomieMqttClient("192.168.1.240");
+            var mqttClient = new HomieMqttClient("192.168.1.238");
             return mqttClient;
 
+        }
+
+        private static void ConnectMqttWithRetry(IHomieMqttClient mqttClient, string clientId)
+        {
+            const int maxAttempts = 10;
+            const int retryDelayMs = 3000;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    _logger.LogDebug($"Connecting MQTT to broker (attempt {attempt}/{maxAttempts})...");
+                    mqttClient.Connect(clientId);
+                    _logger.LogInformation("MQTT connected.");
+                    return;
+                }
+                catch (MqttConnectionException ex)
+                {
+                    _logger.LogWarning(ex, $"MQTT connect failed (attempt {attempt}/{maxAttempts}).");
+                    if (attempt == maxAttempts)
+                    {
+                        throw;
+                    }
+
+                    Thread.Sleep(retryDelayMs);
+                }
+            }
         }
 
         /// <summary>
@@ -127,6 +155,7 @@ namespace RoomSensor
 
             ipAddress = NetworkInterface.GetAllNetworkInterfaces()[0].IPv4Address;
             Debug.WriteLine($"Connected to Wifi network with IP address {ipAddress}");
+            Thread.Sleep(3000);
         }
     }
 }
