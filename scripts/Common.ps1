@@ -88,6 +88,35 @@ function Get-MSBuildPath {
     return 'msbuild'
 }
 
+function Get-VsTestPath {
+    $vswhere = Get-VsWherePath
+    if ($vswhere) {
+        $vstest = & $vswhere -latest -requires Microsoft.VisualStudio.Component.ManagedDesktop.Core -find 'Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe' 2>$null | Select-Object -First 1
+        if ($vstest) {
+            return $vstest
+        }
+    }
+
+    return 'vstest.console'
+}
+
+function Get-NanoFrameworkTestAdapterDir {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $packagesDir = Join-Path $RepoRoot 'packages'
+    $adapterDll = Get-ChildItem -Path $packagesDir -Recurse -Filter 'nanoFramework.TestAdapter.dll' -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending | Select-Object -First 1
+
+    if (-not $adapterDll) {
+        return $null
+    }
+
+    return $adapterDll.DirectoryName
+}
+
 function Get-SiblingRoot {
     $override = [Environment]::GetEnvironmentVariable('SMARTHOME_NANOFW_ROOT')
     if (-not [string]::IsNullOrWhiteSpace($override)) {
