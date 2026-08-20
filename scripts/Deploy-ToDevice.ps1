@@ -153,3 +153,6 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 Write-Host "Deploy complete!  Device is rebooting on $comPort." -ForegroundColor Green
 Write-Host "Run .\scripts\Start-DevEnv.ps1 to watch MQTT output." -ForegroundColor Cyan
+
+# Explicit success code: Run-IntegrationTests.ps1 checks $LASTEXITCODE after each deploy.
+exit 0

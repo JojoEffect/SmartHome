@@ -95,3 +95,8 @@ Manager, which populates the cache this script reads from -- then re-run this sc
 }
 
 Write-Host "All referenced packages are available." -ForegroundColor Green
+
+# Explicit success code: callers (and Run-IntegrationTests.ps1 / Start-DevEnv.ps1) read
+# $LASTEXITCODE after invoking this script, and without this it would carry whatever the
+# last native command happened to leave behind.
+exit 0

@@ -92,3 +92,6 @@ try {
 finally {
     $port.Close()
 }
+
+# Explicit success code -- see the note in Sync-NanoFrameworkRepos.ps1.
+exit 0

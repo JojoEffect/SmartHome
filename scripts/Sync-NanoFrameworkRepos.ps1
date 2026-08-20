@@ -49,3 +49,7 @@ foreach ($repository in $repositories) {
 
 Write-Host ""
 Write-Host "nanoFramework companion repositories are ready." -ForegroundColor Green
+
+# Explicit success code: Start-DevEnv.ps1 checks $LASTEXITCODE right after calling this
+# script, and a stray non-zero from the last git invocation would abort it for no reason.
+exit 0

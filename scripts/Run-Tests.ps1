@@ -115,3 +115,6 @@ if ($testExit -ne 0) {
 
 Write-Host ""
 Write-Host "Tests passed." -ForegroundColor Green
+
+# Explicit success code -- see the note in Sync-NanoFrameworkRepos.ps1.
+exit 0
