@@ -123,7 +123,30 @@ function Get-SiblingRoot {
         return $override
     }
 
-    return (Split-Path (Get-SmartHomeRepoRoot) -Parent)
+    # Companion repos belong beside the *main* SmartHome checkout, not beside
+    # whatever directory this script happens to run from. Inside a linked git
+    # worktree (.claude\worktrees\<name>) the plain parent directory would be the
+    # worktrees folder, which would clone 14 nanoFramework repos into it and hide
+    # the siblings the main checkout already has. Resolve the main working tree via
+    # git's common dir instead; fall back to the plain parent when git can't answer
+    # (no git on PATH, not a repo, an exported source tree).
+    $repoRoot = Get-SmartHomeRepoRoot
+
+    $commonDir = git -C $repoRoot rev-parse --git-common-dir 2>$null
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($commonDir)) {
+        if (-not [System.IO.Path]::IsPathRooted($commonDir)) {
+            $commonDir = Join-Path $repoRoot $commonDir
+        }
+
+        $resolved = Resolve-Path -Path $commonDir -ErrorAction SilentlyContinue
+        if ($resolved) {
+            # <main repo>\.git  ->  <main repo>  ->  the directory holding it
+            $mainRepoRoot = Split-Path $resolved.Path -Parent
+            return (Split-Path $mainRepoRoot -Parent)
+        }
+    }
+
+    return (Split-Path $repoRoot -Parent)
 }
 
 function Invoke-GitCloneOrUpdate {
@@ -194,4 +217,65 @@ function Invoke-GitCloneOrUpdate {
         Write-Error "Failed to pull $Repository"
         exit $LASTEXITCODE
     }
+}
+
+# ── Dev-environment state ─────────────────────────────────────────────────────
+# Start-DevEnv.ps1 records the PIDs it spawned so Stop-DevEnv.ps1 (or the
+# integration-test runner) can shut them down from a different shell. Keyed by
+# MQTT port so two ports can be up at once without clobbering each other.
+
+function Get-SmartHomeDevEnvStateFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Port
+    )
+
+    return (Join-Path ([System.IO.Path]::GetTempPath()) "smarthome-devenv-$Port.json")
+}
+
+function Save-SmartHomeDevEnvState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Port,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State
+    )
+
+    # Deliberately returns nothing: callers only care that the state landed, and a
+    # returned path would leak into their own output stream.
+    $stateFile = Get-SmartHomeDevEnvStateFile -Port $Port
+    $State | ConvertTo-Json | Set-Content -Path $stateFile -Encoding utf8
+}
+
+function Get-SmartHomeDevEnvState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Port
+    )
+
+    $stateFile = Get-SmartHomeDevEnvStateFile -Port $Port
+    if (-not (Test-Path $stateFile)) {
+        return $null
+    }
+
+    try {
+        return (Get-Content $stateFile -Raw | ConvertFrom-Json)
+    }
+    catch {
+        # A truncated/corrupt state file must not wedge Stop-DevEnv.ps1 -- drop it
+        # and report "nothing running" rather than throwing.
+        Write-Warning "Ignoring unreadable dev-env state file: $stateFile"
+        Remove-Item -Path $stateFile -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+}
+
+function Clear-SmartHomeDevEnvState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Port
+    )
+
+    Remove-Item -Path (Get-SmartHomeDevEnvStateFile -Port $Port) -Force -ErrorAction SilentlyContinue
 }

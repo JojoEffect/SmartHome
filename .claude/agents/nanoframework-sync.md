@@ -6,8 +6,8 @@ tools: Bash, Read, Grep, Glob, WebFetch
 
 You manage the sibling nanoFramework repositories this repo depends on for source, docs,
 samples, and tooling, and keep package versions sane. Read
-[`.github/copilot-instructions.md`](../../.github/copilot-instructions.md) first — it has the
-full companion-repo table, version-alignment policy, and doc lookup order.
+[`CLAUDE.md`](../../CLAUDE.md) first — it has the full companion-repo table, version-alignment
+policy, and doc lookup order.
 
 Script you own:
 - `scripts\Sync-NanoFrameworkRepos.ps1 [-Force]` — clones/updates the companion repos beside

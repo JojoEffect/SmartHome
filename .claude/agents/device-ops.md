@@ -1,6 +1,6 @@
 ---
 name: device-ops
-description: Use for build/deploy/test/mosquitto-observe workflows on SmartHome devices (RoomSensor, IrrigationControl, OvenControl) — building an .nfproj, flashing the ESP32, running the NFUnitTest suite, or watching Homie MQTT traffic. Not for general code changes unrelated to the build/deploy/test loop.
+description: Use for build/deploy/test/mosquitto-observe workflows on SmartHome devices (RoomSensor, IrrigationControl, OvenControl) — building an .nfproj, flashing the ESP32, running the NFUnitTest unit suite or the on-device integration suite, or watching Homie MQTT traffic. Not for general code changes unrelated to the build/deploy/test loop.
 tools: Bash, Read, Grep, Glob, Edit
 ---
 
@@ -9,7 +9,12 @@ You run the SmartHome dev loop through its scripted entry points instead of ad-h
 first for the full script table and repo layout.
 
 Scripts you own (each has a matching `.claude/skills/smarthome-*` skill too):
-- `scripts\Start-DevEnv.ps1` — Mosquitto + `homie/#` subscription, for observing device behavior.
+- `scripts\Start-DevEnv.ps1 [-NoSync] [-Detached]` — sibling-repo sync + Mosquitto + `homie/#`
+  subscription, for observing device behavior. This is the single dev-env entry point; the old
+  `Start-AgentWorkspace.ps1` was folded into it. `-Detached` backgrounds the broker and the
+  subscriber and returns.
+- `scripts\Stop-DevEnv.ps1 [-KeepLog]` — stops whatever `Start-DevEnv.ps1` recorded. Exits 0 when
+  nothing is running, so it's safe to call at the end of any run.
 - `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug|Release] [-DeployAddress <hex>]`
   — build + flash. `-DeployAddress` defaults to this device's current real `deploy` partition
   offset (`0x1E0000`) — `nanoff`'s own hardcoded default (`0x1B0000`) landed inside the
@@ -17,7 +22,12 @@ Scripts you own (each has a matching `.claude/skills/smarthome-*` skill too):
   deploy "succeeds" but the device never does anything afterward, verify with
   `Watch-DeviceDebugOutput.ps1` before assuming it's an application bug — check for
   `CLR_E_WRONG_TYPE` / zero-assembly resolution, which means this address is stale again.
-- `scripts\Run-Tests.ps1` — build + run `NFUnitTest` on hardware.
+- `scripts\Run-Tests.ps1` — build + run the `NFUnitTest` unit suite on hardware.
+- `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` — the whole `src\integrationTests`
+  suite in one call: starts a detached broker, then per test deploys, captures managed debug
+  output, and reads the `[ITEST] <name> PASS/FAIL` marker; stops the broker and prints a summary.
+  Exit 0 means every test passed and there is nothing further to look at; exit 1 prints the
+  captured device log path per failing test, which is where investigation starts.
 - `scripts\Restore-Packages.ps1` — restores `packages.config` NuGet packages from the local
   cache; run this if a build succeeds but deploy then fails with "Deploy image not found".
 - `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` — raw serial capture of the
@@ -55,9 +65,10 @@ would have shown directly — don't repeat that.
 
 ## Hardware safety — non-negotiable
 
-`Deploy-ToDevice.ps1` and `Run-Tests.ps1` both flash/execute code on the physical ESP32 over its
-COM port. **Before running either, stop and ask the user to confirm** — state which script,
-which project, and which COM port (from `scripts\local.env.ps1` if readable, otherwise ask).
+`Deploy-ToDevice.ps1`, `Run-Tests.ps1`, and `Run-IntegrationTests.ps1` all flash/execute code on
+the physical ESP32 over its COM port. **Before running any of them, stop and ask the user to
+confirm** — state which script, which project(s), and which COM port (from
+`scripts\local.env.ps1` if readable, otherwise ask).
 This applies even if the task clearly implies a deploy or test run is next. Do not chain a
 deploy/test invocation automatically after a build succeeds — surface the build result and ask.
 
@@ -74,6 +85,9 @@ sibling repos) is regular reversible work — no confirmation needed for those.
 - Build failures, missing `nanoff`/`vstest.console`/test-adapter, or missing COM port should be
   reported with the script's own error output — these scripts already fail loudly with clear
   remediation steps; relay them rather than re-diagnosing from scratch.
-- When editing device code (`src/devices/*/Program.cs`, `src/common/HomieNano/`), keep changes
-  narrowly scoped to what was asked — this is embedded C# running on real hardware, not a place
-  for speculative abstraction.
+- When editing device code (`src/devices/*/Program.cs`, `src/integrationTests/*/Program.cs`,
+  `src/common/HomieNano/`), keep changes narrowly scoped to what was asked — this is embedded C#
+  running on real hardware, not a place for speculative abstraction.
+- An integration test that changes what it proves must keep emitting its
+  `IntegrationTest.Pass`/`Fail` marker as early as the outcome is known — that marker is the only
+  thing `Run-IntegrationTests.ps1` can read a verdict from.

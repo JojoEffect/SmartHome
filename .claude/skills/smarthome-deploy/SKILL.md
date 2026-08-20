@@ -15,6 +15,10 @@ hard way), then flashes via `nanoff`.
 .\scripts\Deploy-ToDevice.ps1 -Configuration Release
 ```
 
+To deploy an integration test (`src\integrationTests\*`), prefer
+`smarthome-integration-tests` — it deploys, captures, and reads the verdict in one call instead
+of leaving you to eyeball debug output.
+
 **This flashes real hardware. Always confirm with the user first** — state the project, the
 configuration, and the COM port (from `scripts\local.env.ps1`) before running. Don't chain a
 deploy automatically after a build succeeds; surface the build result and ask.
