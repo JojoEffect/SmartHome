@@ -131,13 +131,28 @@ function Invoke-GitCloneOrUpdate {
         [Parameter(Mandatory = $true)]
         [string]$Repository,
 
-        [string]$Branch = 'main'
+        [string]$Branch = 'main',
+
+        # Repos deliberately pinned to a tag/commit (detached HEAD -- e.g. matched to an
+        # exact package version for source lookup) are skipped by default. Re-running the
+        # sync must never silently reset an intentional pin back to $Branch.
+        [switch]$Force
     )
 
     $targetRoot = Get-SiblingRoot
     $name = ($Repository -split '/')[1]
     $targetPath = Join-Path $targetRoot $name
     $repoUrl = "https://github.com/$Repository.git"
+
+    if ((Test-Path $targetPath) -and -not $Force) {
+        $currentRef = git -C $targetPath rev-parse --abbrev-ref HEAD 2>$null
+        if ($currentRef -eq 'HEAD') {
+            $pinnedCommit = git -C $targetPath rev-parse --short HEAD 2>$null
+            Write-Host "Skipping $Repository -- pinned to a specific commit/tag ($pinnedCommit, detached HEAD)." -ForegroundColor Yellow
+            Write-Host "  Pass -Force to this script to reset it back to '$Branch'." -ForegroundColor DarkGray
+            return
+        }
+    }
 
     if (-not (Test-Path $targetPath)) {
         Write-Host "Cloning $Repository..." -ForegroundColor Cyan

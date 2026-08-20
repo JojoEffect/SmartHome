@@ -8,7 +8,12 @@
 #>
 
 [CmdletBinding()]
-param()
+param(
+    # Reset repos pinned to a specific tag/commit (detached HEAD) back to the tracked
+    # branch too. Without this, pinned repos are left alone -- see Common.ps1's
+    # Invoke-GitCloneOrUpdate.
+    [switch]$Force
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -23,6 +28,7 @@ $repositories = @(
     'nanoframework/nanoframework.github.io',
     'nanoframework/Samples',
     'nanoframework/nf-interpreter',
+    'nanoframework/CoreLibrary',
     'nanoframework/nanoFramework.WebServer',
     'nanoframework/nanoFramework.IoT.Device',
     'nanoframework/nanoFramework.Hardware.Esp32',
@@ -37,7 +43,7 @@ Write-Host "Syncing nanoFramework companion repositories to branch '$branch'..."
 Write-Host "Target root: $(Get-SiblingRoot)" -ForegroundColor DarkGray
 
 foreach ($repository in $repositories) {
-    Invoke-GitCloneOrUpdate -Repository $repository -Branch $branch
+    Invoke-GitCloneOrUpdate -Repository $repository -Branch $branch -Force:$Force
 }
 
 Write-Host ""

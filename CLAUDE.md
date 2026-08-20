@@ -97,7 +97,8 @@ Cloned beside `SmartHome` by `Sync-NanoFrameworkRepos.ps1` (see previous section
 nanoFramework — full list and version-alignment policy in
 [`.github/copilot-instructions.md`](.github/copilot-instructions.md). Lookup order: sibling
 `nanoFramework.WebServer` (Skills/MCP) → `Samples` → `nanoFramework.IoT.Device` (sensor drivers)
-→ `nanoframework.github.io` (docs) → `nf-interpreter` (firmware/runtime) → `Home` (repo index).
+→ `nanoframework.github.io` (docs) → `nf-interpreter` (firmware/runtime) → `CoreLibrary`
+(mscorlib source — a separate repo from `nf-interpreter`, easy to miss) → `Home` (repo index).
 
 ## On-device Skills/MCP (forward-looking)
 
@@ -143,7 +144,14 @@ isn't installed on this machine yet).
 
 ## Subagents
 
+Defined in `.claude/agents/` and committed — available in every session on this repo, not tied
+to any one conversation. Nothing forces a session to dispatch to them, though; picking one over
+working inline is a per-session judgment call, steered by their `description` and this file.
+
 - **device-ops** — build/deploy/test/mosquitto-observe workflows through the scripts above.
   Always confirms before anything hardware-touching.
 - **nanoframework-sync** — sibling-repo sync and package-version alignment against the
-  companion nanoFramework repos.
+  companion nanoFramework repos. Reach for it specifically when a lookup turns into more than a
+  couple of exploratory `git tag`/`git log`/WebFetch calls (e.g. matching several repos to exact
+  release tags) — that kind of investigation is worth keeping out of the main conversation. For
+  a plain sync, the `smarthome-sync-nanoframework` skill (just runs the script) is enough.

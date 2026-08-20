@@ -127,6 +127,7 @@ These should be cloned **beside** `SmartHome` and kept up to date by `.\scripts\
 | `nanoframework/nanoframework.github.io` | Source for official docs site and tutorials |
 | `nanoframework/Samples` | Working examples for APIs and device scenarios |
 | `nanoframework/nf-interpreter` | Firmware, native/runtime internals, target definitions |
+| `nanoframework/CoreLibrary` | Source for `nanoFramework.CoreLibrary` (mscorlib) — **not** part of nf-interpreter, a separate repo, only referenced from it as an external test dependency |
 | `nanoframework/nanoFramework.WebServer` | AI-agent Skills Discovery and MCP examples/docs |
 | `nanoframework/nanoFramework.IoT.Device` | Sensor/device bindings and sample patterns |
 | `nanoframework/nanoFramework.Hardware.Esp32` | ESP32-specific managed APIs used by this repo |
@@ -140,11 +141,20 @@ These should be cloned **beside** `SmartHome` and kept up to date by `.\scripts\
 
 - This repo currently references package baselines such as:
 - `nanoFramework.CoreLibrary` `1.17.11`
-- `nanoFramework.Hardware.Esp32` `1.6.37`
+- `nanoFramework.Hardware.Esp32` `1.6.42`
 - `nanoFramework.Logging` `1.1.161`
-- `nanoFramework.M2Mqtt` `5.1.206`
-- Companion repos should default to the configured branch in `scripts\nanoFramework.local.env.ps1`.
-- If you adopt a tagged release workflow later, update the sync script/config to target matching release branches or tags.
+- `nanoFramework.M2Mqtt` `5.1.221`
+- Companion repos default to the branch configured in `scripts\nanoFramework.local.env.ps1`
+  (`main`) via `Sync-NanoFrameworkRepos.ps1` — except `CoreLibrary`, `nanoFramework.Hardware.Esp32`,
+  `nanoFramework.Logging`, `nanoFramework.m2mqtt`, and `nf-interpreter`, which are pinned to the
+  git tag/commit matching the package baselines above (detached HEAD — read-only reference
+  checkouts, not branches to commit against). `Sync-NanoFrameworkRepos.ps1` doesn't know about
+  this pinning and will reset it back to `main` if re-run against those five repos — re-pin
+  manually (or via the `nanoframework-sync` Claude Code subagent) after syncing if that happens.
+- These baselines drift from what's actually in `packages.config`/the flashed firmware over
+  time — treat the table above as "as of the last time someone updated this doc," not live
+  truth. Check `packages.config` directly, and `nanoff --devicedetails` for the firmware
+  actually on a given device, rather than trusting this table blindly.
 
 ---
 
