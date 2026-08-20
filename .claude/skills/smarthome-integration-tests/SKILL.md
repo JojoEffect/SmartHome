@@ -6,11 +6,16 @@ description: Run the whole SmartHome on-device integration suite (WiFi, MQTT rou
 # SmartHome integration test suite
 
 Run `scripts\Run-IntegrationTests.ps1` — one call covers every project under
-`src\integrationTests`. Per test it deploys, reboots the device and captures its managed debug
-output, then reads the verdict from the `[ITEST] <name> PASS/FAIL` marker the test emits.
+`src\integrationTests`. Every test is deployed first; the verdict comes from one of two kinds:
+
+- **`DeviceMarker`** (WifiCheck, MqttCheck, Bmp280Check) — the runner reboots the device,
+  captures managed debug output, and reads the `[ITEST] <name> PASS/FAIL` marker.
+- **`BrokerOutage`** (MqttReconnectCheck) — the runner kills and recreates the broker under the
+  live device and asserts heartbeats reappear on `homie/#`. See `smarthome-mqtt-reconnect` for
+  that one; it cannot run with `-NoBroker`.
 
 ```powershell
-.\scripts\Run-IntegrationTests.ps1                              # WifiCheck, MqttCheck, Bmp280Check
+.\scripts\Run-IntegrationTests.ps1                              # all four checks
 .\scripts\Run-IntegrationTests.ps1 -Tests WifiCheck,MqttCheck
 .\scripts\Run-IntegrationTests.ps1 -NoBroker                    # a broker is already running
 ```
@@ -24,7 +29,7 @@ failure. Pass `-NoBroker` if one is already up (e.g. from `smarthome-dev-env`) �
 `Start-DevEnv.ps1` will fail fast on the occupied port rather than silently attaching to the
 other broker.
 
-**The suite leaves the last test flashed on the device** (Bmp280Check by default). Redeploy the
+**The suite leaves the last test flashed on the device** (MqttReconnectCheck by default). Redeploy the
 real app afterwards if the device is expected to go back to doing its job:
 `.\scripts\Deploy-ToDevice.ps1` — a separate hardware action, so confirm it separately.
 
@@ -40,6 +45,10 @@ Outcomes other than PASS/FAIL:
   where the CLR could load it. Check the log for `CLR_E_WRONG_TYPE` / zero-assembly resolution,
   which means `Deploy-ToDevice.ps1`'s `-DeployAddress` is stale.
 - `ERROR` — deploy or capture itself failed; the message is the sub-script's own error.
+- `WRONG-TEST` — the device emitted a marker naming a different test: a stale deploy, or that
+  project's `TestName` constant doesn't match its project name.
+- `RESTARTED` — BrokerOutage only. The device did publish again, but its heartbeat counter went
+  backwards, so it recovered by rebooting rather than reconnecting.
 
 Tests run WiFi-first on purpose: `MqttCheck` can only fail confusingly when the network itself is
 broken. `MqttCheck` targets a broker address hardcoded in its `Program.cs` — the script warns up

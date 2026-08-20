@@ -125,6 +125,8 @@ src/
     MqttCheck/            WifiCheck's setup + round-trip pub/sub through Mosquitto (plain
                             nanoFramework.M2Mqtt, no HomieMqttClient/retry logic)
     Bmp280Check/          BMP280 (Bme280 driver) sensor reads over I2C, no network
+    MqttReconnectCheck/   Publishes a heartbeat through HomieMqttClient while the runner
+                            kills and recreates the broker under it
   tests/
     Unit/                 SmartHome.UnitTests — nanoFramework.TestFramework, runs on hardware
 tools/
@@ -147,8 +149,13 @@ Two naming traps this layout exists to avoid, both hit for real:
   `GetFileNameWithoutExtension($projectPath)` for that purpose.
 
 `RoomSensor/Program.cs` is the main device logic; `HomieMqttClient` (in `SmartHome.Homie`) is
-the shared Homie client — as of the last commit its auto-reconnect handling is WIP, blocked on an
-ESP32 nanoFramework target bug.
+the shared Homie client. Its auto-reconnect handling was long marked WIP, "blocked on an ESP32
+nanoFramework target bug" — as of 2026-08-20 that is out of date at the MQTT level:
+`MqttReconnectCheck` proves on real hardware that a client keeps its heartbeat going across
+broker outages of 3s and 20s, reconnecting rather than restarting. What that test does *not*
+cover is `HomieClient`'s Homie-level state machine (re-announcing `$state`, device/node
+attributes and settable-property subscriptions after a reconnect); treat that part as still
+unproven.
 
 Anything that needs WiFi calls `NetworkHelper.ConnectToConfiguredNetwork()` from
 `src/common/Networking`. Don't reintroduce the hand-rolled scan/connect loop from the official
@@ -167,7 +174,20 @@ for the interface instead of racing it.
 - **`src/devices`** — real applications. Nothing here should exist only to prove a dependency
   works; that's what `integrationTests` is for.
 
-Integration tests report by writing a marker line to managed debug output:
+The suite runs two kinds of test, and the kind is declared per entry in
+`$testCatalog` in `Run-IntegrationTests.ps1`:
+
+- **`DeviceMarker`** — the device decides. The runner captures managed debug output and reads
+  the test's own `[ITEST]` marker. WifiCheck, MqttCheck and Bmp280Check work this way.
+- **`BrokerOutage`** — the host decides. The device only publishes a heartbeat; the runner takes
+  the broker away, brings a fresh one up, and asserts heartbeats reappear on `homie/#` with a
+  *higher* counter than before the outage. A lower counter means the app restarted rather than
+  reconnected, which is reported as `RESTARTED`, not `PASS`. `MqttReconnectCheck` is this kind,
+  and it deliberately emits no `[ITEST]` marker — a device claiming it reconnected would be a
+  second, weaker verdict competing with the evidence at the broker. See the
+  `smarthome-mqtt-reconnect` skill.
+
+DeviceMarker tests report by writing a marker line to managed debug output:
 
 ```text
 [ITEST] <TestName> PASS: <detail>
