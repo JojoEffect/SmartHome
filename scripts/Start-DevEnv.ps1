@@ -29,8 +29,11 @@
     -Redirect*), which does not inherit handles, and writes its own log:
       - the broker via Mosquitto's own `log_dest file` config directive
       - the subscriber via a cmd.exe wrapper that does the `>` redirect itself
-    The wrapper means the recorded subscriber pid is cmd's, so Stop-DevEnv.ps1
-    stops that process TREE rather than the single pid.
+    The wrapper means the recorded subscriber pid is cmd's, so it is stopped as a
+    process TREE rather than a single pid.
+
+    File names and the subscriber's argument list come from Common.ps1, which also
+    uses them to recognise leftover processes -- see the file-vocabulary section there.
 
 .PARAMETER NoSync
     Skip the companion-repo sync and go straight to the broker. Use when the siblings
@@ -107,37 +110,10 @@ Stop it first:  .\scripts\Stop-DevEnv.ps1
     Clear-SmartHomeDevEnvState -Port $mqttPort
 }
 
-$tempDir = [System.IO.Path]::GetTempPath()
-$mosquittoConf = Join-Path $tempDir "smarthome-mosquitto-$mqttPort.conf"
-$brokerLog = Join-Path $tempDir "smarthome-mosquitto-$mqttPort.log"
-$subscriberLog = Join-Path $tempDir "smarthome-homie-$mqttPort.log"
-$subscriberErrorLog = Join-Path $tempDir "smarthome-homie-$mqttPort.err.log"
-
-function Remove-StartedFiles {
-    param([string[]]$Paths)
-
-    foreach ($path in $Paths) {
-        Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function Get-LogExcerpt {
-    param(
-        [string]$Path,
-        [int]$Lines = 5
-    )
-
-    if (-not (Test-Path $Path)) {
-        return $null
-    }
-
-    $content = Get-Content -Path $Path -Tail $Lines -ErrorAction SilentlyContinue
-    if (-not $content) {
-        return $null
-    }
-
-    return ($content -join "`n")
-}
+$mosquittoConf     = Get-SmartHomeDevEnvPath -Port $mqttPort -Kind Config
+$brokerLog         = Get-SmartHomeDevEnvPath -Port $mqttPort -Kind BrokerLog
+$subscriberLog     = Get-SmartHomeDevEnvPath -Port $mqttPort -Kind SubscriberLog
+$subscriberErrLog  = Get-SmartHomeDevEnvPath -Port $mqttPort -Kind SubscriberErrorLog
 
 Write-Host ("Starting Mosquitto broker on port {0} ..." -f $mqttPort) -ForegroundColor Cyan
 
@@ -157,14 +133,32 @@ log_dest file $brokerLog
 log_type all
 "@ | Set-Content -Path $mosquittoConf -Encoding ascii
 
-Remove-StartedFiles -Paths @($brokerLog)
+Remove-Item -Path $brokerLog -Force -ErrorAction SilentlyContinue
 
 $broker = Start-Process -FilePath $mosquittoExe `
                         -ArgumentList @('-c', $mosquittoConf, '-v') `
                         -PassThru `
                         -WindowStyle Hidden
 
-Start-Sleep -Seconds 2
+# Poll for the outcome rather than sleeping a flat 2s: the broker announces its
+# listen socket in the log about 120ms after launch, and a bind failure exits
+# almost as fast. A fixed wait is both slower on every start and less reliable on
+# a machine that needs longer than the window.
+$deadline = (Get-Date).AddSeconds(5)
+$brokerReady = $false
+while ((Get-Date) -lt $deadline) {
+    if ($broker.HasExited) {
+        break
+    }
+
+    $log = Get-Content -Path $brokerLog -ErrorAction SilentlyContinue
+    if ($log -match 'listen socket|mosquitto version .* running') {
+        $brokerReady = $true
+        break
+    }
+
+    Start-Sleep -Milliseconds 100
+}
 
 # Mosquitto exits immediately when it can't bind (another broker -- a leftover
 # instance, or the Windows service -- already owns the port). Start-Process still
@@ -172,7 +166,7 @@ Start-Sleep -Seconds 2
 # script would report success, the subscriber would silently attach to whatever
 # OTHER broker is listening, and Stop-DevEnv.ps1 would later "stop" a process
 # that never ran.
-if ($broker.HasExited) {
+if (-not $brokerReady) {
     $occupant = Get-NetTCPConnection -LocalPort $mqttPort -State Listen -ErrorAction SilentlyContinue |
         Select-Object -First 1
 
@@ -187,22 +181,24 @@ if ($broker.HasExited) {
         "Port $mqttPort is already held by $ownerName (PID $($occupant.OwningProcess)) on $($occupant.LocalAddress)."
     }
     else {
-        $reason = Get-LogExcerpt -Path $brokerLog
+        $reason = (Get-Content -Path $brokerLog -Tail 5 -ErrorAction SilentlyContinue) -join "`n"
         'Nothing else appears to be listening on that port.'
     }
 
-    $orphans = @(Get-SmartHomeOrphanBroker -Port $mqttPort)
-    $orphanNote = if ($orphans.Count -gt 0) {
+    $orphanNote = if (@(Get-SmartHomeOrphanProcess -Port $mqttPort).Count -gt 0) {
         "That is a Mosquitto this repo started earlier; clear it with:  .\scripts\Stop-DevEnv.ps1 -IncludeOrphans"
     }
     else {
         "If it isn't yours, set SMARTHOME_MQTT_PORT in local.env.ps1 to a free port."
     }
 
-    Remove-StartedFiles -Paths @($mosquittoConf)
+    if (-not $broker.HasExited) {
+        Stop-Process -Id $broker.Id -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -Path $mosquittoConf -Force -ErrorAction SilentlyContinue
 
     Write-Error @"
-Mosquitto exited immediately (exit code $($broker.ExitCode)) -- the broker is NOT running.
+Mosquitto did not come up on port $mqttPort -- the broker is NOT running.
 $ownerNote
 $orphanNote
 $(if ($reason) { "Broker output:`n$reason" })
@@ -210,34 +206,41 @@ $(if ($reason) { "Broker output:`n$reason" })
     exit 1
 }
 
-$brokerRecord = New-SmartHomeProcessRecord -Process $broker
+$processes = @(New-SmartHomeProcessRecord -Label 'Mosquitto broker' -Process $broker)
+$logFiles = @($brokerLog)
+
 Write-Host ("  Broker PID: {0}" -f $broker.Id) -ForegroundColor Green
 Write-Host ("  Listening on 0.0.0.0:{0} (reachable from other devices on the LAN)" -f $mqttPort) -ForegroundColor DarkGray
 Write-Host ("  Broker log: {0}" -f $brokerLog) -ForegroundColor DarkGray
 
 if ($Detached) {
-    Remove-StartedFiles -Paths @($subscriberLog, $subscriberErrorLog)
+    Remove-Item -Path $subscriberLog, $subscriberErrLog -Force -ErrorAction SilentlyContinue
 
     # cmd.exe does the redirect so this script doesn't have to (see header). The
     # outer pair of quotes is what cmd /c needs to keep the inner quoted paths
     # intact.
-    $subscriberCommand = '/c ""{0}" -h localhost -p {1} -t "homie/#" -v > "{2}" 2> "{3}""' -f `
-        $mosquittoSub, $mqttPort, $subscriberLog, $subscriberErrorLog
+    $subscriberArgs = (Get-SmartHomeSubscriberArguments -Port $mqttPort |
+        ForEach-Object { if ($_ -match '[\s/#]') { '"{0}"' -f $_ } else { $_ } }) -join ' '
+    $subscriberCommand = '/c ""{0}" {1} > "{2}" 2> "{3}""' -f `
+        $mosquittoSub, $subscriberArgs, $subscriberLog, $subscriberErrLog
 
     $subscriber = Start-Process -FilePath 'cmd.exe' `
                                 -ArgumentList $subscriberCommand `
                                 -PassThru `
                                 -WindowStyle Hidden
 
-    Start-Sleep -Seconds 2
-
-    # A subscriber that can't reach the broker exits straight away. Without this
-    # the state file would record a dead pid and the homie log would stay empty
-    # for reasons nobody could see.
-    if ($subscriber.HasExited) {
-        $reason = Get-LogExcerpt -Path $subscriberErrorLog
+    # Short window on purpose. It catches an instant death (bad exe, bad arguments)
+    # and costs almost nothing when the subscriber is healthy. It deliberately does
+    # NOT wait out a failed connect: mosquitto_sub takes ~4.2s to give up on a dead
+    # port (measured), so covering that case would add ~4.5s to every single start
+    # to catch something that cannot really happen here -- the broker is on
+    # localhost and its own log already confirmed it is listening. If the
+    # subscriber does die later, Stop-DevEnv.ps1 reports the pid as already gone
+    # and the empty homie/# log is the visible symptom.
+    if ($subscriber.WaitForExit(300)) {
+        $reason = (Get-Content -Path $subscriberErrLog -Tail 5 -ErrorAction SilentlyContinue) -join "`n"
         Stop-Process -Id $broker.Id -Force -ErrorAction SilentlyContinue
-        Remove-StartedFiles -Paths @($mosquittoConf)
+        Remove-Item -Path $mosquittoConf -Force -ErrorAction SilentlyContinue
 
         Write-Error @"
 The homie/# subscriber exited immediately (exit code $($subscriber.ExitCode)); broker stopped again.
@@ -246,30 +249,23 @@ $(if ($reason) { "Subscriber output:`n$reason" } else { 'It produced no output. 
         exit 1
     }
 
-    Save-SmartHomeDevEnvState -Port $mqttPort -State @{
-        Broker         = $brokerRecord
-        Subscriber     = New-SmartHomeProcessRecord -Process $subscriber -Tree
-        ConfigFile     = $mosquittoConf
-        LogFile        = $subscriberLog
-        LogFiles       = @($subscriberLog, $subscriberErrorLog, $brokerLog)
-        Detached       = $true
-    }
+    $processes += New-SmartHomeProcessRecord -Label 'homie/# subscriber' -Process $subscriber -Tree
+    $logFiles += $subscriberLog, $subscriberErrLog
+}
 
+# Foreground mode records state too, so a Stop-DevEnv.ps1 from another shell (or
+# a Ctrl+C that killed this one mid-cleanup) can still clean up the broker.
+Save-SmartHomeDevEnvState -Port $mqttPort -State @{
+    Processes  = $processes
+    ConfigFile = $mosquittoConf
+    LogFiles   = $logFiles
+}
+
+if ($Detached) {
     Write-Host ""
     Write-Host ("Dev environment running detached. homie/# log: {0}" -f $subscriberLog) -ForegroundColor Green
     Write-Host "Stop it with:  .\scripts\Stop-DevEnv.ps1" -ForegroundColor Cyan
     exit 0
-}
-
-# Foreground mode still records state, so a Stop-DevEnv.ps1 from another shell
-# (or after a Ctrl+C that killed this one mid-cleanup) can clean up the broker.
-Save-SmartHomeDevEnvState -Port $mqttPort -State @{
-    Broker         = $brokerRecord
-    Subscriber     = $null
-    ConfigFile     = $mosquittoConf
-    LogFile        = $null
-    LogFiles       = @($brokerLog)
-    Detached       = $false
 }
 
 Write-Host ""
@@ -277,13 +273,9 @@ Write-Host ("Subscribing to homie/# on localhost:{0}  (Ctrl+C to stop)" -f $mqtt
 Write-Host ('-' * 69)
 
 try {
-    & $mosquittoSub -h 'localhost' -p $mqttPort -t 'homie/#' -v
+    & $mosquittoSub @(Get-SmartHomeSubscriberArguments -Port $mqttPort)
 }
 finally {
-    if (-not $broker.HasExited) {
-        Write-Host ("`nStopping Mosquitto (PID {0})..." -f $broker.Id) -ForegroundColor Yellow
-        Stop-Process -Id $broker.Id -Force -ErrorAction SilentlyContinue
-    }
-    Remove-StartedFiles -Paths @($mosquittoConf, $brokerLog)
-    Clear-SmartHomeDevEnvState -Port $mqttPort
+    Write-Host ""
+    Stop-SmartHomeDevEnv -Port $mqttPort | Out-Null
 }

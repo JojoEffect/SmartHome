@@ -35,7 +35,15 @@
 param(
     [int]$DurationSeconds = 30,
 
-    [switch]$NoReboot
+    [switch]$NoReboot,
+
+    # The monitor is a host-side tool that doesn't change between captures, so a
+    # caller taking several captures in a row (Run-IntegrationTests.ps1) builds it
+    # once with -BuildOnly and passes -NoBuild for every capture after that. On its
+    # own this script still builds, so a plain invocation needs no ceremony.
+    [switch]$NoBuild,
+
+    [switch]$BuildOnly
 )
 
 Set-StrictMode -Version Latest
@@ -61,10 +69,16 @@ if ($NoReboot) {
 # Build separately from run -- a --no-build run that fails because the device
 # is unreachable is a normal, expected outcome, not a reason to silently
 # re-invoke the tool (which would reboot the device a second time).
-dotnet build $toolProject --nologo -v quiet
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "DeviceDebugMonitor failed to build (exit code $LASTEXITCODE)."
-    exit $LASTEXITCODE
+if (-not $NoBuild) {
+    dotnet build $toolProject --nologo -v quiet
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "DeviceDebugMonitor failed to build (exit code $LASTEXITCODE)."
+        exit $LASTEXITCODE
+    }
+}
+
+if ($BuildOnly) {
+    exit 0
 }
 
 dotnet run --project $toolProject --no-build -- @toolArgs

@@ -137,10 +137,20 @@ if ($imageBytes.Length -gt $PaddedImageSize) {
 
 $paddedImage = Join-Path $binDir ($projectName + '.padded.bin')
 $padded = New-Object byte[] $PaddedImageSize
-[Array]::Copy($imageBytes, $padded, $imageBytes.Length)
-for ($i = $imageBytes.Length; $i -lt $PaddedImageSize; $i++) {
-    $padded[$i] = 0xFF
+
+# Fill with 0xFF by doubling an already-filled prefix rather than looping over
+# ~320KB one byte at a time: the scalar loop measured 560ms per deploy, this is
+# ~10ms. ([Array]::Fill would be simpler but is .NET Core only, and this runs on
+# Windows PowerShell 5.1.)
+$padded[0] = 0xFF
+$filled = 1
+while ($filled -lt $PaddedImageSize) {
+    $chunk = [Math]::Min($filled, $PaddedImageSize - $filled)
+    [Array]::Copy($padded, 0, $padded, $filled, $chunk)
+    $filled += $chunk
 }
+
+[Array]::Copy($imageBytes, $padded, $imageBytes.Length)
 [System.IO.File]::WriteAllBytes($paddedImage, $padded)
 Write-Host "  Padded deploy image: $($imageBytes.Length) -> $PaddedImageSize bytes (0xFF fill, clears any stale prior deployment)." -ForegroundColor DarkGray
 
