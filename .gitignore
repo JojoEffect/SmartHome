@@ -399,4 +399,4 @@ FodyWeavers.xsd
 
 # SmartHome local developer config (machine-specific, never commit)
 scripts/local.env.ps1
-scripts\nanoFramework.local.env.ps1
+scripts/nanoFramework.local.env.ps1

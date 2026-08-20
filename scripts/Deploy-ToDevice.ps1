@@ -55,7 +55,12 @@ $msbuild = Get-MSBuildPath
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 Write-Host "Building $Project ($Configuration)..." -ForegroundColor Cyan
-& $msbuild $projectPath /p:Configuration=$Configuration /v:minimal /nologo
+
+# A plain incremental /t:Build removes the deployment .bin when nothing else
+# changed (nanoFramework's deployment-image task doesn't run, and the stale
+# .bin from a prior build gets cleaned up) -- always force a full rebuild so
+# the .bin actually exists afterward, even when the source is unchanged.
+& $msbuild $projectPath /t:Rebuild /p:Configuration=$Configuration /v:minimal /nologo
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Build failed (exit code $LASTEXITCODE)."
     exit $LASTEXITCODE

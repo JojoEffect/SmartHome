@@ -16,6 +16,26 @@ executes test code on the device too). **Always confirm with the user before run
 even mid-session, even if a task seems to obviously call for it. Everything else in this repo
 (build, mosquitto, repo sync) is regular reversible work.
 
+## Start here for any framework/library/device debugging
+
+Before investigating anything nanoFramework-, firmware-, or library-behavior related (a socket
+exception, an MQTT connect failure, "does this API exist," version-alignment questions), **sync
+the sibling repos first** if they aren't already present one level up from this repo
+(`..\nf-interpreter`, `..\nanoFramework.m2mqtt`, etc. — check with a quick `Test-Path`, or just
+run the idempotent sync):
+
+```powershell
+.\scripts\Sync-NanoFrameworkRepos.ps1
+```
+
+This is not optional/best-effort — a real debugging session on 2026-08-19 spent hours
+diagnosing a socket connect failure (guessing at package versions, capturing raw serial output,
+searching GitHub blind) before finally syncing these repos, at which point their source, samples,
+and docs became directly available for exactly that failure. Don't repeat that: sync first, then
+investigate using `nf-interpreter` source (native firmware behavior),
+`nanoFramework.m2mqtt` source (the actual M2Mqtt client code, not just its NuGet package),
+and `Samples` (working reference usage) before falling back to web search or guesswork.
+
 ## The reliable entry points
 
 The goal for this repo is a dev loop that works equally well by hand or from an agent: one
@@ -23,14 +43,23 @@ script per workflow, sourced from `scripts\local.env.ps1`, non-interactive, real
 Prefer these over ad-hoc `msbuild`/`nanoff`/`mosquitto_sub` invocations — if a workflow doesn't
 have a script yet, that's a gap worth closing rather than working around.
 
-| Script | Does | Touches hardware? |
-|---|---|---|
-| `scripts\Start-DevEnv.ps1` | Starts local Mosquitto, subscribes to `homie/#` — this is how you observe/debug device behavior | No |
-| `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release]` | Builds an `.nfproj` and flashes it via `nanoff` | **Yes** |
-| `scripts\Run-Tests.ps1` | Builds `NFUnitTest` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** |
-| `scripts\Sync-NanoFrameworkRepos.ps1` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No |
-| `scripts\Start-AgentWorkspace.ps1` | `Sync-NanoFrameworkRepos.ps1` + `Start-DevEnv.ps1` in one call | No |
-| `scripts\Common.ps1` | Shared helpers (env loading, MSBuild/vstest/adapter discovery, repo-sync) — dot-source, don't duplicate its logic | No |
+| Script | Does | Touches hardware? | Skill |
+|---|---|---|---|
+| `scripts\Start-DevEnv.ps1` | Starts local Mosquitto (explicit `0.0.0.0` listener — a bare `-p` binds localhost-only on Mosquitto 2.x and silently can't be reached from a real device), subscribes to `homie/#` | No | `smarthome-dev-env` |
+| `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`) then flashes via `nanoff` | **Yes** | `smarthome-deploy` |
+| `scripts\Run-Tests.ps1` | Builds `NFUnitTest` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** | `smarthome-test` |
+| `scripts\Sync-NanoFrameworkRepos.ps1` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
+| `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style | No | `smarthome-restore-packages` |
+| `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` | Raw serial capture of the device's native boot log, no debugger needed (managed `Debug.WriteLine` output still needs VS) | Resets only | `smarthome-watch-serial` |
+| `scripts\Start-AgentWorkspace.ps1` | `Sync-NanoFrameworkRepos.ps1` + `Start-DevEnv.ps1` in one call | No | — |
+| `scripts\Common.ps1` | Shared helpers (env loading, MSBuild/vstest/adapter discovery, repo-sync) — dot-source, don't duplicate its logic | No | — |
+
+Every script here has a matching project skill under `.claude/skills/smarthome-*` — prefer
+invoking the skill (or just running the script directly) over re-deriving the workflow ad hoc.
+If a new recurring unit of work shows up that isn't covered by an existing script, add one
+(follow the conventions above: `Common.ps1` helpers, `Set-StrictMode`, real exit codes, clear
+`Write-Error` remediation) and give it a matching skill — that's the standing expectation for
+this repo, not a one-time cleanup.
 
 First-time setup: copy `scripts\local.env.template.ps1` → `scripts\local.env.ps1` and
 `scripts\nanoFramework.local.env.template.ps1` → `scripts\nanoFramework.local.env.ps1`, then fill
@@ -62,7 +91,8 @@ ESP32 nanoFramework target bug.
 
 ## Companion nanoFramework repos
 
-Cloned beside `SmartHome` by `Sync-NanoFrameworkRepos.ps1`, kept on the branch configured in
+Cloned beside `SmartHome` by `Sync-NanoFrameworkRepos.ps1` (see previous section — sync these
+*before* debugging, not after getting stuck), kept on the branch configured in
 `scripts\nanoFramework.local.env.ps1`. Check here before assuming something isn't possible in
 nanoFramework — full list and version-alignment policy in
 [`.github/copilot-instructions.md`](.github/copilot-instructions.md). Lookup order: sibling
@@ -76,6 +106,12 @@ actuator control directly (`[Skill]`/`[SkillAction]` + `SkillRegistry`, or
 `[McpServerTool]`/`[McpServerPrompt]` + `McpToolRegistry`/`McpPromptRegistry`). Not built yet
 anywhere in this repo. If asked to add it, follow those patterns rather than inventing a custom
 protocol — likely first candidates are RoomSensor readings and Irrigation/Oven commands.
+
+## Project skills
+
+`.claude/skills/smarthome-*` (deploy, test, dev-env, sync-nanoframework, restore-packages,
+watch-serial) each wrap one script from the table above with the context/safety notes specific
+to that workflow — see the table for which skill goes with which script.
 
 ## Response style
 

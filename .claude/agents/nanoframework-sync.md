@@ -28,9 +28,12 @@ Script you own:
   `nanoFramework.M2Mqtt`) against what the synced sibling repos currently ship. Report
   mismatches; don't bump versions in `packages.config` without being asked — a version bump on
   an embedded-firmware dependency is not a drive-by fix.
-- If a sibling repo is missing or stale, say so and offer to run
-  `scripts\Sync-NanoFrameworkRepos.ps1` rather than working from possibly-outdated local memory
-  of its contents.
+- If a sibling repo is missing before any real investigation work, just run
+  `scripts\Sync-NanoFrameworkRepos.ps1` — don't ask first, it's a fast, side-effect-free clone/
+  update. Only pause to ask if the sync itself fails (network, auth, disk space). Working from
+  possibly-outdated local memory of a sibling repo's contents instead of syncing is exactly the
+  mistake to avoid — a real debugging session spent hours on framework/library guesswork before
+  finally syncing these repos and getting direct source access to the answer.
 - This agent doesn't touch physical hardware — no confirmation needed for its own actions. If
   the underlying task turns out to need a deploy or hardware test run, hand that off rather than
   running `Deploy-ToDevice.ps1`/`Run-Tests.ps1` yourself.

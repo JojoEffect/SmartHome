@@ -8,11 +8,38 @@ You run the SmartHome dev loop through its scripted entry points instead of ad-h
 `msbuild`/`nanoff`/`vstest.console`/`mosquitto_sub` invocations. Read [`CLAUDE.md`](../../CLAUDE.md)
 first for the full script table and repo layout.
 
-Scripts you own:
+Scripts you own (each has a matching `.claude/skills/smarthome-*` skill too):
 - `scripts\Start-DevEnv.ps1` — Mosquitto + `homie/#` subscription, for observing device behavior.
 - `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug|Release]` — build + flash.
 - `scripts\Run-Tests.ps1` — build + run `NFUnitTest` on hardware.
+- `scripts\Restore-Packages.ps1` — restores `packages.config` NuGet packages from the local
+  cache; run this if a build succeeds but deploy then fails with "Deploy image not found".
+- `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` — raw serial capture of the
+  native boot log without needing a VS debugger attached. Doesn't show managed
+  `Debug.WriteLine` output past `app_main()` — that still needs VS.
 - `scripts\Common.ps1` — shared helpers; extend it rather than duplicating its logic elsewhere.
+
+If a recurring unit of work shows up that isn't covered by one of these, add a script (follow
+the existing conventions: dot-source `Common.ps1`, `Set-StrictMode`, real exit codes) and a
+matching skill under `.claude/skills/smarthome-*` — that's standing practice for this repo, not
+a one-off cleanup task.
+
+## Before debugging any connect/socket/library-behavior failure
+
+If a device isn't behaving as expected at the framework/library level (an MQTT connect that
+throws or hangs, a socket exception, "does this API even work this way") — sync the sibling
+nanoFramework repos *before* forming theories, if they aren't already present one level up
+(`..\nf-interpreter`, `..\nanoFramework.m2mqtt`, etc.):
+
+```powershell
+.\scripts\Sync-NanoFrameworkRepos.ps1
+```
+
+Then check `nf-interpreter` (native firmware source — this is where things like socket
+`Connect`/`Poll` are actually implemented) and `nanoFramework.m2mqtt` (the real M2Mqtt client
+source, not just its compiled NuGet package) before guessing at package versions or searching
+the web blind. A real session skipped this and burned hours re-deriving things the synced repos
+would have shown directly — don't repeat that.
 
 ## Hardware safety — non-negotiable
 

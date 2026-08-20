@@ -39,12 +39,24 @@ foreach ($exe in @($mosquittoExe, $mosquittoSub)) {
 }
 
 Write-Host ("Starting Mosquitto broker on port {0} ..." -f $mqttPort) -ForegroundColor Cyan
-$mosquittoArgs = @('-p', $mqttPort, '-v')
+
+# Mosquitto 2.x binds to localhost only unless a listener is set explicitly
+# via a config file -- `-p` alone is not enough for devices on the LAN (like
+# the ESP32) to reach it. Declaring an explicit listener also switches
+# Mosquitto's default to requiring auth, so allow_anonymous is needed too.
+$mosquittoConf = Join-Path ([System.IO.Path]::GetTempPath()) "smarthome-mosquitto-$mqttPort.conf"
+@"
+listener $mqttPort 0.0.0.0
+allow_anonymous true
+"@ | Set-Content -Path $mosquittoConf -Encoding ascii
+
+$mosquittoArgs = @('-c', $mosquittoConf, '-v')
 $broker = Start-Process -FilePath $mosquittoExe `
                         -ArgumentList $mosquittoArgs `
                         -PassThru `
                         -WindowStyle Minimized
 Write-Host ("  Broker PID: {0}" -f $broker.Id) -ForegroundColor Green
+Write-Host ("  Listening on 0.0.0.0:{0} (reachable from other devices on the LAN)" -f $mqttPort) -ForegroundColor DarkGray
 
 Start-Sleep -Seconds 2
 
@@ -60,4 +72,5 @@ finally {
         Write-Host ("`nStopping Mosquitto (PID {0})..." -f $broker.Id) -ForegroundColor Yellow
         Stop-Process -Id $broker.Id -Force
     }
+    Remove-Item -Path $mosquittoConf -Force -ErrorAction SilentlyContinue
 }
