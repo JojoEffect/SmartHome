@@ -91,8 +91,13 @@ sibling repos) is regular reversible work — no confirmation needed for those.
   reported with the script's own error output — these scripts already fail loudly with clear
   remediation steps; relay them rather than re-diagnosing from scratch.
 - When editing device code (`src/devices/*/Program.cs`, `src/integrationTests/*/Program.cs`,
-  `src/common/HomieNano/`), keep changes narrowly scoped to what was asked — this is embedded C#
-  running on real hardware, not a place for speculative abstraction.
+  `src/common/`), keep changes narrowly scoped to what was asked — this is embedded C# running on
+  real hardware, not a place for speculative abstraction.
+- Anything needing WiFi calls `NetworkHelper.ConnectToConfiguredNetwork()` from
+  `src/common/Device` (`SmartHome.Device`). Never reintroduce the hand-rolled scan/connect loop
+  from the `BasicExample.WiFi` sample — it races the ESP32's auto-connect and fails
+  intermittently with error 5 (`UnspecifiedFailure`), which is exactly what kept RoomSensor off
+  the network until 2026-08-20.
 - An integration test that changes what it proves must keep emitting its
   `IntegrationTest.Pass`/`Fail` marker as early as the outcome is known — that marker is the only
   thing `Run-IntegrationTests.ps1` can read a verdict from.

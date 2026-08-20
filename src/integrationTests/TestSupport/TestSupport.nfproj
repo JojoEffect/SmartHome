@@ -19,24 +19,11 @@
   <Import Project="$(NanoFrameworkProjectSystemPath)NFProjectSystem.props" Condition="Exists('$(NanoFrameworkProjectSystemPath)NFProjectSystem.props')" />
   <ItemGroup>
     <Compile Include="IntegrationTest.cs" />
-    <Compile Include="NetworkHelper.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="mscorlib">
       <HintPath>..\..\..\packages\nanoFramework.CoreLibrary.1.17.11\lib\mscorlib.dll</HintPath>
-    </Reference>
-    <Reference Include="nanoFramework.System.Collections">
-      <HintPath>..\..\..\packages\nanoFramework.System.Collections.1.5.75\lib\nanoFramework.System.Collections.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Device.Wifi">
-      <HintPath>..\..\..\packages\nanoFramework.System.Device.Wifi.1.5.150\lib\System.Device.Wifi.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Net">
-      <HintPath>..\..\..\packages\nanoFramework.System.Net.1.11.60\lib\System.Net.dll</HintPath>
-    </Reference>
-    <Reference Include="System.Threading">
-      <HintPath>..\..\..\packages\nanoFramework.System.Threading.1.1.52\lib\System.Threading.dll</HintPath>
     </Reference>
   </ItemGroup>
   <ItemGroup>

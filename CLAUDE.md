@@ -107,14 +107,16 @@ Required local tools:
 
 ```text
 src/
-  common/
+  common/                 Shared libraries used by device apps and tests alike
+    Device/               SmartHome.Device — NetworkHelper (WiFi connect), shared by
+                            RoomSensor and the integration tests
     HomieNano/            Shared Homie v4 client library (nanoFramework)
   devices/                Real device apps — the things that actually get shipped
     RoomSensor/           Primary device: temperature/humidity/pressure via BMP280
     IrrigationControl/
     OvenControl/
   integrationTests/       On-device end-to-end checks, one concern each (see below)
-    TestSupport/          Shared helpers: NetworkHelper (WiFi connect), IntegrationTest (markers)
+    TestSupport/          IntegrationTest — the PASS/FAIL markers, nothing else
     WifiTest/             Connects to the configured WiFi network, nothing else
     MqttTest/             WifiTest's setup + round-trip pub/sub through Mosquitto (plain
                             nanoFramework.M2Mqtt, no HomieMqttClient/retry logic)
@@ -133,6 +135,14 @@ SmartHome.sln
 `RoomSensor/Program.cs` is the main device logic; `HomieMqttClient` (in `HomieNano`) is the
 shared Homie client — as of the last commit its auto-reconnect handling is WIP, blocked on an
 ESP32 nanoFramework target bug.
+
+Anything that needs WiFi calls `NetworkHelper.ConnectToConfiguredNetwork()` from
+`src/common/Device` (assembly and namespace `SmartHome.Device` — deliberately not plain
+`Device`, which would collide with the `HomieNano.Version4.Device` class). Don't reintroduce the
+hand-rolled scan/connect loop from the official `BasicExample.WiFi` sample: it races the ESP32's
+own auto-connect and fails intermittently with `WifiConnectionStatus.UnspecifiedFailure` (error
+5). RoomSensor carried that loop until 2026-08-20 and would not join the network on a clean
+boot; `WifiNetworkHelper.Reconnect()` waits for the interface instead of racing it.
 
 ### Three kinds of test, deliberately kept apart
 
@@ -158,8 +168,10 @@ loop. Adding a new integration test means: new project under `src\integrationTes
 marker, add it to `$testCatalog` in `Run-IntegrationTests.ps1`.
 
 `BMP280Test` links `IntegrationTest.cs` as a shared source file instead of referencing
-`TestSupport` as a project — `TestSupport` pulls in the WiFi/networking assemblies, and that
-test is deliberately network-free.
+`TestSupport` as a project. That kept the WiFi/networking assemblies out of a deliberately
+network-free test; `TestSupport` is mscorlib-only now that `NetworkHelper` moved to
+`src/common/Device`, so the link is no longer strictly required — but it still avoids an
+assembly on the device for one static class.
 
 The suite flashes each test in turn, so it **leaves the last one on the device** — redeploy
 RoomSensor (`Deploy-ToDevice.ps1`) when the device should go back to doing its real job.

@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Threading;
+using SmartHome.Device;
 using TestSupport;
 
 namespace WifiTest

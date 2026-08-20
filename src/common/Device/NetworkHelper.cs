@@ -4,10 +4,11 @@ using System.Net.NetworkInformation;
 using System.Threading;
 using nanoFramework.Networking;
 
-namespace TestSupport
+namespace SmartHome.Device
 {
     /// <summary>
-    /// Shared WiFi connect helper for the device test projects (WifiTest, MqttTest).
+    /// Shared WiFi connect helper for every project that needs the network: the real
+    /// device apps (RoomSensor) and the integration tests (WifiTest, MqttTest) alike.
     /// </summary>
     public static class NetworkHelper
     {
@@ -23,16 +24,17 @@ namespace TestSupport
         /// the sample checks for an IP once, immediately, and if the radio hasn't
         /// finished associating yet it falls into a manual Connect() -- which then
         /// fails with WifiConnectionStatus.UnspecifiedFailure precisely BECAUSE an
-        /// association is already in flight. RoomSensor only appears to work with
-        /// that code because running under the VS debugger delays Main() by a couple
-        /// of seconds, so auto-connect has already finished and the manual path is
-        /// never taken. WifiNetworkHelper waits for the interface to actually come
-        /// up instead of racing it.
+        /// association is already in flight. RoomSensor carried that loop until
+        /// 2026-08-20 and only appeared to work because running under the VS debugger
+        /// delays Main() by a couple of seconds, so auto-connect has already finished
+        /// and the manual path is never taken; on a plain reset it failed to join the
+        /// network at all, repeatedly, with error 5. WifiNetworkHelper waits for the
+        /// interface to actually come up instead of racing it.
         ///
         /// requiresDateTime is false on purpose: that would additionally block on
-        /// SNTP, which needs working internet access. These tests only talk to a
-        /// broker on the LAN, so a valid clock isn't needed and requiring one would
-        /// add an unrelated failure mode.
+        /// SNTP, which needs working internet access. Nothing here talks past the
+        /// LAN broker, so a valid clock isn't needed and requiring one would add an
+        /// unrelated failure mode.
         /// </remarks>
         public static void ConnectToConfiguredNetwork(int timeoutMilliseconds = 60000)
         {
