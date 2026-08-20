@@ -12,8 +12,8 @@
     <OutputType>Exe</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <FileAlignment>512</FileAlignment>
-    <RootNamespace>OvenControl</RootNamespace>
-    <AssemblyName>OvenControl</AssemblyName>
+    <RootNamespace>SmartHome.Devices.OvenControl</RootNamespace>
+    <AssemblyName>SmartHome.Devices.OvenControl</AssemblyName>
     <TargetFrameworkVersion>v1.0</TargetFrameworkVersion>
   </PropertyGroup>
   <Import Project="$(NanoFrameworkProjectSystemPath)NFProjectSystem.props" Condition="Exists('$(NanoFrameworkProjectSystemPath)NFProjectSystem.props')" />

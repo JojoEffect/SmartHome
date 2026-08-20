@@ -1,11 +1,11 @@
 ---
 name: smarthome-test
-description: Run the SmartHome NFUnitTest unit test suite on real ESP32 hardware. Use when asked to run the unit tests or verify device-side unit tests pass. For the WiFi/MQTT/sensor end-to-end checks, use smarthome-integration-tests instead.
+description: Run the SmartHome unit test suite (SmartHome.UnitTests) on real ESP32 hardware. Use when asked to run the unit tests or verify device-side unit tests pass. For the WiFi/MQTT/sensor end-to-end checks, use smarthome-integration-tests instead.
 ---
 
 # SmartHome hardware unit test run
 
-Run `scripts\Run-Tests.ps1` — builds `NFUnitTest` and runs it via `vstest.console` + the
+Run `scripts\Run-Tests.ps1` — builds `SmartHome.UnitTests` and runs it via `vstest.console` + the
 nanoFramework test adapter (auto-discovered under `packages\nanoFramework.TestFramework.*\`).
 
 ```powershell
@@ -16,7 +16,7 @@ nanoFramework test adapter (auto-discovered under `packages\nanoFramework.TestFr
 physical device on the configured COM port, same as a deploy. **Always confirm with the user
 before running this**, same rule as `smarthome-deploy`.
 
-This suite is `src\tests\NFUnitTest` only — unit tests, executed on hardware but testing logic,
+This suite is `src\tests\Unit` only — unit tests, executed on hardware but testing logic,
 not the physical environment. The WiFi/broker/sensor end-to-end checks live in
 `src\integrationTests` and have their own entry point (`smarthome-integration-tests`).
 

@@ -1,14 +1,14 @@
 <#
 .SYNOPSIS
-    Build and run the NFUnitTest suite on real hardware via vstest.console.
+    Build and run the unit test suite on real hardware via vstest.console.
 
 .DESCRIPTION
     1. Sources scripts\local.env.ps1 for machine-specific settings.
-    2. Builds the NFUnitTest project with MSBuild.
+    2. Builds the unit test project with MSBuild.
     3. Locates the nanoFramework.TestFramework adapter restored under
        packages\ (classic packages.config restore).
     4. Runs vstest.console against the built test assembly using
-       src\tests\NFUnitTest\nano.runsettings.
+       src\tests\Unit\nano.runsettings.
 
     nano.runsettings has <IsRealHardware>True</IsRealHardware> — this
     deploys test code to and executes it on the physical device on the
@@ -29,7 +29,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Project = 'src\tests\NFUnitTest\NFUnitTest.nfproj',
+    [string]$Project = 'src\tests\Unit\Unit.nfproj',
 
     [string]$Configuration = 'Debug'
 )
@@ -62,7 +62,7 @@ Write-Host "  Build succeeded." -ForegroundColor Green
 
 # ── Locate build output ───────────────────────────────────────────────────────
 $projectDir  = Split-Path $projectPath -Parent
-$projectName = [System.IO.Path]::GetFileNameWithoutExtension($projectPath)
+$projectName = Get-NfProjectAssemblyName -ProjectPath $projectPath
 $testDll     = Join-Path $projectDir "bin\$Configuration\$projectName.dll"
 
 if (-not (Test-Path $testDll)) {

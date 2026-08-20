@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace TestSupport
+namespace SmartHome.IntegrationTests.TestSupport
 {
     /// <summary>
     /// Machine-readable pass/fail markers for the on-device integration tests.

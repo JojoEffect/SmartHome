@@ -53,7 +53,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Start-DevEnv.ps1 [-NoSync] [-Detached]` | Syncs the sibling repos (unless `-NoSync`), then starts local Mosquitto (explicit `0.0.0.0` listener — a bare `-p` binds localhost-only on Mosquitto 2.x and silently can't be reached from a real device) and subscribes to `homie/#`. `-Detached` backgrounds both and returns | No | `smarthome-dev-env` |
 | `scripts\Stop-DevEnv.ps1 [-KeepLog] [-IncludeOrphans]` | Stops whatever `Start-DevEnv.ps1` recorded for the configured port, verifying pid+name+start-time first so a recycled pid is never killed. No-op + exit 0 if nothing is running, so it's safe to call unconditionally. `-IncludeOrphans` also clears brokers/subscribers this repo started that no state file covers | No | `smarthome-dev-env` |
 | `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`) then flashes via `nanoff` | **Yes** | `smarthome-deploy` |
-| `scripts\Run-Tests.ps1` | Builds `NFUnitTest` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** | `smarthome-test` |
+| `scripts\Run-Tests.ps1` | Builds `SmartHome.UnitTests` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** | `smarthome-test` |
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
 | `scripts\Sync-NanoFrameworkRepos.ps1 [-Force]` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
 | `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style | No | `smarthome-restore-packages` |
@@ -105,48 +105,61 @@ Required local tools:
 
 ## Repository layout
 
+Naming rule, no exceptions: **assembly name = root namespace = `SmartHome.<Area>.<Name>`**, while
+the folder and the `.nfproj` file keep the short `<Name>`. So
+`src/devices/RoomSensor/RoomSensor.nfproj` builds `SmartHome.Devices.RoomSensor.exe`.
+
 ```text
 src/
-  common/                 Shared libraries used by device apps and tests alike
-    Device/               SmartHome.Device — NetworkHelper (WiFi connect), shared by
-                            RoomSensor and the integration tests
-    HomieNano/            Shared Homie v4 client library (nanoFramework)
+  common/                 Shared libraries, used by device apps and tests alike
+    Homie/                SmartHome.Homie      — Homie v4 client (SmartHome.Homie.V4 inside)
+    Networking/           SmartHome.Networking — NetworkHelper, the only WiFi connect path
+    Text/                 SmartHome.Text       — StringUtils
   devices/                Real device apps — the things that actually get shipped
-    RoomSensor/           Primary device: temperature/humidity/pressure via BMP280
-    IrrigationControl/
-    OvenControl/
-  integrationTests/       On-device end-to-end checks, one concern each (see below)
-    TestSupport/          IntegrationTest — the PASS/FAIL markers, nothing else
-    WifiTest/             Connects to the configured WiFi network, nothing else
-    MqttTest/             WifiTest's setup + round-trip pub/sub through Mosquitto (plain
+    RoomSensor/           SmartHome.Devices.RoomSensor — temperature/humidity/pressure, BMP280
+    IrrigationControl/    SmartHome.Devices.IrrigationControl
+    OvenControl/          SmartHome.Devices.OvenControl
+  integrationTests/       On-device end-to-end checks, one dependency each (see below)
+    TestSupport/          SmartHome.IntegrationTests.TestSupport — the PASS/FAIL markers
+    WifiCheck/            Connects to the configured WiFi network, nothing else
+    MqttCheck/            WifiCheck's setup + round-trip pub/sub through Mosquitto (plain
                             nanoFramework.M2Mqtt, no HomieMqttClient/retry logic)
-    BMP280Test/           BMP280 (Bme280 driver) sensor reads over I2C, no network
-  tests/                  Unit tests
-    NFUnitTest/           nanoFramework.TestFramework tests, executed on real hardware
-    TestRunner/
-Utils/                    Shared utilities
-scripts/                  Dev-environment and agent helper scripts (see table above)
+    Bmp280Check/          BMP280 (Bme280 driver) sensor reads over I2C, no network
+  tests/
+    Unit/                 SmartHome.UnitTests — nanoFramework.TestFramework, runs on hardware
 tools/
   DeviceDebugMonitor/     Host-side .NET console app (NOT nanoFramework) -- CLI device debugger,
                           see scripts\Watch-DeviceDebugOutput.ps1
+scripts/                  Dev-environment and agent helper scripts (see table above)
 SmartHome.sln
 ```
 
-`RoomSensor/Program.cs` is the main device logic; `HomieMqttClient` (in `HomieNano`) is the
-shared Homie client — as of the last commit its auto-reconnect handling is WIP, blocked on an
+Two naming traps this layout exists to avoid, both hit for real:
+
+- A namespace whose last segment matches a type in scope makes that type unusable. A plain
+  `Device` namespace collided with the `SmartHome.Homie.V4.Device` class, and
+  `SmartHome.Tests.Unit` collided with the `Unit` enum — which is why the unit tests are
+  `SmartHome.UnitTests`, not `SmartHome.Tests.Unit`. Check for a same-named type before adding
+  a namespace segment.
+- `AssemblyName` no longer equals the project file name, so anything hunting build output must
+  read `<AssemblyName>` from the project. `Get-NfProjectAssemblyName` in `Common.ps1` does
+  that; `Deploy-ToDevice.ps1` and `Run-Tests.ps1` use it. Don't reintroduce
+  `GetFileNameWithoutExtension($projectPath)` for that purpose.
+
+`RoomSensor/Program.cs` is the main device logic; `HomieMqttClient` (in `SmartHome.Homie`) is
+the shared Homie client — as of the last commit its auto-reconnect handling is WIP, blocked on an
 ESP32 nanoFramework target bug.
 
 Anything that needs WiFi calls `NetworkHelper.ConnectToConfiguredNetwork()` from
-`src/common/Device` (assembly and namespace `SmartHome.Device` — deliberately not plain
-`Device`, which would collide with the `HomieNano.Version4.Device` class). Don't reintroduce the
-hand-rolled scan/connect loop from the official `BasicExample.WiFi` sample: it races the ESP32's
-own auto-connect and fails intermittently with `WifiConnectionStatus.UnspecifiedFailure` (error
-5). RoomSensor carried that loop until 2026-08-20 and would not join the network on a clean
-boot; `WifiNetworkHelper.Reconnect()` waits for the interface instead of racing it.
+`src/common/Networking`. Don't reintroduce the hand-rolled scan/connect loop from the official
+`BasicExample.WiFi` sample: it races the ESP32's own auto-connect and fails intermittently with
+`WifiConnectionStatus.UnspecifiedFailure` (error 5). RoomSensor carried that loop until
+2026-08-20 and would not join the network on a clean boot; `WifiNetworkHelper.Reconnect()` waits
+for the interface instead of racing it.
 
 ### Three kinds of test, deliberately kept apart
 
-- **`src/tests`** — unit tests (`NFUnitTest`) driven by `vstest.console` and the nanoFramework
+- **`src/tests`** — unit tests (`SmartHome.UnitTests`) driven by `vstest.console` and the nanoFramework
   test adapter. They run *on* hardware but test logic, not the physical environment.
 - **`src/integrationTests`** — one app per external dependency (WiFi, broker, sensor). Each is a
   full device app that boots, exercises exactly one concern, and reports a verdict. Run them via
@@ -167,7 +180,7 @@ these markers *are* the exit code. Emit one as soon as the outcome is known, bef
 loop. Adding a new integration test means: new project under `src\integrationTests`, emit the
 marker, add it to `$testCatalog` in `Run-IntegrationTests.ps1`.
 
-`BMP280Test` links `IntegrationTest.cs` as a shared source file instead of referencing
+`Bmp280Check` links `IntegrationTest.cs` as a shared source file instead of referencing
 `TestSupport` as a project. That kept the WiFi/networking assemblies out of a deliberately
 network-free test; `TestSupport` is mscorlib-only now that `NetworkHelper` moved to
 `src/common/Device`, so the link is no longer strictly required — but it still avoids an
@@ -251,9 +264,9 @@ Likely first candidates here: RoomSensor current readings, Irrigation/Oven comma
 | Properties | `temperature`, `humidity`, `pressure` |
 | Update interval | `5000 ms` |
 
-Note that `MqttTest` hardcodes its own broker (`192.168.1.238`) separately — these two constants
+Note that `MqttCheck` hardcodes its own broker (`192.168.1.238`) separately — these two constants
 drift apart easily, and a stale one is the usual reason a healthy device "can't reach the
-broker". `Run-IntegrationTests.ps1` warns when `MqttTest`'s constant isn't an address of the
+broker". `Run-IntegrationTests.ps1` warns when `MqttCheck`'s constant isn't an address of the
 host machine.
 
 ## Project skills

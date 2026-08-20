@@ -117,6 +117,25 @@ function Get-NanoFrameworkTestAdapterDir {
     return $adapterDll.DirectoryName
 }
 
+function Get-NfProjectAssemblyName {
+    # The built output is named after <AssemblyName>, which since the SmartHome.*
+    # rename is NOT the project file's own name (src\devices\RoomSensor\RoomSensor.nfproj
+    # produces SmartHome.Devices.RoomSensor.exe/.bin). Anything looking for build
+    # output has to read the project rather than assume the two match.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectPath
+    )
+
+    $content = Get-Content -Path $ProjectPath -Raw
+    $match = [regex]::Match($content, '<AssemblyName>\s*([^<]+?)\s*</AssemblyName>')
+    if ($match.Success) {
+        return $match.Groups[1].Value
+    }
+
+    return [System.IO.Path]::GetFileNameWithoutExtension($ProjectPath)
+}
+
 function Get-SiblingRoot {
     $override = [Environment]::GetEnvironmentVariable('SMARTHOME_NANOFW_ROOT')
     if (-not [string]::IsNullOrWhiteSpace($override)) {

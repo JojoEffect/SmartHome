@@ -1,4 +1,4 @@
-﻿namespace RoomSensor
+namespace SmartHome.Devices.RoomSensor
 {
     internal class Constants
     {

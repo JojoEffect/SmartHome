@@ -2,7 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 
-namespace IrrigationControl
+namespace SmartHome.Devices.IrrigationControl
 {
     public class Program
     {

@@ -2,7 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 
-namespace OvenControl
+namespace SmartHome.Devices.OvenControl
 {
     public class Program
     {

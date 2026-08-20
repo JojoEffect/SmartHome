@@ -26,7 +26,7 @@ SmartHome is a .NET **nanoFramework** solution for ESP32-based home automation d
 | `scripts\Start-DevEnv.ps1` | Sync companion repos (`-NoSync` to skip), start Mosquitto, subscribe to `homie/#`. `-Detached` backgrounds it |
 | `scripts\Stop-DevEnv.ps1` | Stop what `Start-DevEnv.ps1` started. Safe to call when nothing is running |
 | `scripts\Deploy-ToDevice.ps1` | Build and deploy a nanoFramework project to the ESP32 via `nanoff` |
-| `scripts\Run-Tests.ps1` | Build and run the `NFUnitTest` unit test suite on the device |
+| `scripts\Run-Tests.ps1` | Build and run the `SmartHome.UnitTests` unit test suite on the device |
 | `scripts\Run-IntegrationTests.ps1` | Run the whole `src\integrationTests` suite (WiFi, MQTT, BMP280) in one call |
 | `scripts\Sync-NanoFrameworkRepos.ps1` | Keep the companion nanoFramework repositories current |
 | `scripts\Restore-Packages.ps1` | Restore `packages.config` NuGet packages from the local cache |
@@ -39,8 +39,8 @@ SmartHome is a .NET **nanoFramework** solution for ESP32-based home automation d
 
 - `src\devices\` — real device applications (RoomSensor, IrrigationControl, OvenControl)
 - `src\integrationTests\` — on-device end-to-end checks, one external dependency each
-- `src\tests\` — unit tests (`NFUnitTest`, `TestRunner`)
-- `src\common\` — shared libraries (`HomieNano`)
+- `src\tests\` — the unit test suite (`SmartHome.UnitTests`)
+- `src\common\` — shared libraries (`SmartHome.Homie`, `SmartHome.Networking`, `SmartHome.Text`)
 - `tools\` — host-side tooling (`DeviceDebugMonitor`)
 
 See [`CLAUDE.md`](CLAUDE.md) for the full repo-specific workflow, the companion nanoFramework repositories, and Skills Discovery / MCP integration guidance.

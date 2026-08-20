@@ -1,6 +1,6 @@
 ---
 name: device-ops
-description: Use for build/deploy/test/mosquitto-observe workflows on SmartHome devices (RoomSensor, IrrigationControl, OvenControl) — building an .nfproj, flashing the ESP32, running the NFUnitTest unit suite or the on-device integration suite, or watching Homie MQTT traffic. Not for general code changes unrelated to the build/deploy/test loop.
+description: Use for build/deploy/test/mosquitto-observe workflows on SmartHome devices (RoomSensor, IrrigationControl, OvenControl) — building an .nfproj, flashing the ESP32, running the unit suite or the on-device integration suite, or watching Homie MQTT traffic. Not for general code changes unrelated to the build/deploy/test loop.
 tools: Bash, Read, Grep, Glob, Edit
 ---
 
@@ -27,7 +27,7 @@ Scripts you own (each has a matching `.claude/skills/smarthome-*` skill too):
   deploy "succeeds" but the device never does anything afterward, verify with
   `Watch-DeviceDebugOutput.ps1` before assuming it's an application bug — check for
   `CLR_E_WRONG_TYPE` / zero-assembly resolution, which means this address is stale again.
-- `scripts\Run-Tests.ps1` — build + run the `NFUnitTest` unit suite on hardware.
+- `scripts\Run-Tests.ps1` — build + run the `SmartHome.UnitTests` unit suite on hardware.
 - `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` — the whole `src\integrationTests`
   suite in one call: starts a detached broker, then per test deploys, captures managed debug
   output, and reads the `[ITEST] <name> PASS/FAIL` marker; stops the broker and prints a summary.
@@ -94,7 +94,7 @@ sibling repos) is regular reversible work — no confirmation needed for those.
   `src/common/`), keep changes narrowly scoped to what was asked — this is embedded C# running on
   real hardware, not a place for speculative abstraction.
 - Anything needing WiFi calls `NetworkHelper.ConnectToConfiguredNetwork()` from
-  `src/common/Device` (`SmartHome.Device`). Never reintroduce the hand-rolled scan/connect loop
+  `src/common/Networking` (`SmartHome.Networking`). Never reintroduce the hand-rolled scan/connect loop
   from the `BasicExample.WiFi` sample — it races the ESP32's auto-connect and fails
   intermittently with error 5 (`UnspecifiedFailure`), which is exactly what kept RoomSensor off
   the network until 2026-08-20.

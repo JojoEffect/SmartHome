@@ -1,15 +1,15 @@
-using HomieNano.Version4;
-using HomieNano.Version4.Builder;
-using HomieNano.Version4.Properties;
+using SmartHome.Homie.V4;
+using SmartHome.Homie.V4.Builder;
+using SmartHome.Homie.V4.Properties;
 using Microsoft.Extensions.Logging;
 using nanoFramework.Logging;
 using nanoFramework.Logging.Debug;
 using System;
 using System.Threading;
 using nanoFramework.M2Mqtt.Exceptions;
-using SmartHome.Device;
+using SmartHome.Networking;
 
-namespace RoomSensor
+namespace SmartHome.Devices.RoomSensor
 {
     public class Program
     {

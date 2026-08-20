@@ -12,7 +12,7 @@
       3. decides the outcome by matching the "[ITEST] <name> PASS/FAIL" marker the
          test emits (see src\integrationTests\TestSupport\IntegrationTest.cs).
 
-    A local Mosquitto broker is started detached for the run (MqttTest needs one) and
+    A local Mosquitto broker is started detached for the run (MqttCheck needs one) and
     stopped again at the end, even if the suite fails.
 
     On success this prints a one-line-per-test summary and exits 0 -- nothing else to
@@ -23,8 +23,8 @@
     COM port, once per test. Treat it exactly like Deploy-ToDevice.ps1. ***
 
 .PARAMETER Tests
-    Subset of tests to run, by name (WifiTest, MqttTest, BMP280Test). Default: all,
-    in dependency order -- WiFi first, since MqttTest can only fail confusingly if
+    Subset of tests to run, by name (WifiCheck, MqttCheck, Bmp280Check). Default: all,
+    in dependency order -- WiFi first, since MqttCheck can only fail confusingly if
     the network itself is broken.
 
 .PARAMETER Configuration
@@ -40,14 +40,14 @@
 
 .EXAMPLE
     .\scripts\Run-IntegrationTests.ps1
-    .\scripts\Run-IntegrationTests.ps1 -Tests WifiTest,MqttTest
+    .\scripts\Run-IntegrationTests.ps1 -Tests WifiCheck,MqttCheck
     .\scripts\Run-IntegrationTests.ps1 -NoBroker -Configuration Release
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet('WifiTest', 'MqttTest', 'BMP280Test')]
-    [string[]]$Tests = @('WifiTest', 'MqttTest', 'BMP280Test'),
+    [ValidateSet('WifiCheck', 'MqttCheck', 'Bmp280Check')]
+    [string[]]$Tests = @('WifiCheck', 'MqttCheck', 'Bmp280Check'),
 
     [string]$Configuration = 'Debug',
 
@@ -67,12 +67,12 @@ $mqttPort = Get-OptionalEnvValue -Name 'SMARTHOME_MQTT_PORT' -DefaultValue '1883
 
 # Per-test capture window. These are "long enough that a healthy device has already
 # reported", not "how long the test takes" -- every test emits its marker as early as
-# the outcome is known, and then idles. WifiTest gets the longest window because
+# the outcome is known, and then idles. WifiCheck gets the longest window because
 # NetworkHelper's own connect timeout is 60s.
 $testCatalog = @{
-    'WifiTest'   = @{ Project = 'src\integrationTests\WifiTest\WifiTest.nfproj';     CaptureSeconds = 75 }
-    'MqttTest'   = @{ Project = 'src\integrationTests\MqttTest\MqttTest.nfproj';     CaptureSeconds = 90 }
-    'BMP280Test' = @{ Project = 'src\integrationTests\BMP280Test\BMP280Test.nfproj'; CaptureSeconds = 45 }
+    'WifiCheck'   = @{ Project = 'src\integrationTests\WifiCheck\WifiCheck.nfproj';       CaptureSeconds = 75 }
+    'MqttCheck'   = @{ Project = 'src\integrationTests\MqttCheck\MqttCheck.nfproj';       CaptureSeconds = 90 }
+    'Bmp280Check' = @{ Project = 'src\integrationTests\Bmp280Check\Bmp280Check.nfproj'; CaptureSeconds = 45 }
 }
 
 if (-not $LogDirectory) {
@@ -85,12 +85,12 @@ $deployScript = Join-Path $PSScriptRoot 'Deploy-ToDevice.ps1'
 $watchScript  = Join-Path $PSScriptRoot 'Watch-DeviceDebugOutput.ps1'
 
 # ── Pre-flight ────────────────────────────────────────────────────────────────
-# MqttTest's broker address is a compile-time constant in its Program.cs, not a
+# MqttCheck's broker address is a compile-time constant in its Program.cs, not a
 # local.env value -- a stale constant is by far the most common reason for that
 # test to "fail" on a perfectly healthy device, so say so up front rather than
 # leaving it to be rediscovered from the log.
-if ($Tests -contains 'MqttTest') {
-    $mqttProgram = Join-Path $repoRoot 'src\integrationTests\MqttTest\Program.cs'
+if ($Tests -contains 'MqttCheck') {
+    $mqttProgram = Join-Path $repoRoot 'src\integrationTests\MqttCheck\Program.cs'
     $brokerMatch = Select-String -Path $mqttProgram -Pattern 'BrokerHost\s*=\s*"([^"]+)"' | Select-Object -First 1
     if ($brokerMatch) {
         $codeBroker = $brokerMatch.Matches[0].Groups[1].Value
@@ -102,7 +102,7 @@ if ($Tests -contains 'MqttTest') {
             # No Get-NetIPAddress here -- skip the check rather than fail the run.
         }
         if ($localAddresses.Count -gt 0 -and ($localAddresses -notcontains $codeBroker)) {
-            Write-Warning "MqttTest targets broker $codeBroker, which is not an address of this machine ($($localAddresses -join ', ')). If MqttTest fails to connect, update BrokerHost in src\integrationTests\MqttTest\Program.cs."
+            Write-Warning "MqttCheck targets broker $codeBroker, which is not an address of this machine ($($localAddresses -join ', ')). If MqttCheck fails to connect, update BrokerHost in src\integrationTests\MqttCheck\Program.cs."
         }
     }
 }

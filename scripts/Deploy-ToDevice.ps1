@@ -56,10 +56,10 @@ param(
     # the image file's own byte length, not the full "deploy" partition -- so
     # deploying a SMALLER app after a LARGER one leaves that previous app's
     # trailing assembly bytes sitting unerased past the new image's end, and
-    # the CLR loads BOTH on boot (confirmed: saw WifiTest's own small assembly
-    # list plus leftover BMP280Test assemblies in the same resolution pass,
-    # failing to link because bytes past WifiTest's real end were stale
-    # BMP280Test data, not blank flash). Padding to a fixed size makes every
+    # the CLR loads BOTH on boot (confirmed: saw WifiCheck's own small assembly
+    # list plus leftover Bmp280Check assemblies in the same resolution pass,
+    # failing to link because bytes past WifiCheck's real end were stale
+    # Bmp280Check data, not blank flash). Padding to a fixed size makes every
     # deploy erase+write the same footprint regardless of app size. 400KB
     # comfortably covers every project in this repo today; the partition
     # itself is 0x1C0000 (~1.75MB), so there's plenty of headroom to raise
@@ -102,7 +102,7 @@ Write-Host "  Build succeeded." -ForegroundColor Green
 # ── Locate build output ───────────────────────────────────────────────────────
 $projectDir = Split-Path $projectPath -Parent
 $binDir     = Join-Path $projectDir "bin\$Configuration"
-$projectName = [System.IO.Path]::GetFileNameWithoutExtension($projectPath)
+$projectName = Get-NfProjectAssemblyName -ProjectPath $projectPath
 
 if (-not (Test-Path $binDir)) {
     Write-Error "Build output directory not found: $binDir"
