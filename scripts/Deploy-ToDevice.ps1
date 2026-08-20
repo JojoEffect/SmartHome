@@ -49,7 +49,22 @@ param(
     # If this ever goes stale again (firmware update changes the partition
     # layout), re-derive it from a boot log: .\scripts\Watch-DeviceSerial.ps1
     # and read the "deploy" line's Offset column from the printed partition table.
-    [string]$DeployAddress = '0x1E0000'
+    [string]$DeployAddress = '0x1E0000',
+
+    # Every deployed image gets padded with trailing 0xFF (erased-flash value)
+    # bytes up to this size before flashing. nanoff's erase+write only covers
+    # the image file's own byte length, not the full "deploy" partition -- so
+    # deploying a SMALLER app after a LARGER one leaves that previous app's
+    # trailing assembly bytes sitting unerased past the new image's end, and
+    # the CLR loads BOTH on boot (confirmed: saw WifiTest's own small assembly
+    # list plus leftover BMP280Test assemblies in the same resolution pass,
+    # failing to link because bytes past WifiTest's real end were stale
+    # BMP280Test data, not blank flash). Padding to a fixed size makes every
+    # deploy erase+write the same footprint regardless of app size. 400KB
+    # comfortably covers every project in this repo today; the partition
+    # itself is 0x1C0000 (~1.75MB), so there's plenty of headroom to raise
+    # this if a future project's image ever gets close to it.
+    [int]$PaddedImageSize = 409600
 )
 
 Set-StrictMode -Version Latest
@@ -114,7 +129,22 @@ if (-not (Test-Path $deployImage)) {
     exit 1
 }
 
-nanoff --deploy --serialport $comPort --image "$deployImage" --address $DeployAddress
+$imageBytes = [System.IO.File]::ReadAllBytes($deployImage)
+if ($imageBytes.Length -gt $PaddedImageSize) {
+    Write-Error "Deploy image ($($imageBytes.Length) bytes) is larger than -PaddedImageSize ($PaddedImageSize bytes). Raise -PaddedImageSize."
+    exit 1
+}
+
+$paddedImage = Join-Path $binDir ($projectName + '.padded.bin')
+$padded = New-Object byte[] $PaddedImageSize
+[Array]::Copy($imageBytes, $padded, $imageBytes.Length)
+for ($i = $imageBytes.Length; $i -lt $PaddedImageSize; $i++) {
+    $padded[$i] = 0xFF
+}
+[System.IO.File]::WriteAllBytes($paddedImage, $padded)
+Write-Host "  Padded deploy image: $($imageBytes.Length) -> $PaddedImageSize bytes (0xFF fill, clears any stale prior deployment)." -ForegroundColor DarkGray
+
+nanoff --deploy --serialport $comPort --image "$paddedImage" --address $DeployAddress
 if ($LASTEXITCODE -ne 0) {
     Write-Error "nanoff deploy failed (exit code $LASTEXITCODE)."
     exit $LASTEXITCODE

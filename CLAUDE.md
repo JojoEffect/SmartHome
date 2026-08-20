@@ -71,12 +71,17 @@ git-ignored — never commit them.
 
 ```text
 src/
-  common/HomieNano/       Shared Homie v4 client library (nanoFramework)
+  common/
+    HomieNano/            Shared Homie v4 client library (nanoFramework)
+    TestSupport/          Shared WiFi-connect helper for WifiTest/MqttTest (NetworkHelper)
   devices/
     RoomSensor/           Primary device: temperature/humidity/pressure via BMP280
     IrrigationControl/
     OvenControl/
-    Test/
+    WifiTest/             Isolated check: connects to the configured WiFi network, nothing else
+    MqttTest/             WifiTest's setup + round-trip pub/sub through Mosquitto (plain
+                           nanoFramework.M2Mqtt, no HomieMqttClient/retry logic)
+    BMP280Test/           Isolated check: BMP280 (Bme280 driver) sensor reads over I2C, no network
   tests/
     NFUnitTest/           Real-hardware unit tests (nanoFramework.TestFramework)
     TestRunner/

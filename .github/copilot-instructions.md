@@ -14,12 +14,16 @@ The local agent workflow is built around:
 
 ```text
 src/
-common/HomieNano/       # Shared Homie v4 client library (nanoFramework)
+common/
+   HomieNano/            # Shared Homie v4 client library (nanoFramework)
+   TestSupport/          # Shared WiFi-connect helper for WifiTest/MqttTest
 devices/
    RoomSensor/           # Primary device: temperature/humidity/pressure via BMP280
    IrrigationControl/
    OvenControl/
-   Test/
+   WifiTest/             # Isolated check: WiFi connect only
+   MqttTest/             # WifiTest's setup + round-trip pub/sub through Mosquitto
+   BMP280Test/           # Isolated check: BMP280 sensor reads only, no network
 tests/
    NFUnitTest/
    TestRunner/
