@@ -51,7 +51,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | Script | Does | Touches hardware? | Skill |
 |---|---|---|---|
 | `scripts\Start-DevEnv.ps1 [-NoSync] [-Detached]` | Syncs the sibling repos (unless `-NoSync`), then starts local Mosquitto (explicit `0.0.0.0` listener — a bare `-p` binds localhost-only on Mosquitto 2.x and silently can't be reached from a real device) and subscribes to `homie/#`. `-Detached` backgrounds both and returns | No | `smarthome-dev-env` |
-| `scripts\Stop-DevEnv.ps1 [-KeepLog]` | Stops whatever `Start-DevEnv.ps1` recorded for the configured port. No-op + exit 0 if nothing is running, so it's safe to call unconditionally | No | `smarthome-dev-env` |
+| `scripts\Stop-DevEnv.ps1 [-KeepLog] [-IncludeOrphans]` | Stops whatever `Start-DevEnv.ps1` recorded for the configured port, verifying pid+name+start-time first so a recycled pid is never killed. No-op + exit 0 if nothing is running, so it's safe to call unconditionally. `-IncludeOrphans` also clears brokers/subscribers this repo started that no state file covers | No | `smarthome-dev-env` |
 | `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`) then flashes via `nanoff` | **Yes** | `smarthome-deploy` |
 | `scripts\Run-Tests.ps1` | Builds `NFUnitTest` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** | `smarthome-test` |
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
@@ -64,6 +64,15 @@ have a script yet, that's a gap worth closing rather than working around.
 `Start-DevEnv.ps1` is the session bootstrap: it absorbed the old `Start-AgentWorkspace.ps1`,
 which was only `Sync-NanoFrameworkRepos.ps1` followed by `Start-DevEnv.ps1`. Pass `-NoSync` when
 the siblings are known current or you're offline.
+
+Two things about `Start-DevEnv.ps1` worth knowing before changing it. Its background children
+are started through ShellExecute (`-WindowStyle`, never `-RedirectStandardOutput`) and log via
+Mosquitto's own `log_dest file` and a `cmd.exe` redirect wrapper. That is not stylistic: the
+`-Redirect*` switches force `UseShellExecute=false`, and .NET then creates the child with
+`bInheritHandles=TRUE`, handing it *every* inheritable handle including this script's stdout --
+so `.\scripts\Start-DevEnv.ps1 -Detached | tail` would hang forever waiting for an EOF the
+surviving child still holds open. And a stale state file (Ctrl+C, killed shell, reboot) is
+cleared automatically; it refuses only when the recorded processes are genuinely alive.
 
 Every script here has a matching project skill under `.claude/skills/smarthome-*` — prefer
 invoking the skill (or just running the script directly) over re-deriving the workflow ad hoc.

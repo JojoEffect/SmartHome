@@ -220,9 +220,14 @@ function Invoke-GitCloneOrUpdate {
 }
 
 # ── Dev-environment state ─────────────────────────────────────────────────────
-# Start-DevEnv.ps1 records the PIDs it spawned so Stop-DevEnv.ps1 (or the
-# integration-test runner) can shut them down from a different shell. Keyed by
+# Start-DevEnv.ps1 records what it spawned so Stop-DevEnv.ps1 (or the
+# integration-test runner) can shut it down from a different shell. Keyed by
 # MQTT port so two ports can be up at once without clobbering each other.
+#
+# Each entry stores the process NAME and START TIME next to the PID on purpose:
+# Windows recycles PIDs, so a state file left behind by a crash could otherwise
+# name a PID that now belongs to something else entirely -- and Stop-DevEnv.ps1
+# would kill an unrelated process. Every lookup re-verifies all three.
 
 function Get-SmartHomeDevEnvStateFile {
     param(
@@ -231,6 +236,185 @@ function Get-SmartHomeDevEnvStateFile {
     )
 
     return (Join-Path ([System.IO.Path]::GetTempPath()) "smarthome-devenv-$Port.json")
+}
+
+function Get-SmartHomeRecordValue {
+    # Reads one field from a state record that may be a hashtable (freshly built)
+    # or a PSCustomObject (round-tripped through JSON), without tripping
+    # Set-StrictMode on a field an older state file didn't have.
+    param(
+        $Record,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($null -eq $Record) {
+        return $null
+    }
+
+    if ($Record -is [hashtable]) {
+        if ($Record.ContainsKey($Name)) {
+            return $Record[$Name]
+        }
+        return $null
+    }
+
+    $property = $Record.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return $property.Value
+}
+
+function New-SmartHomeProcessRecord {
+    param(
+        [System.Diagnostics.Process]$Process,
+
+        # Set when the recorded process is a launcher (e.g. a cmd.exe wrapper doing
+        # the log redirect) and the real work happens in its children: stopping it
+        # then has to take the whole tree, or the grandchild is orphaned.
+        [switch]$Tree
+    )
+
+    if ($null -eq $Process) {
+        return $null
+    }
+
+    return @{
+        Id        = $Process.Id
+        Name      = $Process.ProcessName
+        StartTime = $Process.StartTime.ToString('o')
+        Tree      = [bool]$Tree
+    }
+}
+
+function Get-SmartHomeRecordedProcess {
+    # Returns the live process ONLY when pid, name and start time all still match.
+    # Anything else (exited, or a recycled pid now owned by another program) is
+    # reported as "not running" rather than acted on.
+    param(
+        $Record
+    )
+
+    $processId = Get-SmartHomeRecordValue -Record $Record -Name 'Id'
+    if ($null -eq $processId) {
+        return $null
+    }
+
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+        return $null
+    }
+
+    $recordedName = Get-SmartHomeRecordValue -Record $Record -Name 'Name'
+    if ($recordedName -and $process.ProcessName -ne $recordedName) {
+        return $null
+    }
+
+    $recordedStart = Get-SmartHomeRecordValue -Record $Record -Name 'StartTime'
+    if ($recordedStart) {
+        try {
+            $parsed = [datetime]::Parse(
+                $recordedStart,
+                [cultureinfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::RoundtripKind)
+
+            if ([math]::Abs(($process.StartTime - $parsed).TotalSeconds) -gt 2) {
+                return $null
+            }
+        }
+        catch {
+            return $null
+        }
+    }
+
+    return $process
+}
+
+function Stop-SmartHomeRecordedProcess {
+    param(
+        $Record,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    $processId = Get-SmartHomeRecordValue -Record $Record -Name 'Id'
+    if ($null -eq $processId) {
+        return
+    }
+
+    $process = Get-SmartHomeRecordedProcess -Record $Record
+    if ($null -eq $process) {
+        $occupant = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($occupant) {
+            Write-Warning ("Not stopping PID {0} ({1}): that pid now belongs to '{2}'. Leaving it alone." -f $processId, $Label, $occupant.ProcessName)
+        }
+        else {
+            Write-Host ("  {0} (PID {1}) already gone." -f $Label, $processId) -ForegroundColor DarkGray
+        }
+        return
+    }
+
+    Write-Host ("  Stopping {0} (PID {1})..." -f $Label, $processId) -ForegroundColor Yellow
+
+    if (Get-SmartHomeRecordValue -Record $Record -Name 'Tree') {
+        # taskkill /T takes the children too. Stop-Process would kill only the
+        # launcher and leave the real process running with no way back to it.
+        & taskkill.exe /PID $processId /T /F *> $null
+        return
+    }
+
+    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+}
+
+function Test-SmartHomeDevEnvRunning {
+    # True when at least one recorded process is still genuinely alive.
+    param(
+        $State
+    )
+
+    foreach ($name in @('Broker', 'Subscriber')) {
+        $record = Get-SmartHomeRecordValue -Record $State -Name $name
+        if (Get-SmartHomeRecordedProcess -Record $record) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-SmartHomeOrphanBroker {
+    # Mosquitto instances this repo started that no state file covers any more:
+    # a run from before the state file existed, or one whose shell was killed
+    # hard. Matched on OUR generated config file name, so a broker someone else
+    # started (a service, another project) is never touched.
+    param(
+        [string]$Port
+    )
+
+    $pattern = if ($Port) { "smarthome-mosquitto-$Port\.conf" } else { 'smarthome-mosquitto-\d+\.conf' }
+
+    Get-CimInstance Win32_Process -Filter "Name = 'mosquitto.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -match $pattern }
+}
+
+function Get-SmartHomeOrphanSubscriber {
+    # The homie/# subscriber half of the same problem. Its own command line has no
+    # log path on it (the cmd.exe wrapper owns the redirect), so it is matched on
+    # the subscription this repo makes -- `-t homie/#` on the configured port.
+    param(
+        [string]$Port
+    )
+
+    Get-CimInstance Win32_Process -Filter "Name = 'mosquitto_sub.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.CommandLine -and
+            $_.CommandLine -match 'homie/#' -and
+            (-not $Port -or $_.CommandLine -match "-p\s+$Port\b")
+        }
 }
 
 function Save-SmartHomeDevEnvState {
@@ -245,7 +429,7 @@ function Save-SmartHomeDevEnvState {
     # Deliberately returns nothing: callers only care that the state landed, and a
     # returned path would leak into their own output stream.
     $stateFile = Get-SmartHomeDevEnvStateFile -Port $Port
-    $State | ConvertTo-Json | Set-Content -Path $stateFile -Encoding utf8
+    $State | ConvertTo-Json -Depth 4 | Set-Content -Path $stateFile -Encoding utf8
 }
 
 function Get-SmartHomeDevEnvState {

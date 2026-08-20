@@ -13,8 +13,13 @@ Scripts you own (each has a matching `.claude/skills/smarthome-*` skill too):
   subscription, for observing device behavior. This is the single dev-env entry point; the old
   `Start-AgentWorkspace.ps1` was folded into it. `-Detached` backgrounds the broker and the
   subscriber and returns.
-- `scripts\Stop-DevEnv.ps1 [-KeepLog]` — stops whatever `Start-DevEnv.ps1` recorded. Exits 0 when
-  nothing is running, so it's safe to call at the end of any run.
+- `scripts\Stop-DevEnv.ps1 [-KeepLog] [-IncludeOrphans]` — stops whatever `Start-DevEnv.ps1`
+  recorded, after verifying pid+name+start-time so a recycled pid is never killed. Exits 0 when
+  nothing is running, so it's safe to call at the end of any run. `-IncludeOrphans` clears
+  brokers/subscribers this repo started that no state file covers.
+- Don't rewrite `Start-DevEnv.ps1`'s child launches to use `-RedirectStandardOutput`: that forces
+  handle inheritance and makes piping the script's output hang forever. The ShellExecute +
+  `log_dest file` + `cmd.exe` wrapper arrangement is deliberate and commented in the script.
 - `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug|Release] [-DeployAddress <hex>]`
   — build + flash. `-DeployAddress` defaults to this device's current real `deploy` partition
   offset (`0x1E0000`) — `nanoff`'s own hardcoded default (`0x1B0000`) landed inside the
