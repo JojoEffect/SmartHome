@@ -9,139 +9,47 @@ using System.Threading;
 using nanoFramework.M2Mqtt;
 using nanoFramework.M2Mqtt.Messages;
 using System.Device.Wifi;
-using nanoFramework.Hardware.Esp32;
-using System.Device.I2c;
-using Iot.Device.Bmxx80;
-using Iot.Device.Common;
-using Iot.Device.Bmxx80.FilteringMode;
-
 
 namespace Test
 {
+    // Minimal network + MQTT connect validation: no HomieMqttClient, no Homie protocol,
+    // no reconnect/retry logic. A single Connect() call, live or die -- isolates whether
+    // the WSAEWOULDBLOCK connect failure is in RoomSensor/HomieNano's own code or purely
+    // upstream (nanoFramework.M2Mqtt / System.Net / firmware).
     public class Program
     {
+        private const string BrokerHost = "192.168.1.238";
+        private const string StatusTopic = "smarthome-test/status";
+        private const string HeartbeatTopic = "smarthome-test/heartbeat";
+        private const string EchoTopic = "smarthome-test/echo";
+
         public static void Main()
         {
-
-            // STEP 1: setup network
-            // You need to set Wifi connection credentials in the configuration first!
-            // Go to Device Explorer -> Edit network configuration -> Wifi proiles and set SSID and password there.
             SetupAndConnectNetwork();
 
-            // STEP 2: connect to MQTT broker
-            // Warning: test.mosquitto.org is very slow and congested, and is only suitable for very basic validation testing.
-            // Change it to your local broker as soon as possible.
-            var client = new MqttClient("192.168.1.22");
+            Debug.WriteLine($"Connecting MQTT to {BrokerHost}...");
+            var client = new MqttClient(BrokerHost);
             var clientId = Guid.NewGuid().ToString();
-            client.Connect(clientId);
 
-            // STEP 3: subscribe to topics you want
-            client.Subscribe(new[] { "test/topic" }, new[] { MqttQoSLevel.AtLeastOnce });
+            // Deliberately no retry/try-catch here -- a bare Connect() call, same as
+            // isolating the failure requires. Let it throw if it throws.
+            client.Connect(clientId);
+            Debug.WriteLine("MQTT connected.");
+
+            client.Subscribe(new[] { EchoTopic }, new[] { MqttQoSLevel.AtLeastOnce });
             client.MqttMsgPublishReceived += HandleIncomingMessage;
 
-            Debug.WriteLine("Hello Bme280!");
+            client.Publish(StatusTopic, Encoding.UTF8.GetBytes("connected"), null, null, MqttQoSLevel.AtLeastOnce, false);
+            Debug.WriteLine("Published initial status.");
 
-            //////////////////////////////////////////////////////////////////////
-            // when connecting to an ESP32 device, need to configure the I2C GPIOs
-            // used for the bus
-            Configuration.SetPinFunction(21, DeviceFunction.I2C1_DATA);
-            Configuration.SetPinFunction(22, DeviceFunction.I2C1_CLOCK);
-
-            // bus id on the MCU
-            const int busId = 1;
-            // set this to the current sea level pressure in the area for correct altitude readings
-            UnitsNet.Pressure defaultSeaLevelPressure = WeatherHelper.MeanSeaLevel;
-
-            I2cConnectionSettings i2cSettings = new(busId, Bme280.SecondaryI2cAddress);
-            using I2cDevice i2cDevice = I2cDevice.Create(i2cSettings);
-            using Bme280 bme80 = new Bme280(i2cDevice)
-            {
-                // set higher sampling
-                TemperatureSampling = Sampling.LowPower,
-                PressureSampling = Sampling.UltraHighResolution,
-                HumiditySampling = Sampling.Standard,
-            };
-
+            int counter = 0;
             while (true)
             {
-                // Perform a synchronous measurement
-                var readResult = bme80.Read();
-
-                // Note that if you already have the pressure value and the temperature, you could also calculate altitude by using
-                // var altValue = WeatherHelper.CalculateAltitude(preValue, defaultSeaLevelPressure, tempValue) which would be more performant.
-                bme80.TryReadAltitude(defaultSeaLevelPressure, out var altValue);
-
-                if (readResult.TemperatureIsValid)
-                {
-                    Debug.WriteLine($"Temperature: {readResult.Temperature.DegreesCelsius}\u00B0C");
-                }
-                if (readResult.PressureIsValid)
-                {
-                    Debug.WriteLine($"Pressure: {readResult.Pressure.Hectopascals}hPa");
-                }
-
-                if (readResult.TemperatureIsValid && readResult.PressureIsValid)
-                {
-                    Debug.WriteLine($"Altitude: {altValue.Meters}m");
-                }
-
-                if (readResult.HumidityIsValid)
-                {
-                    Debug.WriteLine($"Relative humidity: {readResult.Humidity.Percent}%");
-                }
-
-                // WeatherHelper supports more calculations, such as saturated vapor pressure, actual vapor pressure and absolute humidity.
-                if (readResult.TemperatureIsValid && readResult.HumidityIsValid)
-                {
-                    Debug.WriteLine($"Heat index: {WeatherHelper.CalculateHeatIndex(readResult.Temperature, readResult.Humidity).DegreesCelsius}\u00B0C");
-                    Debug.WriteLine($"Dew point: {WeatherHelper.CalculateDewPoint(readResult.Temperature, readResult.Humidity).DegreesCelsius}\u00B0C");
-                }
-
-                Thread.Sleep(1000);
-
-                // change sampling and filter
-                bme80.TemperatureSampling = Sampling.UltraHighResolution;
-                bme80.PressureSampling = Sampling.UltraLowPower;
-                bme80.HumiditySampling = Sampling.UltraLowPower;
-                bme80.FilterMode = Bmx280FilteringMode.X2;
-
-                // Perform an asynchronous measurement
-                readResult = bme80.Read();
-
-                // Note that if you already have the pressure value and the temperature, you could also calculate altitude by using
-                // var altValue = WeatherHelper.CalculateAltitude(preValue, defaultSeaLevelPressure, tempValue) which would be more performant.
-                bme80.TryReadAltitude(defaultSeaLevelPressure, out altValue);
-
-                if (readResult.TemperatureIsValid)
-                {
-                    Debug.WriteLine($"Temperature: {readResult.Temperature.DegreesCelsius}\u00B0C");
-                }
-                if (readResult.PressureIsValid)
-                {
-                    Debug.WriteLine($"Pressure: {readResult.Pressure.Hectopascals}hPa");
-                }
-
-                Debug.WriteLine($"Altitude: {altValue.Meters}m");
-
-                if (readResult.HumidityIsValid)
-                {
-                    Debug.WriteLine($"Relative humidity: {readResult.Humidity.Percent}%");
-                }
-
-                // WeatherHelper supports more calculations, such as saturated vapor pressure, actual vapor pressure and absolute humidity.
-                if (readResult.TemperatureIsValid && readResult.HumidityIsValid)
-                {
-                    Debug.WriteLine($"Heat index: {WeatherHelper.CalculateHeatIndex(readResult.Temperature, readResult.Humidity).DegreesCelsius}\u00B0C");
-                    Debug.WriteLine($"Dew point: {WeatherHelper.CalculateDewPoint(readResult.Temperature, readResult.Humidity).DegreesCelsius}\u00B0C");
-                }
-
-                client.Publish("test/topic", Encoding.UTF8.GetBytes("===== Hello MQTT! ====="), null, null, MqttQoSLevel.AtLeastOnce, false);
-
+                counter++;
+                Debug.WriteLine($"Publishing heartbeat #{counter}...");
+                client.Publish(HeartbeatTopic, Encoding.UTF8.GetBytes(counter.ToString()), null, null, MqttQoSLevel.AtMostOnce, false);
                 Thread.Sleep(5000);
             }
-
-            // STEP 5: disconnecting
-            client.Disconnect();
         }
 
         private static void HandleIncomingMessage(object sender, MqttMsgPublishEventArgs e)
@@ -160,7 +68,7 @@ namespace Test
             // Begin network scan.
             wifiAdapter.ScanAsync();
 
-            // While networks are being scan, continue on configuration. If networks were set previously, 
+            // While networks are being scan, continue on configuration. If networks were set previously,
             // board may already be auto-connected, so reconnection is not even needed.
             var wiFiConfiguration = Wireless80211Configuration.GetAllWireless80211Configurations()[0];
             var ipAddress = NetworkInterface.GetAllNetworkInterfaces()[0].IPv4Address;

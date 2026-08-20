@@ -10,13 +10,25 @@ first for the full script table and repo layout.
 
 Scripts you own (each has a matching `.claude/skills/smarthome-*` skill too):
 - `scripts\Start-DevEnv.ps1` — Mosquitto + `homie/#` subscription, for observing device behavior.
-- `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug|Release]` — build + flash.
+- `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug|Release] [-DeployAddress <hex>]`
+  — build + flash. `-DeployAddress` defaults to this device's current real `deploy` partition
+  offset (`0x1E0000`) — `nanoff`'s own hardcoded default (`0x1B0000`) landed inside the
+  **factory** partition instead and silently produced a deploy the CLR could never load. If a
+  deploy "succeeds" but the device never does anything afterward, verify with
+  `Watch-DeviceDebugOutput.ps1` before assuming it's an application bug — check for
+  `CLR_E_WRONG_TYPE` / zero-assembly resolution, which means this address is stale again.
 - `scripts\Run-Tests.ps1` — build + run `NFUnitTest` on hardware.
 - `scripts\Restore-Packages.ps1` — restores `packages.config` NuGet packages from the local
   cache; run this if a build succeeds but deploy then fails with "Deploy image not found".
 - `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` — raw serial capture of the
-  native boot log without needing a VS debugger attached. Doesn't show managed
-  `Debug.WriteLine` output past `app_main()` — that still needs VS.
+  native boot log only. nanoCLR silences plain-text logging at `app_main()` and switches to
+  binary WireProtocol, so this can NEVER show managed `Debug.WriteLine`/exception output —
+  don't conclude "nothing is running" from silence here, use the next script instead.
+- `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot]` — real managed-code
+  debug output (`Debug.WriteLine`, exceptions, the CLR's own assembly-resolution log) via
+  `tools\DeviceDebugMonitor`, no VS needed. This is what actually answers "is the app running and
+  what is it doing" — reach for this, not `Watch-DeviceSerial.ps1`, when serial alone is
+  ambiguous.
 - `scripts\Common.ps1` — shared helpers; extend it rather than duplicating its logic elsewhere.
 
 If a recurring unit of work shows up that isn't covered by one of these, add a script (follow

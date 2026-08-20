@@ -11,8 +11,12 @@
     ALTERNATIVE – Visual Studio deploy:
     Open SmartHome.sln, set RoomSensor as the startup project, choose the
     correct COM port in Project > Properties > nanoFramework, and press F5 or
-    Deploy from the Build menu.  Visual Studio uses the same nanoff mechanism
-    under the hood and also attaches the managed debugger.
+    Deploy from the Build menu. This is NOT the same mechanism as this script --
+    VS pushes assemblies directly over the debugger's WireProtocol connection
+    (DebugEngine.DeploymentExecute), while this script flashes a merged .bin via
+    nanoff at a fixed flash address. They can behave differently if that address
+    ever stops matching the device's actual "deploy" partition offset -- see
+    -DeployAddress below.
 
 .NOTES
     Requires:
@@ -32,7 +36,20 @@ param(
     [string]$Project = 'src\devices\RoomSensor\RoomSensor.nfproj',
 
     # Build configuration
-    [string]$Configuration = 'Debug'
+    [string]$Configuration = 'Debug',
+
+    # Flash address of the device's "deploy" partition. nanoFirmwareFlasher's own
+    # default (0x1B0000, from its Esp32Firmware.cs) landed inside the "factory"
+    # partition instead on this device's current firmware/partition layout --
+    # confirmed by watching a cold boot after deploy: the CLR found zero
+    # assemblies (CLR_E_WRONG_TYPE) at nanoff's default address, and the correct
+    # ones at 0x1E0000. That mismatch meant every nanoff-deployed app silently
+    # never ran at all, while VS's debugger-based deploy (a different mechanism
+    # entirely) worked fine -- which is what made this so confusing to diagnose.
+    # If this ever goes stale again (firmware update changes the partition
+    # layout), re-derive it from a boot log: .\scripts\Watch-DeviceSerial.ps1
+    # and read the "deploy" line's Offset column from the printed partition table.
+    [string]$DeployAddress = '0x1E0000'
 )
 
 Set-StrictMode -Version Latest
@@ -97,7 +114,7 @@ if (-not (Test-Path $deployImage)) {
     exit 1
 }
 
-nanoff --deploy --serialport $comPort --image "$deployImage"
+nanoff --deploy --serialport $comPort --image "$deployImage" --address $DeployAddress
 if ($LASTEXITCODE -ne 0) {
     Write-Error "nanoff deploy failed (exit code $LASTEXITCODE)."
     exit $LASTEXITCODE

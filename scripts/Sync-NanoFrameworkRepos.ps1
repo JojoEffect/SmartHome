@@ -29,6 +29,7 @@ $repositories = @(
     'nanoframework/Samples',
     'nanoframework/nf-interpreter',
     'nanoframework/CoreLibrary',
+    'nanoframework/nf-debugger',
     'nanoframework/nanoFramework.WebServer',
     'nanoframework/nanoFramework.IoT.Device',
     'nanoframework/nanoFramework.Hardware.Esp32',

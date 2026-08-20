@@ -128,6 +128,7 @@ These should be cloned **beside** `SmartHome` and kept up to date by `.\scripts\
 | `nanoframework/Samples` | Working examples for APIs and device scenarios |
 | `nanoframework/nf-interpreter` | Firmware, native/runtime internals, target definitions |
 | `nanoframework/CoreLibrary` | Source for `nanoFramework.CoreLibrary` (mscorlib) — **not** part of nf-interpreter, a separate repo, only referenced from it as an external test dependency |
+| `nanoframework/nf-debugger` | Source for `nanoFramework.Tools.Debugger.Net` — the library Visual Studio's debugger extension (and this repo's own `tools\DeviceDebugMonitor`) is built on |
 | `nanoframework/nanoFramework.WebServer` | AI-agent Skills Discovery and MCP examples/docs |
 | `nanoframework/nanoFramework.IoT.Device` | Sensor/device bindings and sample patterns |
 | `nanoframework/nanoFramework.Hardware.Esp32` | ESP32-specific managed APIs used by this repo |

@@ -50,7 +50,8 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Run-Tests.ps1` | Builds `NFUnitTest` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** | `smarthome-test` |
 | `scripts\Sync-NanoFrameworkRepos.ps1` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
 | `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style | No | `smarthome-restore-packages` |
-| `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` | Raw serial capture of the device's native boot log, no debugger needed (managed `Debug.WriteLine` output still needs VS) | Resets only | `smarthome-watch-serial` |
+| `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` | Raw serial capture of the device's native boot log only — nanoCLR silences this at `app_main()` and switches to binary WireProtocol, so this can't see managed output | Resets only | `smarthome-watch-serial` |
+| `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
 | `scripts\Start-AgentWorkspace.ps1` | `Sync-NanoFrameworkRepos.ps1` + `Start-DevEnv.ps1` in one call | No | — |
 | `scripts\Common.ps1` | Shared helpers (env loading, MSBuild/vstest/adapter discovery, repo-sync) — dot-source, don't duplicate its logic | No | — |
 
@@ -82,6 +83,9 @@ src/
   capabilities/Capability.Contracts/
 Utils/                    Shared utilities
 scripts/                  Dev-environment and agent helper scripts (see table above)
+tools/
+  DeviceDebugMonitor/     Host-side .NET console app (NOT nanoFramework) -- CLI device debugger,
+                          see scripts\Watch-DeviceDebugOutput.ps1
 SmartHome.sln
 ```
 
