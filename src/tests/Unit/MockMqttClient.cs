@@ -14,6 +14,21 @@ namespace SmartHome.UnitTests
 
         public bool IsConnected { get; private set; } = false;
 
+        // Captured from the last CONNECT so tests can assert on what the Homie client
+        // actually declares -- the last will above all, which Homie v4 requires and
+        // which is only ever visible in CONNECT.
+        public string ConnectedClientId { get; private set; }
+
+        public bool WillFlag { get; private set; }
+
+        public string WillTopic { get; private set; }
+
+        public string WillMessage { get; private set; }
+
+        public bool WillRetain { get; private set; }
+
+        public ushort KeepAlivePeriod { get; private set; }
+
         public event IMqttClient.MqttMsgPublishEventHandler MqttMsgPublishReceived;
         public event IMqttClient.MqttMsgPublishedEventHandler MqttMsgPublished;
         public event IMqttClient.MqttMsgSubscribedEventHandler MqttMsgSubscribed;
@@ -33,17 +48,27 @@ namespace SmartHome.UnitTests
 
         public MqttReasonCode Connect(string clientId)
         {
+            ConnectedClientId = clientId;
+            WillFlag = false;
+            IsConnected = true;
             return MqttReasonCode.Success;
         }
 
         public MqttReasonCode Connect(string clientId, string username, string password, bool willRetain, MqttQoSLevel willQosLevel, bool willFlag, string willTopic, string willMessage, bool cleanSession, ushort keepAlivePeriod)
         {
+            ConnectedClientId = clientId;
+            WillFlag = willFlag;
+            WillTopic = willTopic;
+            WillMessage = willMessage;
+            WillRetain = willRetain;
+            KeepAlivePeriod = keepAlivePeriod;
+            IsConnected = true;
             return MqttReasonCode.Success;
         }
 
         public void Disconnect()
         {
-            return;
+            IsConnected = false;
         }
 
         public void Init(string brokerHostName, int brokerPort, bool secure, byte[] caCert, byte[] clientCert, MqttSslProtocols sslProtocol)

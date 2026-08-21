@@ -121,6 +121,66 @@ namespace SmartHome.UnitTests
         }
 
         [TestMethod]
+        public void HomieClient_Connect_Declares_HomieLastWill()
+        {
+            // Homie v4 requires the connection to carry a last will setting
+            // homie/[device-id]/$state to 'lost', retained. A will can only be declared
+            // in CONNECT, so the Homie client has to own the session -- RoomSensor used
+            // to connect the transport itself first, which silently produced a session
+            // with no will at all.
+
+            // Arrange
+            var mqttClient = new MockMqttClient();
+
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
+            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
+                        .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, 0.0)
+                        .BuildProperty()
+                    .BuildNode()
+                .BuildDevice();
+
+            var homieClient = new HomieClient(device, mqttClient);
+
+            // Act
+            var connected = homieClient.Connect();
+
+            // Assert
+            Assert.IsTrue(connected);
+            Assert.IsTrue(mqttClient.WillFlag);
+            Assert.AreEqual($"{Constants.RootTopicId}{Constants.TopicSeparator}{_testDeviceTopicId}{Constants.TopicSeparator}{Constants.StateAttributeTopicId}", mqttClient.WillTopic);
+            Assert.AreEqual("lost", mqttClient.WillMessage);
+            Assert.IsTrue(mqttClient.WillRetain);
+        }
+
+        [TestMethod]
+        public void HomieClient_Connect_Replaces_A_Foreign_Session()
+        {
+            // A session opened by someone else cannot carry the Homie will, so the
+            // client must replace it rather than continue on it.
+
+            // Arrange
+            var mqttClient = new MockMqttClient();
+            mqttClient.Connect("someone-else");
+
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
+            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
+                        .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, 0.0)
+                        .BuildProperty()
+                    .BuildNode()
+                .BuildDevice();
+
+            var homieClient = new HomieClient(device, mqttClient);
+
+            // Act
+            var connected = homieClient.Connect();
+
+            // Assert
+            Assert.IsTrue(connected);
+            Assert.IsTrue(mqttClient.WillFlag);
+            Assert.AreEqual("lost", mqttClient.WillMessage);
+        }
+
+        [TestMethod]
         public void HomieClient_Connect_Disconnect()
         {
             // Arrange

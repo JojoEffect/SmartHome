@@ -105,12 +105,53 @@ Write-Host "Running tests on hardware via vstest.console..." -ForegroundColor Cy
 Write-Host "  Adapter: $adapterDir"
 Write-Host "  Settings: $runSettings"
 
-& $vstest $testDll "/Settings:$runSettings" "/TestAdapterPath:$adapterDir"
+# A TRX logger, not just the exit code. vstest exits 0 when every test is SKIPPED,
+# and skipping everything is exactly what happens when the device-side launcher
+# can't load the test assembly -- which this repo hit for real when the assembly
+# was renamed. An exit code alone reported that as a pass. The TRX counters are
+# also locale-independent, unlike vstest's console summary.
+$resultsDir = Join-Path $projectDir 'TestResults'
+$trxName = 'nano-tests.trx'
+$trxPath = Join-Path $resultsDir $trxName
+Remove-Item -Path $trxPath -Force -ErrorAction SilentlyContinue
+
+& $vstest $testDll "/Settings:$runSettings" "/TestAdapterPath:$adapterDir" "/ResultsDirectory:$resultsDir" "/logger:trx;LogFileName=$trxName"
 $testExit = $LASTEXITCODE
 
-if ($testExit -ne 0) {
-    Write-Error "Tests failed or vstest.console reported errors (exit code $testExit)."
-    exit $testExit
+if (-not (Test-Path $trxPath)) {
+    Write-Error "vstest.console produced no test results at $trxPath (exit code $testExit). Nothing can be concluded from this run."
+    exit 1
+}
+
+[xml]$trx = Get-Content -Path $trxPath -Raw
+$counters = $trx.TestRun.ResultSummary.Counters
+$total    = [int]$counters.total
+$executed = [int]$counters.executed
+$passed   = [int]$counters.passed
+$failed   = [int]$counters.failed
+
+Write-Host ""
+Write-Host ("Results: {0} passed, {1} failed, {2} of {3} executed." -f $passed, $failed, $executed, $total) -ForegroundColor Cyan
+
+if ($testExit -ne 0 -or $failed -gt 0) {
+    Write-Error "Tests failed (exit code $testExit, $failed failed). Results: $trxPath"
+    exit 1
+}
+
+if ($executed -eq 0 -or $passed -eq 0) {
+    Write-Error @"
+No test actually ran ($total discovered, $executed executed) -- this is NOT a pass.
+The usual cause is the device-side launcher failing to load the test assembly, which
+it reports by skipping every test while vstest still exits 0. Check the run output for
+'Assembly::Load' / ArgumentException, and confirm the test project's AssemblyName is
+still the one nanoFramework.TestFramework expects.
+Results: $trxPath
+"@
+    exit 1
+}
+
+if ($executed -lt $total) {
+    Write-Warning ("{0} of {1} tests were skipped." -f ($total - $executed), $total)
 }
 
 Write-Host ""

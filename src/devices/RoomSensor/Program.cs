@@ -32,10 +32,9 @@ namespace SmartHome.Devices.RoomSensor
 
                 var device = SetupHomieDevice();
                 var mqttClient = SetupMqttClient();
-                ConnectMqttWithRetry(mqttClient, Constants.DeviceName);
                 var homieClient = new HomieClient(device, mqttClient);
 
-                homieClient.Connect();
+                ConnectWithRetry(homieClient);
 
                 // Simulate sensor data updates
                 while (true)
@@ -80,30 +79,32 @@ namespace SmartHome.Devices.RoomSensor
 
         }
 
-        private static void ConnectMqttWithRetry(IReconnectingMqttClient mqttClient, string clientId)
+        // The Homie client owns the MQTT session on purpose: it is the only thing that
+        // can declare the Homie last will (homie/<device-id>/$state = lost), and a will
+        // can only be set in CONNECT. Connecting the transport here first would produce
+        // a session without it -- which is what this app did until 2026-08-21, leaving
+        // the device stuck at 'ready' forever whenever it dropped off abruptly.
+        private static void ConnectWithRetry(HomieClient homieClient)
         {
             const int maxAttempts = 10;
             const int retryDelayMs = 3000;
 
             for (int attempt = 1; attempt <= maxAttempts; attempt++)
             {
-                try
+                _logger.LogDebug($"Connecting Homie device (attempt {attempt}/{maxAttempts})...");
+
+                if (homieClient.Connect())
                 {
-                    _logger.LogDebug($"Connecting MQTT to broker (attempt {attempt}/{maxAttempts})...");
-                    mqttClient.Connect(clientId);
-                    _logger.LogInformation("MQTT connected.");
+                    _logger.LogInformation("Homie device connected.");
                     return;
                 }
-                catch (MqttConnectionException ex)
-                {
-                    _logger.LogWarning(ex, $"MQTT connect failed (attempt {attempt}/{maxAttempts}).");
-                    if (attempt == maxAttempts)
-                    {
-                        throw;
-                    }
 
-                    Thread.Sleep(retryDelayMs);
+                if (attempt == maxAttempts)
+                {
+                    throw new Exception($"Could not connect the Homie device after {maxAttempts} attempts.");
                 }
+
+                Thread.Sleep(retryDelayMs);
             }
         }
     }

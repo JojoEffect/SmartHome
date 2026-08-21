@@ -30,14 +30,36 @@ namespace SmartHome.Homie.V4
         {
             _device = device;
             _mqttClient = mqttClient;
-            _homieClientSettings = deviceClientSettings ?? new HomieClientSettings();
+            // Default the MQTT client id to the device's own topic id rather than a
+            // random Guid. With a per-boot random id the broker keeps the dead session
+            // alive until its keepalive expires, so the old session's 'lost' will is
+            // delivered AFTER the rebooted device has already announced 'ready' --
+            // leaving the retained $state at 'lost' while the device is running. A
+            // stable id makes the new connection take the session over instead, so the
+            // states stay ordered. Homie doesn't prescribe a client id; it does
+            // prescribe one connection per device.
+            _homieClientSettings = deviceClientSettings ?? new HomieClientSettings { ClientId = device.TopicId };
             _homiePublishSettings = homiePublishSettings ?? new HomiePublishSettings();
             _homieLastWillSettings = homieLastWillSettings ?? _device.CreateLastWillSettings();
             _logger = this.GetCurrentClassLogger();
             _settablePropertiesTable = InitializeSettablePropertiesTable(device);
         }
 
-        public void Connect()
+        /// <summary>
+        /// Connects the device and announces it, returning whether that succeeded.
+        /// </summary>
+        /// <remarks>
+        /// This client owns the MQTT session, and it has to: Homie v4 requires the
+        /// connection to carry a last will setting <c>homie/[device-id]/$state</c> to
+        /// <c>lost</c>, and a will can only be declared in CONNECT. A session opened
+        /// by someone else -- for instance an app calling
+        /// <c>IReconnectingMqttClient.Connect(clientId)</c> first -- cannot have that
+        /// will, so continuing on it would leave the device permanently stuck at
+        /// 'ready' from a controller's point of view whenever it dies abruptly. That
+        /// is exactly what this code used to do. A foreign session is therefore
+        /// replaced, not reused.
+        /// </remarks>
+        public bool Connect()
         {
             _logger.LogDebug("Connect...");
 
@@ -45,16 +67,20 @@ namespace SmartHome.Homie.V4
             {
                 _device.OnDeviceStateChange += HandleDeviceStateChange;
 
-                if (!_mqttClient.IsConnected)
+                if (_mqttClient.IsConnected)
                 {
-                    ConnectInternal();
-                }
-                else
-                {
-                    _logger.LogInformation("MQTT client is already connected. Continue...");
+                    _logger.LogWarning("MQTT client was already connected; that session cannot carry the Homie last will. Reconnecting it.");
+                    _mqttClient.Disconnect();
                 }
 
-                
+                ConnectInternal();
+
+                if (!_mqttClient.IsConnected)
+                {
+                    _logger.LogError("Failed to connect: the MQTT client did not connect.");
+                    return false;
+                }
+
                 RegisterConnectionChangeHandlers();
 
                 RegisterPropertyUpdateHandlers();
@@ -64,11 +90,15 @@ namespace SmartHome.Homie.V4
                 {
                     Disconnect();
                     _logger.LogError("Failed to connect: unable to change device state to 'init' after connecting. Disconnecting.");
+                    return false;
                 }
+
+                return true;
             }
             catch (Exception e)
             {
                 _logger.LogCritical(e, "Failed to connect.");
+                return false;
             }
         }
 

@@ -105,9 +105,16 @@ Required local tools:
 
 ## Repository layout
 
-Naming rule, no exceptions: **assembly name = root namespace = `SmartHome.<Area>.<Name>`**, while
-the folder and the `.nfproj` file keep the short `<Name>`. So
+Naming rule: **assembly name = root namespace = `SmartHome.<Area>.<Name>`**, while the folder
+and the `.nfproj` file keep the short `<Name>`. So
 `src/devices/RoomSensor/RoomSensor.nfproj` builds `SmartHome.Devices.RoomSensor.exe`.
+
+**One exception, and it is not stylistic:** the unit test assembly must stay named
+`NFUnitTest`. nanoFramework.TestFramework 3.0.80's device-side `UnitTestLauncher` resolves the
+test assembly by that name; renaming it made `Assembly.Load` throw on the device and every test
+was reported *skipped* while `vstest` still exited 0 — a green run that executed nothing, which
+went unnoticed for three commits. `Run-Tests.ps1` now decides from the TRX counters and fails
+when nothing ran, but don't re-break the name.
 
 ```text
 src/
@@ -160,6 +167,16 @@ broker outages of 3s and 20s, reconnecting rather than restarting. That test exe
 cover is `HomieClient`'s Homie-level state machine (re-announcing `$state`, device/node
 attributes and settable-property subscriptions after a reconnect); treat that part as still
 unproven.
+
+`HomieClient` owns its MQTT session and must: Homie v4 requires the connection to carry a last
+will setting `homie/[device-id]/$state` to `lost`, and a will can only be declared in CONNECT.
+An app that connects the transport first — as RoomSensor did until 2026-08-21 — produces a
+session with no will at all, and `HomieClient` used to accept it ("MQTT client is already
+connected. Continue..."), silently discarding the will, the keepalive and the credentials. So:
+build the client, then call `HomieClient.Connect()`, which returns `bool` for retry loops. The
+MQTT client id defaults to the device's topic id, not a random Guid, so a reconnect takes over
+the dead session instead of leaving its `lost` will to fire after the new session already
+announced `ready`.
 
 Anything that needs a broker connection that survives the broker going away uses
 `ReconnectingMqttClient` from `src/common/Mqtt`. It was called `HomieMqttClient` and lived in the

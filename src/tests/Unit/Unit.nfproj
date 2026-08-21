@@ -16,7 +16,14 @@
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <FileAlignment>512</FileAlignment>
     <RootNamespace>SmartHome.UnitTests</RootNamespace>
-    <AssemblyName>SmartHome.UnitTests</AssemblyName>
+    <!-- The one exception to the SmartHome.<Area>.<Name> assembly rule, and not a
+         style choice: nanoFramework.TestFramework 3.0.80's UnitTestLauncher resolves
+         the test assembly by this exact name. Renaming it to SmartHome.UnitTests made
+         Assembly.Load throw ArgumentException on the device, and every test was then
+         reported as *skipped* while vstest still exited 0: a green run that executed
+         nothing. The namespace below is free to follow the convention, but the assembly
+         name is not. -->
+    <AssemblyName>NFUnitTest</AssemblyName>
     <IsCodedUITest>False</IsCodedUITest>
     <IsTestProject>true</IsTestProject>
     <TestProjectType>UnitTest</TestProjectType>
