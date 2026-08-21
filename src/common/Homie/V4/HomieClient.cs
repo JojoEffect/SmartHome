@@ -259,9 +259,28 @@ namespace SmartHome.Homie.V4
 
         private void HandleConnectionOpen(object sender, ConnectionOpenedEventArgs e)
         {
-            _logger.LogInformation("MQTT connection opened handler called.");
+            // Only reconnects reach this handler: on the first connect the connection
+            // change handlers are registered *after* ConnectInternal, so that CONNACK
+            // has already been and gone.
+            _logger.LogInformation("MQTT connection reopened.");
 
             RegisterPropertyUpdateHandlers();
+
+            // Re-announce. The MQTT layer restores the session (SmartHome.Mqtt replays
+            // the subscriptions), but Homie state lives in the BROKER's retained store,
+            // and a broker that restarted has an empty one. Without this the device
+            // keeps publishing property values into a broker that has never heard of
+            // it: no $homie, no $nodes, no $state, so a controller sees an unknown
+            // device emitting values. The spec doesn't mandate this -- it says nothing
+            // about reconnects at all -- but a device that only re-announces on reboot
+            // is invisible after every broker restart.
+            //
+            // Going back through Init republishes everything and returns to Ready, the
+            // same path as first connect (see HandleDeviceStateChange).
+            if (!_device.TryChangeState(State.Init))
+            {
+                _logger.LogError($"Reconnected but could not re-announce: state is '{_device.StateAttribute.Value.GetString()}'.");
+            }
         }
 
         private void HandleConnectionClosed(object sender, System.EventArgs e)
@@ -296,6 +315,9 @@ namespace SmartHome.Homie.V4
             {
                 foreach (var property in node.Properties)
                 {
+                    // Unsubscribe first: this runs again on every reconnect, and a
+                    // double registration would publish every property update twice.
+                    property.OnUpdate -= PublishPropertyUpdate;
                     property.OnUpdate += PublishPropertyUpdate;
                 }
             }

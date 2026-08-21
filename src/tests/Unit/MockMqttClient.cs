@@ -36,6 +36,18 @@ namespace SmartHome.UnitTests
         public event IMqttClient.ConnectionClosedEventHandler ConnectionClosed;
         public event MqttClient.ConnectionOpenedEventHandler ConnectionOpened;
 
+        public void RaiseConnectionClosed()
+        {
+            IsConnected = false;
+            ConnectionClosed?.Invoke(this, System.EventArgs.Empty);
+        }
+
+        public void RaiseConnectionOpened()
+        {
+            IsConnected = true;
+            ConnectionOpened?.Invoke(this, null);
+        }
+
         public void RaisePublishReceived(MqttMsgPublishEventArgs eventArgs)
         {
             MqttMsgPublishReceived?.Invoke(this, eventArgs);

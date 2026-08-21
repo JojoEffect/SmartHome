@@ -272,6 +272,62 @@ namespace SmartHome.UnitTests
             Assert.AreEqual(73.0, property.Value);
         }
 
+        [TestMethod]
+        public void HomieClient_ReAnnounces_When_The_Connection_Reopens()
+        {
+            // A restarted broker has an empty retained store, so a device that merely
+            // resumes publishing values is invisible to a controller: no $homie, no
+            // $nodes, no $state. Reopening the connection must republish everything.
+
+            // Arrange
+            var mqttClient = new MockMqttClient();
+            var homieClient = new HomieClient(BuildSinglePropertyDevice(), mqttClient);
+            homieClient.Connect();
+
+            var publishCountAfterConnect = mqttClient.PublishCount;
+            Assert.AreEqual((int)State.Ready, (int)homieClient.State);
+
+            // Act -- the transport dropped and came back underneath us
+            mqttClient.RaiseConnectionClosed();
+            mqttClient.RaiseConnectionOpened();
+
+            // Assert -- the whole announcement went out again, ending at ready
+            Assert.IsTrue(mqttClient.PublishCount > publishCountAfterConnect);
+            Assert.AreEqual(publishCountAfterConnect * 2, mqttClient.PublishCount);
+            Assert.AreEqual((int)State.Ready, (int)homieClient.State);
+        }
+
+        [TestMethod]
+        public void HomieClient_Publishes_Once_Per_Update_After_A_Reconnect()
+        {
+            // The reconnect path re-registers the property update handlers, so a
+            // careless += would publish every later update twice.
+
+            // Arrange
+            var mqttClient = new MockMqttClient();
+
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
+            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
+                        .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, 0.0)
+                        .BuildProperty(out FloatProperty property)
+                    .BuildNode()
+                .BuildDevice();
+
+            var homieClient = new HomieClient(device, mqttClient);
+            homieClient.Connect();
+
+            mqttClient.RaiseConnectionClosed();
+            mqttClient.RaiseConnectionOpened();
+
+            var before = mqttClient.PublishCount;
+
+            // Act
+            property.Update(21.5);
+
+            // Assert
+            Assert.AreEqual(before + 1, mqttClient.PublishCount);
+        }
+
         private Device BuildSinglePropertyDevice()
         {
             var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);

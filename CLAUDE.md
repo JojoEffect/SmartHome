@@ -163,10 +163,14 @@ shared Homie client, layered on `ReconnectingMqttClient` (in `SmartHome.Mqtt`). 
 nanoFramework target bug" — as of 2026-08-20 that is out of date at the MQTT level:
 `MqttReconnectCheck` proves on real hardware that a client keeps its heartbeat going across
 broker outages of 3s and 20s, reconnecting rather than restarting. That test exercises
-`SmartHome.Mqtt` alone -- it does not reference `SmartHome.Homie` at all. What that test does *not*
-cover is `HomieClient`'s Homie-level state machine (re-announcing `$state`, device/node
-attributes and settable-property subscriptions after a reconnect); treat that part as still
-unproven.
+`SmartHome.Mqtt` alone -- it does not reference `SmartHome.Homie` at all.
+
+The Homie layer on top now re-announces too: `HandleConnectionOpen` takes the device back through
+`init` -> `ready`, republishing every attribute, because Homie state lives in the broker's
+retained store and a restarted broker has an empty one. Only reconnects reach that handler --
+on first connect the connection-change handlers are registered after `ConnectInternal`, so the
+initial CONNACK has already passed. Verified on hardware by destroying the broker under a running
+RoomSensor: the fresh broker sees the full announcement again, not just bare sensor values.
 
 Device apps talk to `IHomieClient` (in `SmartHome.Homie`), not to the MQTT client: `Connect()`,
 `Disconnect()`, `Alert()`, `Sleep()`, `Ready()`, plus `DeviceId`/`State`/`IsConnected` and an
@@ -334,6 +338,13 @@ Note that `MqttCheck` hardcodes its own broker (`192.168.1.238`) separately — 
 drift apart easily, and a stale one is the usual reason a healthy device "can't reach the
 broker". `Run-IntegrationTests.ps1` warns when `MqttCheck`'s constant isn't an address of the
 host machine.
+
+## Next steps
+
+Known open work lives in [`NEXT-STEPS.md`](NEXT-STEPS.md) — a to-do list, not a changelog. The
+headline item is a device-agnostic `HomieClientCheck` that exercises the whole convention rather
+than whichever parts RoomSensor happens to use; two real spec bugs were found by reading the
+spec instead of by a failing test, which is the wrong way round.
 
 ## Project skills
 

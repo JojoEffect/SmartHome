@@ -103,7 +103,11 @@ namespace SmartHome.Homie.V4
         private bool CanChangeState(State newState) => StateAttribute.Value switch
         {
             State.Init => newState == State.Ready || newState == State.Alert || newState == State.Disconnected,
-            State.Ready => newState == State.Sleeping || newState == State.Alert || newState == State.Disconnected,
+            // Ready -> Init is the re-announce path: a broker that restarted has an
+            // empty retained store, so a reconnected device has to publish its
+            // attributes again and come back through init to ready, exactly as it did
+            // on first connect.
+            State.Ready => newState == State.Sleeping || newState == State.Alert || newState == State.Disconnected || newState == State.Init,
             State.Sleeping => newState == State.Ready || newState == State.Alert || newState == State.Disconnected,
             State.Alert => newState == State.Ready || newState == State.Disconnected,
             State.Disconnected => newState == State.Init || newState == State.Ready,
