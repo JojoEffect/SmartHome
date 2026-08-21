@@ -15,7 +15,23 @@
 using nanoFramework.Tools.Debugger;
 using nanoFramework.Tools.Debugger.Extensions;
 
-var positional = args.Where(a => a != "--no-reboot" && a != "--dump-config").ToArray();
+// --until <text>: stop as soon as a line containing <text> arrives, instead of
+// sitting out the whole duration. The duration then acts as a timeout rather than a
+// sleep, which is most of the integration suite's wall clock: a device that reports
+// in 12s used to hold the port for the full 75s window anyway.
+string? until = null;
+var untilIndex = Array.IndexOf(args, "--until");
+if (untilIndex >= 0 && untilIndex + 1 < args.Length)
+{
+    until = args[untilIndex + 1];
+}
+
+var positional = args
+    .Where((a, i) => a != "--no-reboot"
+                     && a != "--dump-config"
+                     && a != "--until"
+                     && !(untilIndex >= 0 && i == untilIndex + 1))
+    .ToArray();
 bool noReboot = args.Contains("--no-reboot");
 bool dumpConfig = args.Contains("--dump-config");
 
@@ -64,7 +80,36 @@ if (device is null)
 
 Console.WriteLine($"Found device: {device.Description}. Connecting debug engine...");
 
-device.DebugEngine!.OnMessage += (message, text) => Console.Write(text);
+// The device streams in chunks that don't align to lines, so match against a rolling
+// buffer rather than each chunk.
+var matched = new ManualResetEventSlim(false);
+var seen = new System.Text.StringBuilder();
+
+device.DebugEngine!.OnMessage += (message, text) =>
+{
+    Console.Write(text);
+
+    if (until is null || matched.IsSet)
+    {
+        return;
+    }
+
+    lock (seen)
+    {
+        seen.Append(text);
+        if (seen.ToString().Contains(until))
+        {
+            matched.Set();
+        }
+
+        // Keep the buffer bounded; anything older than a couple of lines cannot
+        // start a match that isn't already complete.
+        if (seen.Length > 4096)
+        {
+            seen.Remove(0, seen.Length - 1024);
+        }
+    }
+};
 
 bool connected = device.DebugEngine.Connect(5000, force: true, requestCapabilities: true);
 if (!connected)
@@ -149,7 +194,20 @@ if (device.DebugEngine.IsDeviceInInitializeState())
     device.DebugEngine.ResumeExecution();
 }
 
-Thread.Sleep(TimeSpan.FromSeconds(durationSeconds));
+if (until is null)
+{
+    Thread.Sleep(TimeSpan.FromSeconds(durationSeconds));
+}
+else if (matched.Wait(TimeSpan.FromSeconds(durationSeconds)))
+{
+    Console.WriteLine();
+    Console.WriteLine($"(matched '{until}' -- stopping early)");
+}
+else
+{
+    Console.WriteLine();
+    Console.WriteLine($"(no line containing '{until}' within {durationSeconds}s)");
+}
 
 Console.WriteLine(new string('-', 69));
 Console.WriteLine("Done.");

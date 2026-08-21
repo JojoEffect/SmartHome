@@ -612,6 +612,7 @@ try {
         Write-Host ("Integration test: {0}" -f $testName) -ForegroundColor Cyan
         Write-Host ('=' * 69)
 
+        $testStarted = Get-Date
         $outcome = $null
         $detail = $null
 
@@ -668,7 +669,10 @@ try {
                 $captured = $null
                 $watchExit = 0
                 foreach ($attempt in 1, 2) {
-                    & $watchScript -DurationSeconds $settings.CaptureSeconds -NoBuild |
+                    # -Until turns CaptureSeconds into a timeout instead of a sleep. A
+                    # healthy device reports in seconds; waiting out the full window
+                    # anyway was about half this suite's wall clock.
+                    & $watchScript -DurationSeconds $settings.CaptureSeconds -NoBuild -Until "[ITEST] $testName" |
                         Tee-Object -Variable captured |
                         Out-File -FilePath $logFile -Encoding utf8
                     $watchExit = $LASTEXITCODE
@@ -723,6 +727,7 @@ try {
             Outcome = $outcome
             Detail  = $detail
             Log     = if (Test-Path $logFile) { $logFile } else { $null }
+            Seconds = [int]((Get-Date) - $testStarted).TotalSeconds
         }
 
         $color = if ($outcome -eq 'PASS') { 'Green' } else { 'Red' }
@@ -745,8 +750,10 @@ Write-Host ('=' * 69)
 
 foreach ($result in $results) {
     $color = if ($result.Outcome -eq 'PASS') { 'Green' } else { 'Red' }
-    Write-Host ("  {0,-20} {1,-12} {2}" -f $result.Test, $result.Outcome, $result.Detail) -ForegroundColor $color
+    Write-Host ("  {0,-20} {1,-12} {2,5}s  {3}" -f $result.Test, $result.Outcome, $result.Seconds, $result.Detail) -ForegroundColor $color
 }
+
+Write-Host ("  {0,-20} {1,-12} {2,5}s" -f 'TOTAL', '', (($results | Measure-Object -Property Seconds -Sum).Sum)) -ForegroundColor DarkGray
 
 $failed = @($results | Where-Object { $_.Outcome -ne 'PASS' })
 

@@ -43,7 +43,11 @@ param(
     # own this script still builds, so a plain invocation needs no ceremony.
     [switch]$NoBuild,
 
-    [switch]$BuildOnly
+    [switch]$BuildOnly,
+
+    # Stop as soon as a line containing this text arrives; -DurationSeconds then acts
+    # as a timeout rather than a fixed wait.
+    [string]$Until
 )
 
 Set-StrictMode -Version Latest
@@ -64,6 +68,10 @@ if (-not (Test-Path $toolProject)) {
 $toolArgs = @($comPort, $DurationSeconds)
 if ($NoReboot) {
     $toolArgs += '--no-reboot'
+}
+if ($Until) {
+    $toolArgs += '--until'
+    $toolArgs += $Until
 }
 
 # Build separately from run -- a --no-build run that fails because the device
