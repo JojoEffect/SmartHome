@@ -1,4 +1,5 @@
 using SmartHome.Homie.V4;
+using SmartHome.Homie.V4.Enums;
 using SmartHome.Homie.V4.Builder;
 using SmartHome.Homie.V4.Properties;
 using nanoFramework.Logging;
@@ -112,7 +113,8 @@ namespace SmartHome.UnitTests
             var homieClient = new HomieClient(device, mqttClient);
 
             homieClient.Connect();
-            mqttClient.RaisePublishReceived(new MqttMsgPublishEventArgs(property.GetTopic(), Encoding.UTF8.GetBytes(expectedValue.ToString()), false, MqttQoSLevel.AtLeastOnce, false));
+            var commandTopic = $"{property.GetTopic()}{Constants.TopicSeparator}{Constants.SetPropertyTopicId}";
+            mqttClient.RaisePublishReceived(new MqttMsgPublishEventArgs(commandTopic, Encoding.UTF8.GetBytes(expectedValue.ToString()), false, MqttQoSLevel.AtLeastOnce, false));
 
             // Assert
             Assert.AreEqual(expectedValue, property.Value);
@@ -178,6 +180,106 @@ namespace SmartHome.UnitTests
             Assert.IsTrue(connected);
             Assert.IsTrue(mqttClient.WillFlag);
             Assert.AreEqual("lost", mqttClient.WillMessage);
+        }
+
+        [TestMethod]
+        public void HomieClient_Lifecycle_States_Are_Reachable()
+        {
+            // All six $state values are part of the convention, but alert and sleeping
+            // used to be unreachable from outside the library: Device.TryChangeState is
+            // internal, and the client exposed no way to ask for them.
+
+            // Arrange
+            var mqttClient = new MockMqttClient();
+            var homieClient = new HomieClient(BuildSinglePropertyDevice(), mqttClient);
+            homieClient.Connect();
+
+            // Assert -- Connect leaves the device ready
+            Assert.AreEqual((int)State.Ready, (int)homieClient.State);
+
+            // Act + Assert -- ready -> sleeping -> ready
+            Assert.IsTrue(homieClient.Sleep());
+            Assert.AreEqual((int)State.Sleeping, (int)homieClient.State);
+            Assert.IsTrue(homieClient.Ready());
+            Assert.AreEqual((int)State.Ready, (int)homieClient.State);
+
+            // Act + Assert -- ready -> alert -> ready
+            Assert.IsTrue(homieClient.Alert());
+            Assert.AreEqual((int)State.Alert, (int)homieClient.State);
+            Assert.IsTrue(homieClient.Ready());
+            Assert.AreEqual((int)State.Ready, (int)homieClient.State);
+        }
+
+        [TestMethod]
+        public void HomieClient_Refuses_An_Illegal_State_Transition()
+        {
+            // Arrange
+            var mqttClient = new MockMqttClient();
+            var homieClient = new HomieClient(BuildSinglePropertyDevice(), mqttClient);
+            homieClient.Connect();
+            homieClient.Alert();
+
+            // Act -- alert may go to ready or disconnected, never straight to sleeping
+            var slept = homieClient.Sleep();
+
+            // Assert
+            Assert.IsFalse(slept);
+            Assert.AreEqual((int)State.Alert, (int)homieClient.State);
+        }
+
+        [TestMethod]
+        public void HomieClient_Raises_OnCommand_For_A_Controller_Set()
+        {
+            // property.OnUpdate fires both when a controller sets a value and when the
+            // device updates its own, so an actuator cannot act on it. OnCommand fires
+            // only for the former.
+
+            // Arrange
+            var mqttClient = new MockMqttClient();
+
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
+            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
+                        .AddFloatProperty(_testPropertyIntensityTopicId, _testPropertyIntensityName, 0.0)
+                            .WithSettable(true)
+                        .BuildProperty(out FloatProperty property)
+                    .BuildNode()
+                .BuildDevice();
+
+            var homieClient = new HomieClient(device, mqttClient);
+            homieClient.Connect();
+
+            var commandCount = 0;
+            PropertyBase commandedProperty = null;
+            homieClient.OnCommand += (args) =>
+            {
+                commandCount++;
+                commandedProperty = args.Property;
+            };
+
+            // Act -- the device updating itself is not a command
+            property.Update(42.0);
+
+            // Assert
+            Assert.AreEqual(0, commandCount);
+
+            // Act -- a controller writing to /set is
+            var setTopic = $"{property.GetTopic()}{Constants.TopicSeparator}{Constants.SetPropertyTopicId}";
+            mqttClient.RaisePublishReceived(new MqttMsgPublishEventArgs(setTopic, Encoding.UTF8.GetBytes("73"), false, MqttQoSLevel.AtLeastOnce, false));
+
+            // Assert
+            Assert.AreEqual(1, commandCount);
+            Assert.IsNotNull(commandedProperty);
+            Assert.AreEqual(73.0, property.Value);
+        }
+
+        private Device BuildSinglePropertyDevice()
+        {
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
+            return builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
+                        .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, 0.0)
+                        .BuildProperty()
+                    .BuildNode()
+                .BuildDevice();
         }
 
         [TestMethod]

@@ -12,7 +12,7 @@ using System.Collections;
 
 namespace SmartHome.Homie.V4
 {
-    public class HomieClient
+    public class HomieClient : IHomieClient
     {
         private readonly Device _device;
         private readonly HomieClientSettings _homieClientSettings;
@@ -44,6 +44,18 @@ namespace SmartHome.Homie.V4
             _logger = this.GetCurrentClassLogger();
             _settablePropertiesTable = InitializeSettablePropertiesTable(device);
         }
+
+        /// <inheritdoc />
+        public string DeviceId => _device.TopicId;
+
+        /// <inheritdoc />
+        public State State => _device.StateAttribute.Value;
+
+        /// <inheritdoc />
+        public bool IsConnected => _mqttClient.IsConnected;
+
+        /// <inheritdoc />
+        public event HomieCommandHandler? OnCommand;
 
         /// <summary>
         /// Connects the device and announces it, returning whether that succeeded.
@@ -130,6 +142,29 @@ namespace SmartHome.Homie.V4
             UnregisterConnectionChangeHandlers();
         }
 
+        /// <inheritdoc />
+        public bool Alert() => ChangeState(State.Alert);
+
+        /// <inheritdoc />
+        public bool Sleep() => ChangeState(State.Sleeping);
+
+        /// <inheritdoc />
+        public bool Ready() => ChangeState(State.Ready);
+
+        // The device model owns which transitions are legal (see Device.CanChangeState);
+        // publishing follows from the state change through HandleDeviceStateChange, so
+        // these three don't publish anything themselves.
+        private bool ChangeState(State newState)
+        {
+            if (!_device.TryChangeState(newState))
+            {
+                _logger.LogWarning($"Refused to change state to '{newState.GetString()}' from '{_device.StateAttribute.Value.GetString()}'.");
+                return false;
+            }
+
+            return true;
+        }
+
         private void DisconnectInternal()
         {
             UnsubscribeSettablePropertyTopics();
@@ -211,7 +246,14 @@ namespace SmartHome.Homie.V4
             if (_settablePropertiesTable.Contains(topic))
             {
                 var property = (PropertyBase)_settablePropertiesTable[topic];
+
+                // Set() reflects the value back to the property topic via OnUpdate, which
+                // is what the spec asks for. OnCommand is raised separately so an app can
+                // tell a controller's command from its own update -- property.OnUpdate
+                // fires for both and cannot distinguish them.
                 property.Set(message);
+
+                OnCommand?.Invoke(new HomieCommandEventArgs(property, message));
             }
         }
 
@@ -292,7 +334,15 @@ namespace SmartHome.Homie.V4
 
             for (int i = 0; i < settableProperties.Length; i++)
             {
-                settablePropertiesTable.Add(settableProperties[i].GetTopic(), settableProperties[i]);
+                // Keyed by the COMMAND topic, not the property topic. The spec puts
+                // commands on homie/[device]/[node]/[property]/set and says the device
+                // "must subscribe to this topic if the property is settable". Keying by
+                // the property topic -- as this did until 2026-08-21 -- meant controller
+                // commands were never received, and worse, the device subscribed to its
+                // own retained value topic, so the broker replayed its own publishes
+                // back at it and set it from them.
+                var commandTopic = $"{settableProperties[i].GetTopic()}{Constants.TopicSeparator}{Constants.SetPropertyTopicId}";
+                settablePropertiesTable.Add(commandTopic, settableProperties[i]);
             }
 
             return settablePropertiesTable;

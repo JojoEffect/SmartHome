@@ -168,6 +168,22 @@ cover is `HomieClient`'s Homie-level state machine (re-announcing `$state`, devi
 attributes and settable-property subscriptions after a reconnect); treat that part as still
 unproven.
 
+Device apps talk to `IHomieClient` (in `SmartHome.Homie`), not to the MQTT client: `Connect()`,
+`Disconnect()`, `Alert()`, `Sleep()`, `Ready()`, plus `DeviceId`/`State`/`IsConnected` and an
+`OnCommand` event. It is deliberately **not** derived from `IReconnectingMqttClient` — a Homie
+device owns a connection rather than being one, and exposing `Publish`/`Subscribe` there would
+let an app publish an attribute non-retained or `$state` out of order. The `Device` model (built
+with `HomieDeviceBuilder`) says what the device *is*; `IHomieClient` is what you *do* with it.
+
+Two things to know when writing an actuator (Irrigation, Oven):
+
+- Act on `IHomieClient.OnCommand`, not on `property.OnUpdate`. The property event fires both
+  when a controller sets a value and when the device updates its own, and cannot tell them
+  apart; `OnCommand` fires only for a controller's `/set`.
+- Settable properties are subscribed on `homie/[device]/[node]/[property]/set`, as the spec
+  requires. Until 2026-08-21 the code subscribed to the property *value* topic instead, so
+  commands were never received and the device re-consumed its own retained publishes.
+
 `HomieClient` owns its MQTT session and must: Homie v4 requires the connection to carry a last
 will setting `homie/[device-id]/$state` to `lost`, and a will can only be declared in CONNECT.
 An app that connects the transport first — as RoomSensor did until 2026-08-21 — produces a

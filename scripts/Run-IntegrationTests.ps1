@@ -362,12 +362,31 @@ try {
                 # -FilePath on Windows PowerShell 5.1 writes UTF-16, which grep and
                 # most other tools see as an empty file, exactly when someone is
                 # investigating.
+                # One retry: the monitor gives the device 15s to enumerate, and right
+                # after a flash it can miss that window (or lose the race with Visual
+                # Studio, which grabs the device when it is open). That failure produces
+                # no device output at all, which is distinguishable from a real capture,
+                # so retrying it costs nothing but a second window and stops a healthy
+                # device being reported as ERROR.
                 $captured = $null
-                & $watchScript -DurationSeconds $settings.CaptureSeconds -NoBuild |
-                    Tee-Object -Variable captured |
-                    Out-File -FilePath $logFile -Encoding utf8
-                if ($LASTEXITCODE -ne 0) {
-                    throw "Watch-DeviceDebugOutput.ps1 exit code $LASTEXITCODE"
+                $watchExit = 0
+                foreach ($attempt in 1, 2) {
+                    & $watchScript -DurationSeconds $settings.CaptureSeconds -NoBuild |
+                        Tee-Object -Variable captured |
+                        Out-File -FilePath $logFile -Encoding utf8
+                    $watchExit = $LASTEXITCODE
+
+                    if ($watchExit -eq 0) {
+                        break
+                    }
+
+                    if ($attempt -eq 1) {
+                        Write-Warning "Could not capture device output (exit code $watchExit). Retrying once."
+                    }
+                }
+
+                if ($watchExit -ne 0) {
+                    throw "Watch-DeviceDebugOutput.ps1 exit code $watchExit (after a retry)"
                 }
 
                 # Match the marker protocol, not this test's own name: reading back

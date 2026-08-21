@@ -32,7 +32,7 @@ namespace SmartHome.Devices.RoomSensor
 
                 var device = SetupHomieDevice();
                 var mqttClient = SetupMqttClient();
-                var homieClient = new HomieClient(device, mqttClient);
+                IHomieClient homieClient = new HomieClient(device, mqttClient);
 
                 ConnectWithRetry(homieClient);
 
@@ -84,7 +84,7 @@ namespace SmartHome.Devices.RoomSensor
         // can only be set in CONNECT. Connecting the transport here first would produce
         // a session without it -- which is what this app did until 2026-08-21, leaving
         // the device stuck at 'ready' forever whenever it dropped off abruptly.
-        private static void ConnectWithRetry(HomieClient homieClient)
+        private static void ConnectWithRetry(IHomieClient homieClient)
         {
             const int maxAttempts = 10;
             const int retryDelayMs = 3000;
