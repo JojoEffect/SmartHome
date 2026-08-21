@@ -155,9 +155,16 @@ while ($filled -lt $PaddedImageSize) {
 Write-Host "  Padded deploy image: $($imageBytes.Length) -> $PaddedImageSize bytes (0xFF fill, clears any stale prior deployment)." -ForegroundColor DarkGray
 
 nanoff --deploy --serialport $comPort --image "$paddedImage" --address $DeployAddress
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "nanoff deploy failed (exit code $LASTEXITCODE)."
-    exit $LASTEXITCODE
+$nanoffExit = $LASTEXITCODE
+
+# nanoff has read the image by now, so the padded copy is 400KB of dead weight in
+# bin\Debug. Leaving it also puts a stale .padded.bin next to a freshly built .bin,
+# which is the same shape as the stale-deployment problem the padding exists to fix.
+Remove-Item -Path $paddedImage -Force -ErrorAction SilentlyContinue
+
+if ($nanoffExit -ne 0) {
+    Write-Error "nanoff deploy failed (exit code $nanoffExit)."
+    exit $nanoffExit
 }
 
 Write-Host ""

@@ -380,11 +380,6 @@ function Invoke-HomieConformanceCheck {
     $node = "$root/$nodeId"
     $failures = @()
 
-    function Add-Failure {
-        param([string]$Message)
-        $script:conformanceFailures += $Message
-    }
-
     $script:conformanceFailures = @()
 
     Write-Host ("Waiting up to {0}s for {1} to announce..." -f $Settings.SettleSeconds, $deviceId) -ForegroundColor Cyan
@@ -484,28 +479,50 @@ function Invoke-HomieConformanceCheck {
         Publish-HomieCommand -Port $Port -Topic "$node/$property/set" -Payload $commands[$property]
     }
 
-    foreach ($property in $commands.Keys) {
-        $expected = $commands[$property]
-        $reflected = Wait-ForRetainedValue -Port $Port -Topic "$node/$property" -Expected $expected -TimeoutSeconds $Settings.CommandTimeoutSeconds
+    # One snapshot per round, not one per property. Every reflection is checked
+    # against the same snapshot, so five properties cost one 2s subscriber instead of
+    # five -- the snapshot has to be a fresh subscriber (retain flags are only set on
+    # replay), which is what makes it expensive.
+    $pending = @($commands.Keys)
+    $lastSeen = @{}
+    $deadline = (Get-Date).AddSeconds($Settings.CommandTimeoutSeconds)
 
-        # A float set to 21.5 comes back as 21.499999999999999: that is
-        # nanoFramework's double.ToString(), not a protocol fault, so compare floats
-        # numerically. Every other datatype must match exactly.
-        if (-not $reflected.Ok -and $property -eq 'float-value') {
-            $seenValue = 0.0
-            $expectedValue = [double]$expected
-            # InvariantCulture on purpose: the device publishes '21.4999...' with a dot,
-            # and this machine's culture is de-DE, where the plain overload wants a comma
-            # and simply fails to parse.
-            $parsed = [double]::TryParse($reflected.Seen, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$seenValue)
-            if ($parsed -and [Math]::Abs($seenValue - $expectedValue) -lt 0.001) {
+    while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        $snapshot = Get-HomieRetainedSnapshot -Port $Port -SettleSeconds 2
+        $stillPending = @()
+
+        foreach ($property in $pending) {
+            $expected = $commands[$property]
+            $topic = "$node/$property"
+            $seen = if ($snapshot.Contains($topic)) { $snapshot[$topic].Payload } else { $null }
+            $lastSeen[$property] = $seen
+
+            if ($seen -eq $expected) {
                 continue
             }
+
+            # A float set to 21.5 comes back as 21.499999999999999: that is
+            # nanoFramework's double.ToString(), not a protocol fault, so compare
+            # floats numerically. Every other datatype must match exactly.
+            if ($property -eq 'float-value' -and $seen) {
+                $seenValue = 0.0
+                # InvariantCulture on purpose: the device publishes '21.4999...' with a
+                # dot, and this machine's culture is de-DE, where the plain overload
+                # wants a comma and simply fails to parse.
+                $parsed = [double]::TryParse($seen, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$seenValue)
+                if ($parsed -and [Math]::Abs($seenValue - [double]$expected) -lt 0.001) {
+                    continue
+                }
+            }
+
+            $stillPending += $property
         }
 
-        if (-not $reflected.Ok) {
-            $script:conformanceFailures += "/set on $property did not come back on the property topic (saw '$($reflected.Seen)', expected '$expected')"
-        }
+        $pending = $stillPending
+    }
+
+    foreach ($property in $pending) {
+        $script:conformanceFailures += "/set on $property did not come back on the property topic (saw '$($lastSeen[$property])', expected '$($commands[$property])')"
     }
 
     # ── the lifecycle states a device can be driven into ─────────────────────

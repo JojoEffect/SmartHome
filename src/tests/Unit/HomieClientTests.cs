@@ -328,6 +328,96 @@ namespace SmartHome.UnitTests
             Assert.AreEqual(before + 1, mqttClient.PublishCount);
         }
 
+        [TestMethod]
+        public void HomieClient_Retried_Connect_Announces_Once_And_Stays_Connected()
+        {
+            // Both device apps call Connect() in a retry loop, so a failed attempt
+            // followed by a successful one must behave exactly like a single successful
+            // one. It did not: every attempt attached another set of event handlers, so
+            // the second attempt fired the state-change handler twice, the Init branch
+            // ran a second time against an already-'ready' device, TryChangeState
+            // refused, and the failure path disconnected the client that had just
+            // connected -- with auto-reconnect switched off, so it never came back.
+
+            // Arrange -- first attempt fails at the transport
+            var mqttClient = new MockMqttClient { FailNextConnect = true };
+            var homieClient = new HomieClient(BuildSinglePropertyDevice(), mqttClient);
+
+            // Act
+            var firstAttempt = homieClient.Connect();
+            var secondAttempt = homieClient.Connect();
+
+            // Assert
+            Assert.IsFalse(firstAttempt);
+            Assert.IsTrue(secondAttempt);
+            Assert.IsTrue(mqttClient.IsConnected);
+            Assert.AreEqual((int)State.Ready, (int)homieClient.State);
+
+            // The announcement must not be duplicated either.
+            var publishesAfterRetriedConnect = mqttClient.PublishCount;
+
+            var fresh = new MockMqttClient();
+            new HomieClient(BuildSinglePropertyDevice(), fresh).Connect();
+
+            Assert.AreEqual(fresh.PublishCount, publishesAfterRetriedConnect);
+        }
+
+        [TestMethod]
+        public void HomieClient_Retried_Connect_Handles_A_Command_Once()
+        {
+            // Same leak seen from the /set side: a duplicated MqttMsgPublishReceived
+            // registration made one controller command run the handler twice, which for
+            // an actuator means acting on it twice.
+
+            // Arrange
+            var mqttClient = new MockMqttClient { FailNextConnect = true };
+
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
+            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
+                        .AddFloatProperty(_testPropertyIntensityTopicId, _testPropertyIntensityName, 0.0)
+                            .WithSettable(true)
+                        .BuildProperty(out FloatProperty property)
+                    .BuildNode()
+                .BuildDevice();
+
+            var homieClient = new HomieClient(device, mqttClient);
+            homieClient.Connect();
+            homieClient.Connect();
+
+            var commandCount = 0;
+            homieClient.OnCommand += (args) => { commandCount++; };
+
+            // Act
+            var commandTopic = $"{property.GetTopic()}{Constants.TopicSeparator}{Constants.SetPropertyTopicId}";
+            mqttClient.RaisePublishReceived(new MqttMsgPublishEventArgs(commandTopic, Encoding.UTF8.GetBytes("55"), false, MqttQoSLevel.AtLeastOnce, false));
+
+            // Assert
+            Assert.AreEqual(1, commandCount);
+            Assert.AreEqual(55.0, property.Value);
+        }
+
+        [TestMethod]
+        public void HomieClient_Retried_Connect_ReAnnounces_Once_Per_Reconnect()
+        {
+            // And from the connection-change side: duplicated handlers meant one
+            // reconnect re-announced the whole device twice.
+
+            // Arrange
+            var mqttClient = new MockMqttClient { FailNextConnect = true };
+            var homieClient = new HomieClient(BuildSinglePropertyDevice(), mqttClient);
+            homieClient.Connect();
+            homieClient.Connect();
+
+            var afterConnect = mqttClient.PublishCount;
+
+            // Act
+            mqttClient.RaiseConnectionClosed();
+            mqttClient.RaiseConnectionOpened();
+
+            // Assert -- exactly one announcement's worth of publishes
+            Assert.AreEqual(afterConnect * 2, mqttClient.PublishCount);
+        }
+
         private Device BuildSinglePropertyDevice()
         {
             var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);

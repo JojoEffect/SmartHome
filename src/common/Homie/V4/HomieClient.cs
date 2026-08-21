@@ -77,6 +77,14 @@ namespace SmartHome.Homie.V4
 
             try
             {
+                // -= before += on every one of these: Connect() is called in a retry
+                // loop by both device apps, and this runs before the attempt, so a
+                // failed attempt would leave a handler attached and the next success
+                // would fire each handler twice. For OnDeviceStateChange that was fatal:
+                // the second invocation of the Init branch found the device already
+                // 'ready', TryChangeState refused, and the failure path disconnected a
+                // device that had just connected -- with auto-reconnect switched off.
+                _device.OnDeviceStateChange -= HandleDeviceStateChange;
                 _device.OnDeviceStateChange += HandleDeviceStateChange;
 
                 if (_mqttClient.IsConnected)
@@ -219,6 +227,7 @@ namespace SmartHome.Homie.V4
             }
 
             _mqttClient.Subscribe(topics, qosLevels);
+            _mqttClient.MqttMsgPublishReceived -= HandleIncomingMessage;
             _mqttClient.MqttMsgPublishReceived += HandleIncomingMessage;
         }
 
@@ -294,6 +303,8 @@ namespace SmartHome.Homie.V4
         {
             _logger.LogDebug("Registering connection change handlers...");
 
+            _mqttClient.ConnectionClosed -= HandleConnectionClosed;
+            _mqttClient.ConnectionOpened -= HandleConnectionOpen;
             _mqttClient.ConnectionClosed += HandleConnectionClosed;
             _mqttClient.ConnectionOpened += HandleConnectionOpen;
         }

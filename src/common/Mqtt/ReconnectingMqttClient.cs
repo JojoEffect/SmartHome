@@ -129,8 +129,15 @@ namespace SmartHome.Mqtt
             _mqttCient.ConnectionClosed -= ReconnectHandler;
             _mqttCient.ConnectionClosedRequest -= ReconnectHandler;
 
-            _connectThread?.Abort();
-            _connectThread = null;
+            // Under the lock: ReconnectHandler creates and assigns _connectThread inside
+            // it, from M2Mqtt's receive thread. Reading the field outside meant a
+            // reconnect could be started just after Disconnect() decided there was
+            // nothing to abort.
+            lock (_reconnectSync)
+            {
+                _connectThread?.Abort();
+                _connectThread = null;
+            }
 
             // Keep internal subscription cache in sync with the broker state.
             _subscribedTopics.Clear();

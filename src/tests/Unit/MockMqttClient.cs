@@ -14,6 +14,12 @@ namespace SmartHome.UnitTests
 
         public bool IsConnected { get; private set; } = false;
 
+        /// <summary>
+        /// Makes the next Connect() attempt fail, so tests can exercise the retry path
+        /// the device apps actually use.
+        /// </summary>
+        public bool FailNextConnect { get; set; } = false;
+
         // Captured from the last CONNECT so tests can assert on what the Homie client
         // actually declares -- the last will above all, which Homie v4 requires and
         // which is only ever visible in CONNECT.
@@ -68,6 +74,13 @@ namespace SmartHome.UnitTests
 
         public MqttReasonCode Connect(string clientId, string username, string password, bool willRetain, MqttQoSLevel willQosLevel, bool willFlag, string willTopic, string willMessage, bool cleanSession, ushort keepAlivePeriod)
         {
+            if (FailNextConnect)
+            {
+                FailNextConnect = false;
+                IsConnected = false;
+                return MqttReasonCode.UnspecifiedError;
+            }
+
             ConnectedClientId = clientId;
             WillFlag = willFlag;
             WillTopic = willTopic;
