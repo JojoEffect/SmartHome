@@ -137,6 +137,8 @@ src/
     Bmp280Check/          BMP280 (Bme280 driver) sensor reads over I2C, no network
     MqttReconnectCheck/   Publishes a heartbeat through ReconnectingMqttClient while the runner
                             kills and recreates the broker under it
+    HomieClientCheck/     One property of every datatype, settable and not, retained and not:
+                            the conformance test's device, deliberately not a real one
   tests/
     Unit/                 SmartHome.UnitTests — nanoFramework.TestFramework, runs on hardware
 tools/
@@ -229,6 +231,13 @@ The suite runs two kinds of test, and the kind is declared per entry in
 
 - **`DeviceMarker`** — the device decides. The runner captures managed debug output and reads
   the test's own `[ITEST]` marker. WifiCheck, MqttCheck and Bmp280Check work this way.
+- **`HomieConformance`** — the host measures a purpose-built device against the Homie v4
+  convention: mandatory attributes and their retained flags, one property of every datatype with
+  its `$format`/`$unit`/`$settable`/`$retained`, a `/set` command applied and reflected back, the
+  `alert` and `sleeping` states driven through a control property, and a full re-announce after
+  the broker is replaced. `HomieClientCheck` is this kind. Retained-ness is read from a *fresh*
+  subscriber (`mosquitto_sub -F '%t %r %p'`), because MQTT only sets the retain flag when
+  replaying from the store — a live retained publish arrives with the flag clear.
 - **`BrokerOutage`** — the host decides. The device only publishes a heartbeat; the runner takes
   the broker away, brings a fresh one up, and asserts heartbeats reappear on `homie/#` with a
   *higher* counter than before the outage. A lower counter means the app restarted rather than

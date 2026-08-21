@@ -13,9 +13,14 @@ namespace SmartHome.Homie.V4.Builder
 
         public HomieDeviceBuilder(string topicId, string name, string[]? extensions = null)
         {
+            // Validate here as well as in the entity itself: the builder defers
+            // constructing the Device until BuildDevice(), and a bad id should be
+            // rejected where it was written, not several calls later.
+            NamedHomieEntityBase.ValidateTopicId(topicId);
+
             _topicId = topicId;
             _name = name;
-            _extensions = extensions is null ? new string[1] : extensions;
+            _extensions = extensions is null ? new string[0] : extensions;
         }
 
         public Device BuildDevice()
@@ -39,6 +44,8 @@ namespace SmartHome.Homie.V4.Builder
 
         public HomieNodeBuilder AddNode(string topicId, string name, string type)
         {
+            NamedHomieEntityBase.ValidateTopicId(topicId);
+
             return new HomieNodeBuilder(this, topicId, name, type);
         }
 

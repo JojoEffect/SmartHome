@@ -308,7 +308,11 @@ function Get-SmartHomeSubscriberArguments {
         [string]$Port
     )
 
-    return @('-h', 'localhost', '-p', $Port, '-t', $SmartHomeHomieTopic, '-v')
+    # -F '%t %r %p' rather than -v: the retain flag is part of the Homie convention
+    # ("All messages MUST be sent as retained, UNLESS stated otherwise") and only the
+    # broker can confirm it, but -v prints topic and payload only. Lines become
+    # "<topic> <0|1> <payload>", which readers still match by topic prefix.
+    return @('-h', 'localhost', '-p', $Port, '-t', $SmartHomeHomieTopic, '-F', '%t %r %p')
 }
 
 # ── Dev environment: state ────────────────────────────────────────────────────

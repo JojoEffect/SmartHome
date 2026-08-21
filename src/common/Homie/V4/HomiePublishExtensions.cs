@@ -80,6 +80,13 @@ namespace SmartHome.Homie.V4
             mqttClient.PublishHomieAttribute(device.HomieAttribute, homiePublishSettings.DeviceInfoPublishSettings, logger);
             mqttClient.PublishHomieAttribute(device.NameAttribute, homiePublishSettings.DeviceInfoPublishSettings, logger);
             mqttClient.PublishHomieAttribute(device.NodesAttribute, homiePublishSettings.DeviceInfoPublishSettings, logger);
+            // $extensions is mandatory: "The following device attributes are mandatory
+            // and MUST be send, even if it is just an empty string." It was built on the
+            // Device and then never published until 2026-08-21. Note an empty value still
+            // won't appear in the broker's retained store -- MQTT defines a zero-length
+            // retained payload as deleting the retained message -- so assert it on the
+            // live stream, not the store.
+            mqttClient.PublishHomieAttribute(device.ExtensionsAttribute, homiePublishSettings.DeviceInfoPublishSettings, logger);
             mqttClient.PublishHomieAttribute(device.ImplementationAttribute, homiePublishSettings.DeviceInfoPublishSettings, logger);
             mqttClient.PublishHomieAttribute(device.StateAttribute, homiePublishSettings.DeviceInfoPublishSettings, logger);
             foreach (var node in device.Nodes)

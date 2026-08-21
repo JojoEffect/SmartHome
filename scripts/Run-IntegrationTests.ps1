@@ -84,6 +84,17 @@ $testCatalog = [ordered]@{
     'WifiCheck'   = @{ Kind = 'DeviceMarker'; CaptureSeconds = 75 }
     'MqttCheck'   = @{ Kind = 'DeviceMarker'; CaptureSeconds = 90 }
     'Bmp280Check' = @{ Kind = 'DeviceMarker'; CaptureSeconds = 45 }
+    'HomieClientCheck' = @{
+        Kind = 'HomieConformance'
+        # The device this check deploys is built for the convention, not for a room:
+        # one property of every datatype, settable and not, retained and not. These
+        # must match src\integrationTests\HomieClientCheck\Program.cs.
+        DeviceId = 'homie-client-check'
+        NodeId = 'matrix'
+        SettleSeconds = 90
+        CommandTimeoutSeconds = 30
+        RecoverySeconds = 90
+    }
     'MqttReconnectCheck' = @{
         Kind = 'BrokerOutage'
         # Topic the device publishes its heartbeat on. Must match HeartbeatTopic in
@@ -268,6 +279,283 @@ function Invoke-BrokerOutageCheck {
     }
 }
 
+function Get-MosquittoTool {
+    param([string]$Name)
+
+    $dir = Get-RequiredEnvValue -Name 'SMARTHOME_MOSQUITTO_DIR'
+    return (Join-Path $dir $Name)
+}
+
+function Get-HomieRetainedSnapshot {
+    # What a controller joining *now* would see: the broker's retained store.
+    #
+    # It has to be a fresh subscriber. A retained message delivered live carries
+    # retain=0 -- MQTT only sets the flag when replaying from the store to a new
+    # subscriber -- so the long-running homie/# log cannot answer "is this retained",
+    # which is a rule the convention states outright.
+    #
+    # mosquitto_sub is wrapped in cmd.exe for the redirect and then killed as a tree,
+    # for the handle-inheritance reason documented in Start-DevEnv.ps1.
+    param(
+        [string]$Port,
+        [int]$SettleSeconds = 3
+    )
+
+    $out = Join-Path ([System.IO.Path]::GetTempPath()) "smarthome-homie-snapshot-$Port.log"
+    Remove-Item -Path $out -Force -ErrorAction SilentlyContinue
+
+    $sub = Get-MosquittoTool -Name 'mosquitto_sub.exe'
+    $command = '/c ""{0}" -h localhost -p {1} -t "homie/#" -F "%t %r %p" > "{2}" 2>&1"' -f $sub, $Port, $out
+    $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
+
+    Start-Sleep -Seconds $SettleSeconds
+    Stop-SmartHomeProcessTree -ProcessId $process.Id
+
+    $snapshot = @{}
+    foreach ($line in @(Get-Content -Path $out -ErrorAction SilentlyContinue)) {
+        # "<topic> <0|1> <payload>", and the payload may itself contain spaces.
+        $match = [regex]::Match($line, '^(\S+)\s+([01])\s?(.*)$')
+        if ($match.Success) {
+            $snapshot[$match.Groups[1].Value] = @{
+                Retained = $match.Groups[2].Value -eq '1'
+                Payload  = $match.Groups[3].Value
+            }
+        }
+    }
+
+    return $snapshot
+}
+
+function Publish-HomieCommand {
+    param(
+        [string]$Port,
+        [string]$Topic,
+        [string]$Payload
+    )
+
+    # Non-retained, as the convention requires of a controller: "A Homie controller
+    # publishes to the set command topic with non-retained messages only."
+    $pub = Get-MosquittoTool -Name 'mosquitto_pub.exe'
+    & $pub -h 'localhost' -p $Port -t $Topic -m $Payload | Out-Null
+}
+
+function Wait-ForRetainedValue {
+    # Polls fresh snapshots until $Topic holds $Expected, or the timeout expires.
+    param(
+        [string]$Port,
+        [string]$Topic,
+        [string]$Expected,
+        [int]$TimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $seen = '<nothing>'
+
+    while ((Get-Date) -lt $deadline) {
+        $snapshot = Get-HomieRetainedSnapshot -Port $Port -SettleSeconds 2
+        if ($snapshot.Contains($Topic)) {
+            $seen = $snapshot[$Topic].Payload
+            if ($seen -eq $Expected) {
+                return @{ Ok = $true; Seen = $seen }
+            }
+        }
+    }
+
+    return @{ Ok = $false; Seen = $seen }
+}
+
+function Invoke-HomieConformanceCheck {
+    # Measures a purpose-built device against the Homie v4 convention, from the
+    # broker's side. Every assertion is collected rather than thrown, so one run
+    # reports everything that is wrong instead of only the first thing.
+    param(
+        [string]$TestName,
+        [hashtable]$Settings,
+        [string]$Port
+    )
+
+    $deviceId = $Settings.DeviceId
+    $nodeId = $Settings.NodeId
+    $root = "homie/$deviceId"
+    $node = "$root/$nodeId"
+    $failures = @()
+
+    function Add-Failure {
+        param([string]$Message)
+        $script:conformanceFailures += $Message
+    }
+
+    $script:conformanceFailures = @()
+
+    Write-Host ("Waiting up to {0}s for {1} to announce..." -f $Settings.SettleSeconds, $deviceId) -ForegroundColor Cyan
+    $ready = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected 'ready' -TimeoutSeconds $Settings.SettleSeconds
+    if (-not $ready.Ok) {
+        return @{
+            Outcome = 'NO-RESULT'
+            Detail  = "device never reached `$state=ready within $($Settings.SettleSeconds)s (saw '$($ready.Seen)')"
+        }
+    }
+
+    $snapshot = Get-HomieRetainedSnapshot -Port $Port -SettleSeconds 3
+    Write-Host ("  retained store holds {0} topics" -f $snapshot.Count) -ForegroundColor DarkGray
+
+    function Test-Attribute {
+        param([string]$Topic, [string]$Expected, [switch]$AnyValue)
+
+        if (-not $snapshot.Contains($Topic)) {
+            $script:conformanceFailures += "missing: $Topic"
+            return
+        }
+
+        if (-not $snapshot[$Topic].Retained) {
+            $script:conformanceFailures += "not retained: $Topic"
+        }
+
+        if (-not $AnyValue -and $snapshot[$Topic].Payload -ne $Expected) {
+            $script:conformanceFailures += "$Topic is '$($snapshot[$Topic].Payload)', expected '$Expected'"
+        }
+    }
+
+    # ── mandatory device attributes ──────────────────────────────────────────
+    Test-Attribute -Topic "$root/`$homie" -Expected '4'
+    Test-Attribute -Topic "$root/`$name" -AnyValue
+    Test-Attribute -Topic "$root/`$state" -Expected 'ready'
+    Test-Attribute -Topic "$root/`$nodes" -Expected $nodeId
+    # $extensions is asserted from the LIVE log, not the retained store. The spec says
+    # it "MUST be sent, even if it is just an empty string", but MQTT defines a
+    # zero-length retained payload as a delete of the retained message -- so an empty
+    # $extensions is published and then provably absent from the store. That is the
+    # convention and MQTT disagreeing, not the device misbehaving.
+    $liveLog = @(Get-Content -Path (Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog) -ErrorAction SilentlyContinue)
+    if (-not ($liveLog | Where-Object { $_ -like "$root/`$extensions*" })) {
+        $script:conformanceFailures += "never published: $root/`$extensions"
+    }
+
+    # ── node attributes ──────────────────────────────────────────────────────
+    Test-Attribute -Topic "$node/`$name" -AnyValue
+    Test-Attribute -Topic "$node/`$type" -AnyValue
+    Test-Attribute -Topic "$node/`$properties" -AnyValue
+
+    # ── one property per datatype, with its declared metadata ────────────────
+    $expectedTypes = @{
+        'integer-value' = 'integer'
+        'float-value'   = 'float'
+        'boolean-value' = 'boolean'
+        'string-value'  = 'string'
+        'enum-value'    = 'enum'
+        'color-value'   = 'color'
+        'counter'       = 'integer'
+        'lifecycle'     = 'enum'
+    }
+
+    foreach ($property in $expectedTypes.Keys) {
+        Test-Attribute -Topic "$node/$property/`$name" -AnyValue
+        Test-Attribute -Topic "$node/$property/`$datatype" -Expected $expectedTypes[$property]
+    }
+
+    Test-Attribute -Topic "$node/integer-value/`$settable" -Expected 'true'
+    Test-Attribute -Topic "$node/integer-value/`$format" -Expected '0:100'
+    Test-Attribute -Topic "$node/enum-value/`$format" -Expected 'low,medium,high'
+    Test-Attribute -Topic "$node/color-value/`$format" -Expected 'rgb'
+    Test-Attribute -Topic "$node/integer-value/`$unit" -Expected '#'
+    Test-Attribute -Topic "$node/float-value/`$unit" -AnyValue
+
+    # ── $retained=false is honoured, not just declared ───────────────────────
+    Test-Attribute -Topic "$node/counter/`$retained" -Expected 'false'
+    Test-Attribute -Topic "$node/counter/`$settable" -Expected 'false'
+    # The counter publishes every 2s, so a LIVE message can easily land inside the
+    # snapshot window. Absence would be the wrong assertion; what matters is that the
+    # broker never marks it retained.
+    if ($snapshot.Contains("$node/counter") -and $snapshot["$node/counter"].Retained) {
+        $script:conformanceFailures += "counter declares `$retained=false but the broker replayed it as retained"
+    }
+
+    # ── a controller command is applied and reflected back ───────────────────
+    Write-Host "  driving /set commands..." -ForegroundColor DarkGray
+    $commands = @{
+        'integer-value' = '42'
+        'float-value'   = '21.5'
+        'boolean-value' = 'true'
+        'string-value'  = 'commanded'
+        'enum-value'    = 'high'
+    }
+
+    foreach ($property in $commands.Keys) {
+        Publish-HomieCommand -Port $Port -Topic "$node/$property/set" -Payload $commands[$property]
+    }
+
+    foreach ($property in $commands.Keys) {
+        $expected = $commands[$property]
+        $reflected = Wait-ForRetainedValue -Port $Port -Topic "$node/$property" -Expected $expected -TimeoutSeconds $Settings.CommandTimeoutSeconds
+
+        # A float set to 21.5 comes back as 21.499999999999999: that is
+        # nanoFramework's double.ToString(), not a protocol fault, so compare floats
+        # numerically. Every other datatype must match exactly.
+        if (-not $reflected.Ok -and $property -eq 'float-value') {
+            $seenValue = 0.0
+            $expectedValue = [double]$expected
+            # InvariantCulture on purpose: the device publishes '21.4999...' with a dot,
+            # and this machine's culture is de-DE, where the plain overload wants a comma
+            # and simply fails to parse.
+            $parsed = [double]::TryParse($reflected.Seen, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$seenValue)
+            if ($parsed -and [Math]::Abs($seenValue - $expectedValue) -lt 0.001) {
+                continue
+            }
+        }
+
+        if (-not $reflected.Ok) {
+            $script:conformanceFailures += "/set on $property did not come back on the property topic (saw '$($reflected.Seen)', expected '$expected')"
+        }
+    }
+
+    # ── the lifecycle states a device can be driven into ─────────────────────
+    Write-Host "  driving `$state through alert and sleeping..." -ForegroundColor DarkGray
+    # ready -> alert -> ready -> sleeping -> ready. Not ready -> alert -> sleeping:
+    # alert may only return to ready (or disconnect), so that would be asking the
+    # device for a transition the convention's own state machine forbids.
+    foreach ($state in 'alert', 'ready', 'sleeping', 'ready') {
+        Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $state
+        $reached = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected $state -TimeoutSeconds $Settings.CommandTimeoutSeconds
+        if (-not $reached.Ok) {
+            $script:conformanceFailures += "device did not reach `$state='$state' on command (saw '$($reached.Seen)')"
+        }
+    }
+
+    # ── a replaced broker gets the whole announcement again ──────────────────
+    Write-Host "  replacing the broker to check the re-announce..." -ForegroundColor DarkGray
+    & $stopEnvScript | Out-Null
+    Start-Sleep -Seconds 5
+    & $startEnvScript -Detached -NoSync | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        return @{ Outcome = 'ERROR'; Detail = "could not restart the broker (exit code $LASTEXITCODE)" }
+    }
+
+    $reannounced = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected 'ready' -TimeoutSeconds $Settings.RecoverySeconds
+    if (-not $reannounced.Ok) {
+        $script:conformanceFailures += "no re-announce after the broker was replaced (saw '$($reannounced.Seen)')"
+    }
+    else {
+        $after = Get-HomieRetainedSnapshot -Port $Port -SettleSeconds 3
+        foreach ($topic in "$root/`$homie", "$root/`$nodes", "$node/`$properties", "$node/integer-value/`$datatype") {
+            if (-not $after.Contains($topic)) {
+                $script:conformanceFailures += "re-announce did not republish $topic"
+            }
+        }
+    }
+
+    if ($script:conformanceFailures.Count -gt 0) {
+        return @{
+            Outcome = 'FAIL'
+            Detail  = "$($script:conformanceFailures.Count) conformance failure(s): " + ($script:conformanceFailures -join '; ')
+        }
+    }
+
+    return @{
+        Outcome = 'PASS'
+        Detail  = "attributes, datatypes, retained flags, /set round-trip, alert/sleeping and re-announce all conform"
+    }
+}
+
 # ── Pre-flight ────────────────────────────────────────────────────────────────
 $expectedBroker = Get-OptionalEnvValue -Name 'SMARTHOME_MQTT_BROKER' -DefaultValue 'localhost'
 foreach ($testName in $Tests) {
@@ -278,7 +566,7 @@ foreach ($testName in $Tests) {
         Test-DeviceConstant -TestName $testName -Pattern 'HeartbeatTopic\s*=\s*"([^"]+)"' -Expected $settings.HeartbeatTopic -What 'HeartbeatTopic'
     }
 
-    if ($settings.Kind -eq 'BrokerOutage' -and $NoBroker) {
+    if (($settings.Kind -eq 'BrokerOutage' -or $settings.Kind -eq 'HomieConformance') -and $NoBroker) {
         Write-Error "$testName needs to own the broker's lifetime, so it cannot run with -NoBroker. Drop the switch, or exclude it with -Tests."
         exit 1
     }
@@ -339,7 +627,16 @@ try {
 
             Write-Host ""
 
-            if ($settings.Kind -eq 'BrokerOutage') {
+            if ($settings.Kind -eq 'HomieConformance') {
+                $verdict = Invoke-HomieConformanceCheck -TestName $testName -Settings $settings -Port $mqttPort
+                $outcome = $verdict.Outcome
+                $detail = $verdict.Detail
+
+                if (-not (Get-SmartHomeDevEnvState -Port $mqttPort)) {
+                    & $startEnvScript -Detached -NoSync | Out-Null
+                }
+            }
+            elseif ($settings.Kind -eq 'BrokerOutage') {
                 # ── Host-decided ──────────────────────────────────────────────
                 $verdict = Invoke-BrokerOutageCheck -TestName $testName -Settings $settings -Port $mqttPort
                 $outcome = $verdict.Outcome

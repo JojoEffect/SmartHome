@@ -2,6 +2,7 @@ using SmartHome.Homie.V4;
 using SmartHome.Homie.V4.Builder;
 using SmartHome.Homie.V4.Enums;
 using SmartHome.Homie.V4.Properties;
+using System;
 using nanoFramework.TestFramework;
 using System.Text;
 
@@ -237,5 +238,47 @@ namespace SmartHome.UnitTests
             Assert.AreEqual(expectedValue, property.Value);
             Assert.IsTrue(handlerCalled);
         }
+
+        [TestMethod]
+        public void TopicId_Rejects_Ids_The_Convention_Forbids()
+        {
+            // Spec: an id "MAY contain lowercase letters from a to z, numbers from 0 to 9
+            // as well as the hyphen character", and "MUST NOT start or end with a hyphen".
+            // Caught at construction, not on the wire.
+            Assert.ThrowsException(typeof(ArgumentException), () => new HomieDeviceBuilder("Room-Sensor", "Uppercase"));
+            Assert.ThrowsException(typeof(ArgumentException), () => new HomieDeviceBuilder("-leading", "Leading hyphen"));
+            Assert.ThrowsException(typeof(ArgumentException), () => new HomieDeviceBuilder("trailing-", "Trailing hyphen"));
+            Assert.ThrowsException(typeof(ArgumentException), () => new HomieDeviceBuilder("with space", "Space"));
+            Assert.ThrowsException(typeof(ArgumentException), () => new HomieDeviceBuilder("under_score", "Underscore"));
+            Assert.ThrowsException(typeof(ArgumentException), () => new HomieDeviceBuilder("", "Empty"));
+        }
+
+        [TestMethod]
+        public void TopicId_Accepts_A_Valid_Id_At_Every_Level()
+        {
+            // Lowercase, digits and inner hyphens, on device, node and property alike.
+            var device = new HomieDeviceBuilder("room-sensor-2", "Valid device")
+                    .AddNode("sensor-1", "Valid node", "BMP280")
+                        .AddFloatProperty("temperature-c", "Valid property", 0.0)
+                        .BuildProperty()
+                    .BuildNode()
+                .BuildDevice();
+
+            Assert.AreEqual("room-sensor-2", device.TopicId);
+        }
+
+        [TestMethod]
+        public void TopicId_Rejects_An_Invalid_Node_Or_Property_Id()
+        {
+            var builder = new HomieDeviceBuilder("valid-device", "Device");
+
+            Assert.ThrowsException(typeof(ArgumentException), () => builder.AddNode("Node", "Uppercase node", "type"));
+
+            var node = new HomieDeviceBuilder("valid-device", "Device")
+                .AddNode("valid-node", "Node", "type");
+
+            Assert.ThrowsException(typeof(ArgumentException), () => node.AddFloatProperty("Temperature", "Uppercase property", 0.0));
+        }
+
     }
 }

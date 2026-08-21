@@ -62,7 +62,7 @@ namespace SmartHome.UnitTests
         public void HomieClient_Publish_On_Property_Update()
         {
             // Arrange
-            int expectedPublishCount = 16;
+            int expectedPublishCount = 17;   // +1: $extensions is published now
             int expectedSubscriptionCount = 0;
 
             var mqttClient = new MockMqttClient();
@@ -91,7 +91,7 @@ namespace SmartHome.UnitTests
         public void HomieClient_Property_Is_Set_On_Property_Set_Message()
         {
             // Arrange
-            int expectedPublishCount = 16;
+            int expectedPublishCount = 17;   // +1: $extensions is published now
             int expectedSubscriptionCount = 1;
             double initialValue = 0.0;
             double expectedValue = 25;
@@ -342,8 +342,8 @@ namespace SmartHome.UnitTests
         public void HomieClient_Connect_Disconnect()
         {
             // Arrange
-            int expectedPublishCountAfterConnect = 22;
-            int expectedPublishCountAfterDisconnect = 23;
+            int expectedPublishCountAfterConnect = 23;   // +1: $extensions is published now
+            int expectedPublishCountAfterDisconnect = 24;
             int expectedSubscriptionCountConnected = 2;
             int expectedSubscriptionCountDisconnected = 0;
 
