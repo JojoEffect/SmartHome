@@ -39,6 +39,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\common\Homie\Homie.nfproj" />
+    <ProjectReference Include="..\..\common\Mqtt\Mqtt.nfproj" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="mscorlib">

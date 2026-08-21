@@ -25,8 +25,6 @@
     <Compile Include="V4\EventArgs\DeviceStateChangeEventArgs.cs" />
     <Compile Include="V4\Extensions\UnitExtensions.cs" />
     <Compile Include="V4\HomieClient.cs" />
-    <Compile Include="V4\HomieMqttClient.cs" />
-    <Compile Include="V4\IHomieMqttClient.cs" />
     <Compile Include="V4\Settings\HomieClientSettings.cs" />
     <Compile Include="V4\Builder\HomieBooleanPropertyBuilder.cs" />
     <Compile Include="V4\Builder\HomieDeviceBuilder.cs" />
@@ -61,7 +59,7 @@
     <Compile Include="V4\Attributes\HomieAttribute.cs" />
     <Compile Include="V4\EventArgs\PropertyUpdateEventArgs.cs" />
     <Compile Include="V4\HomieEntityBase.cs" />
-    <Compile Include="V4\HomieMqttClientHelpers.cs" />
+    <Compile Include="V4\HomiePublishExtensions.cs" />
     <Compile Include="V4\IHomieEntity.cs" />
     <Compile Include="V4\NamedHomieEntityBase.cs" />
     <Compile Include="V4\Node.cs" />
@@ -118,6 +116,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Text\Text.nfproj" />
+    <ProjectReference Include="..\Mqtt\Mqtt.nfproj" />
   </ItemGroup>
   <Import Project="$(NanoFrameworkProjectSystemPath)NFProjectSystem.CSharp.targets" Condition="Exists('$(NanoFrameworkProjectSystemPath)NFProjectSystem.CSharp.targets')" />
   <ProjectExtensions>

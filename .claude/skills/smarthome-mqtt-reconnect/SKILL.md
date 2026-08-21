@@ -19,7 +19,7 @@ as `smarthome-deploy`.
 
 ## What it actually does
 
-1. Deploys `src\integrationTests\MqttReconnectCheck`, which connects through `HomieMqttClient`
+1. Deploys `src\integrationTests\MqttReconnectCheck`, which connects through `ReconnectingMqttClient` (`SmartHome.Mqtt`)
    and publishes a heartbeat on `homie/mqtt-reconnect-check/heartbeat` every 2s, forever.
 2. Waits for the first heartbeat (up to 90s: boot + WiFi + connect).
 3. `Stop-DevEnv.ps1` — broker and subscriber both die, exactly as if the machine had lost it.
@@ -36,7 +36,7 @@ only real variable between "restart" and "kill".
 The device asserting "I reconnected" is weaker evidence than a message actually arriving at the
 recreated broker. So this project emits **no** `[ITEST]` marker — that would be a second,
 competing verdict. Its debug output is still worth reading when it fails; the heartbeat, the
-publish failures during the outage, and `HomieMqttClient`'s reconnect logging all go there.
+publish failures during the outage, and `ReconnectingMqttClient`'s reconnect logging all go there.
 
 The heartbeat is published **non-retained** deliberately: a retained message would be handed to
 any fresh subscriber by the broker itself, which looks identical to the device having
@@ -46,7 +46,7 @@ so each phase reads a log that can only contain heartbeats from after that phase
 ## Reading a failure
 
 - `FAIL — no heartbeat within 90s of the broker returning` — the device did not reconnect. That
-  is the real finding this test exists for: `HomieMqttClient`'s auto-reconnect (enabled by
+  is the real finding this test exists for: `ReconnectingMqttClient`'s auto-reconnect (enabled by
   `Connect()`, retrying every 5s via `ReconnectHandler`) either didn't fire or couldn't recover.
   CLAUDE.md has long called that path WIP, "blocked on an ESP32 nanoFramework target bug" —
   check the device log for the reconnect attempts before assuming the test is wrong.

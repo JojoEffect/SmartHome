@@ -7,7 +7,7 @@ using System.Text;
 
 namespace SmartHome.Homie.V4
 {
-    internal static class HomieMqttClientHelpers
+    internal static class HomiePublishExtensions
     {
         public static void PublishHomieAttribute(this IMqttClient mqttClient, AttributeBase? attribute, PublishSettings publishSettings, ILogger logger)
         {

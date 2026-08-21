@@ -7,6 +7,7 @@ using nanoFramework.Logging.Debug;
 using System;
 using System.Threading;
 using nanoFramework.M2Mqtt.Exceptions;
+using SmartHome.Mqtt;
 using SmartHome.Networking;
 
 namespace SmartHome.Devices.RoomSensor
@@ -72,14 +73,14 @@ namespace SmartHome.Devices.RoomSensor
             return device;
         }
 
-        public static IHomieMqttClient SetupMqttClient()
+        public static IReconnectingMqttClient SetupMqttClient()
         {
-            var mqttClient = new HomieMqttClient("192.168.1.238");
+            var mqttClient = new ReconnectingMqttClient("192.168.1.238");
             return mqttClient;
 
         }
 
-        private static void ConnectMqttWithRetry(IHomieMqttClient mqttClient, string clientId)
+        private static void ConnectMqttWithRetry(IReconnectingMqttClient mqttClient, string clientId)
         {
             const int maxAttempts = 10;
             const int retryDelayMs = 3000;

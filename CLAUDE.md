@@ -113,6 +113,9 @@ the folder and the `.nfproj` file keep the short `<Name>`. So
 src/
   common/                 Shared libraries, used by device apps and tests alike
     Homie/                SmartHome.Homie      — Homie v4 client (SmartHome.Homie.V4 inside)
+    Mqtt/                 SmartHome.Mqtt       — ReconnectingMqttClient: auto-reconnect and
+                            subscription replay over nanoFramework.M2Mqtt. Protocol-agnostic;
+                            knows nothing about Homie
     Networking/           SmartHome.Networking — NetworkHelper, the only WiFi connect path
     Text/                 SmartHome.Text       — StringUtils
   devices/                Real device apps — the things that actually get shipped
@@ -123,9 +126,9 @@ src/
     TestSupport/          SmartHome.IntegrationTests.TestSupport — the PASS/FAIL markers
     WifiCheck/            Connects to the configured WiFi network, nothing else
     MqttCheck/            WifiCheck's setup + round-trip pub/sub through Mosquitto (plain
-                            nanoFramework.M2Mqtt, no HomieMqttClient/retry logic)
+                            nanoFramework.M2Mqtt, no reconnect wrapper)
     Bmp280Check/          BMP280 (Bme280 driver) sensor reads over I2C, no network
-    MqttReconnectCheck/   Publishes a heartbeat through HomieMqttClient while the runner
+    MqttReconnectCheck/   Publishes a heartbeat through ReconnectingMqttClient while the runner
                             kills and recreates the broker under it
   tests/
     Unit/                 SmartHome.UnitTests — nanoFramework.TestFramework, runs on hardware
@@ -148,14 +151,24 @@ Two naming traps this layout exists to avoid, both hit for real:
   that; `Deploy-ToDevice.ps1` and `Run-Tests.ps1` use it. Don't reintroduce
   `GetFileNameWithoutExtension($projectPath)` for that purpose.
 
-`RoomSensor/Program.cs` is the main device logic; `HomieMqttClient` (in `SmartHome.Homie`) is
-the shared Homie client. Its auto-reconnect handling was long marked WIP, "blocked on an ESP32
+`RoomSensor/Program.cs` is the main device logic; `HomieClient` (in `SmartHome.Homie`) is the
+shared Homie client, layered on `ReconnectingMqttClient` (in `SmartHome.Mqtt`). Its auto-reconnect handling was long marked WIP, "blocked on an ESP32
 nanoFramework target bug" — as of 2026-08-20 that is out of date at the MQTT level:
 `MqttReconnectCheck` proves on real hardware that a client keeps its heartbeat going across
-broker outages of 3s and 20s, reconnecting rather than restarting. What that test does *not*
+broker outages of 3s and 20s, reconnecting rather than restarting. That test exercises
+`SmartHome.Mqtt` alone -- it does not reference `SmartHome.Homie` at all. What that test does *not*
 cover is `HomieClient`'s Homie-level state machine (re-announcing `$state`, device/node
 attributes and settable-property subscriptions after a reconnect); treat that part as still
 unproven.
+
+Anything that needs a broker connection that survives the broker going away uses
+`ReconnectingMqttClient` from `src/common/Mqtt`. It was called `HomieMqttClient` and lived in the
+Homie library until 2026-08-21, but it never contained anything Homie-specific — it caches the
+connect parameters, retries on `ConnectionClosed`, and replays cached subscriptions, all in terms
+of plain MQTT. The Homie-specific publishing lives in `HomiePublishExtensions` (in
+`SmartHome.Homie`), which extends M2Mqtt's own `IMqttClient` and never referenced the wrapper.
+The dependency runs one way only: `SmartHome.Homie` -> `SmartHome.Mqtt`. Don't add a reference
+back, and don't put topic or `$state` knowledge into the client.
 
 Anything that needs WiFi calls `NetworkHelper.ConnectToConfiguredNetwork()` from
 `src/common/Networking`. Don't reintroduce the hand-rolled scan/connect loop from the official

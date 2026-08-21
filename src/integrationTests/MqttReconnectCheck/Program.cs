@@ -5,12 +5,12 @@ using System.Threading;
 using nanoFramework.Logging;
 using nanoFramework.Logging.Debug;
 using nanoFramework.M2Mqtt.Messages;
-using SmartHome.Homie.V4;
+using SmartHome.Mqtt;
 using SmartHome.Networking;
 
 namespace SmartHome.IntegrationTests.MqttReconnectCheck
 {
-    // Publishes a heartbeat forever through HomieMqttClient, so the host can take
+    // Publishes a heartbeat forever through ReconnectingMqttClient, so the host can take
     // the broker away underneath it and watch whether the device comes back.
     //
     // Unlike the other checks this one emits NO [ITEST] marker. Its verdict is
@@ -19,7 +19,7 @@ namespace SmartHome.IntegrationTests.MqttReconnectCheck
     // marker would be a second, competing verdict. scripts\Run-IntegrationTests.ps1
     // runs it as a BrokerOutage-kind test and decides from homie/# traffic.
     //
-    // What is under test is HomieMqttClient's auto-reconnect: Connect() enables it,
+    // What is under test is ReconnectingMqttClient's auto-reconnect: Connect() enables it,
     // hooks ConnectionClosed, and retries every 5s, re-subscribing cached topics.
     // The heartbeat is published non-retained on purpose -- a retained message would
     // be delivered to any fresh subscriber by the broker itself, which would look
@@ -32,14 +32,14 @@ namespace SmartHome.IntegrationTests.MqttReconnectCheck
 
         public static void Main()
         {
-            // HomieMqttClient logs through LogDispatcher; without a factory its
+            // ReconnectingMqttClient logs through LogDispatcher; without a factory its
             // logger calls would go nowhere useful, and the reconnect path is
             // exactly what someone will want to read when this test fails.
             LogDispatcher.LoggerFactory = new DebugLoggerFactory();
 
             NetworkHelper.ConnectToConfiguredNetwork();
 
-            var client = new HomieMqttClient(BrokerHost);
+            var client = new ReconnectingMqttClient(BrokerHost);
             ConnectWithRetry(client);
 
             var counter = 0;
@@ -77,7 +77,7 @@ namespace SmartHome.IntegrationTests.MqttReconnectCheck
         // easily boot while there is no broker to connect to. A bare Connect() would
         // throw straight out of Main, the CLR would restart the app, and the test
         // would then be measuring reboot loops instead of reconnects.
-        private static void ConnectWithRetry(HomieMqttClient client)
+        private static void ConnectWithRetry(ReconnectingMqttClient client)
         {
             const int maxAttempts = 20;
             const int retryDelayMs = 3000;

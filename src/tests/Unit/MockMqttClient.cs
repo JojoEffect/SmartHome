@@ -1,4 +1,5 @@
 using SmartHome.Homie.V4;
+using SmartHome.Mqtt;
 using nanoFramework.M2Mqtt;
 using nanoFramework.M2Mqtt.Messages;
 using System;
@@ -6,7 +7,7 @@ using System.Collections;
 
 namespace SmartHome.UnitTests
 {
-    internal class MockMqttClient : IHomieMqttClient
+    internal class MockMqttClient : IReconnectingMqttClient
     {
         public int PublishCount { get; private set; } = 0;
         public int SubscriptionCount { get; private set; } = 0;

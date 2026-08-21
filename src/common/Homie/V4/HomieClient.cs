@@ -3,6 +3,7 @@ using SmartHome.Homie.V4.EventArgs;
 using SmartHome.Homie.V4.Extensions;
 using SmartHome.Homie.V4.Properties;
 using SmartHome.Homie.V4.Settings;
+using SmartHome.Mqtt;
 using Microsoft.Extensions.Logging;
 using nanoFramework.Logging;
 using nanoFramework.M2Mqtt.Messages;
@@ -18,11 +19,11 @@ namespace SmartHome.Homie.V4
         private readonly HomiePublishSettings _homiePublishSettings;
         private readonly HomieLastWillSettings _homieLastWillSettings;
         private readonly ILogger _logger;
-        private readonly IHomieMqttClient _mqttClient;
+        private readonly IReconnectingMqttClient _mqttClient;
         private readonly IDictionary _settablePropertiesTable;
 
         public HomieClient(Device device,
-            IHomieMqttClient mqttClient,
+            IReconnectingMqttClient mqttClient,
             HomieClientSettings? deviceClientSettings = null,
             HomiePublishSettings? homiePublishSettings = null,
             HomieLastWillSettings? homieLastWillSettings = null)

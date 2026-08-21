@@ -8,9 +8,9 @@ using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using static nanoFramework.M2Mqtt.MqttClient;
 
-namespace SmartHome.Homie.V4
+namespace SmartHome.Mqtt
 {
-    public class HomieMqttClient : IHomieMqttClient
+    public class ReconnectingMqttClient : IReconnectingMqttClient
     {
         private readonly MqttClient _mqttCient;
         private readonly ILogger _logger;
@@ -34,12 +34,12 @@ namespace SmartHome.Homie.V4
         private bool _cleanSession;
         private ushort _keepAlivePeriod;
 
-        public HomieMqttClient(string brokerHostName)
+        public ReconnectingMqttClient(string brokerHostName)
             : this(brokerHostName, 1883, false, null, null, MqttSslProtocols.None)
         {
         }
 
-        public HomieMqttClient(string brokerHostName, int brokerPort, bool secure, X509Certificate? caCert, X509Certificate? clientCert, MqttSslProtocols sslProtocol)
+        public ReconnectingMqttClient(string brokerHostName, int brokerPort, bool secure, X509Certificate? caCert, X509Certificate? clientCert, MqttSslProtocols sslProtocol)
         {
             _logger = this.GetCurrentClassLogger();
             _mqttCient = new MqttClient(brokerHostName, brokerPort, secure, caCert, clientCert, sslProtocol);

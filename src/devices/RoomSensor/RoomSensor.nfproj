@@ -78,6 +78,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\common\Networking\Networking.nfproj" />
     <ProjectReference Include="..\..\common\Homie\Homie.nfproj" />
+    <ProjectReference Include="..\..\common\Mqtt\Mqtt.nfproj" />
   </ItemGroup>
   <Import Project="$(NanoFrameworkProjectSystemPath)NFProjectSystem.CSharp.targets" Condition="Exists('$(NanoFrameworkProjectSystemPath)NFProjectSystem.CSharp.targets')" />
   <ProjectExtensions>

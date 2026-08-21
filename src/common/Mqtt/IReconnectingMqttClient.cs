@@ -1,9 +1,9 @@
 using nanoFramework.M2Mqtt;
 using nanoFramework.M2Mqtt.Messages;
 
-namespace SmartHome.Homie.V4
+namespace SmartHome.Mqtt
 {
-    public interface IHomieMqttClient : IMqttClient
+    public interface IReconnectingMqttClient : IMqttClient
     {
         event MqttClient.ConnectionOpenedEventHandler ConnectionOpened;
 
