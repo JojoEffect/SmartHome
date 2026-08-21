@@ -1,11 +1,16 @@
 using SmartHome.Homie.V4;
+using SmartHome.Homie.V4.Enums;
 using SmartHome.Homie.V4.Builder;
 using SmartHome.Homie.V4.Properties;
 using Microsoft.Extensions.Logging;
 using nanoFramework.Logging;
 using nanoFramework.Logging.Debug;
 using System;
+using System.Device.I2c;
 using System.Threading;
+using Iot.Device.Bmxx80;
+using Iot.Device.Bmxx80.FilteringMode;
+using nanoFramework.Hardware.Esp32;
 using nanoFramework.M2Mqtt.Exceptions;
 using SmartHome.Mqtt;
 using SmartHome.Networking;
@@ -14,6 +19,11 @@ namespace SmartHome.Devices.RoomSensor
 {
     public class Program
     {
+        private const int I2cBusId = 1;
+        private const int I2cDataPin = 21;
+        private const int I2cClockPin = 22;
+        private const int MeasurementIntervalMs = 5000;
+
         private static FloatProperty _temperatureProperty;
         private static FloatProperty _humidityProperty;
         private static FloatProperty _pressureProperty;
@@ -36,19 +46,12 @@ namespace SmartHome.Devices.RoomSensor
 
                 ConnectWithRetry(homieClient);
 
-                // Simulate sensor data updates
+                using var sensor = SetupSensor();
+
                 while (true)
                 {
-                    _logger.LogDebug("Updating sensor values...");
-                    // In a real application, replace this with actual sensor readings
-                    var random = new Random();
-                    var temperature = 20.0 + random.NextDouble() * 10.0; // Simulated temperature
-                    var humidity = 40.0 + random.NextDouble() * 20.0;    // Simulated humidity
-                    var pressure = 1000.0 + random.NextDouble() * 50.0;  // Simulated pressure
-                    _temperatureProperty.Update(temperature);
-                    _humidityProperty.Update(humidity);
-                    _pressureProperty.Update(pressure);
-                    Thread.Sleep(5000); // Update every 5 seconds
+                    PublishReading(sensor, homieClient);
+                    Thread.Sleep(MeasurementIntervalMs);
                 }
             }
             catch (Exception ex)
@@ -63,9 +66,17 @@ namespace SmartHome.Devices.RoomSensor
             var builder = new HomieDeviceBuilder(Constants.DeviceTopicId, Constants.DeviceName);
             var device = builder
                     .AddNode(Constants.NodeSensorTopicId, Constants.NodeSensorName, Constants.NodeSensorType)
-                        .AddFloatProperty(Constants.PropertyTemperatureTopicId, Constants.PropertyTemperatureName, 0.0).BuildProperty(out _temperatureProperty)
-                        .AddFloatProperty(Constants.PropertyHumidityTopicId, Constants.PropertyHumidityName, 0.0).BuildProperty(out _humidityProperty)
-                        .AddFloatProperty(Constants.PropertyPressureTopicId, Constants.PropertyPressureName, 0.0).BuildProperty(out _pressureProperty)
+                        .AddFloatProperty(Constants.PropertyTemperatureTopicId, Constants.PropertyTemperatureName, 0.0)
+                            .WithUnit(Unit.DegreeCelsius)
+                        .BuildProperty(out _temperatureProperty)
+                        .AddFloatProperty(Constants.PropertyHumidityTopicId, Constants.PropertyHumidityName, 0.0)
+                            .WithUnit(Unit.Percent)
+                        .BuildProperty(out _humidityProperty)
+                        // Pascals, not hectopascals: Pa is the unit Homie's recommended list
+                        // carries, and $unit should say what the value actually is.
+                        .AddFloatProperty(Constants.PropertyPressureTopicId, Constants.PropertyPressureName, 0.0)
+                            .WithUnit(Unit.Pascal)
+                        .BuildProperty(out _pressureProperty)
                     .BuildNode()
                 .BuildDevice();
 
@@ -77,6 +88,55 @@ namespace SmartHome.Devices.RoomSensor
             var mqttClient = new ReconnectingMqttClient("192.168.1.238");
             return mqttClient;
 
+        }
+
+        private static Bme280 SetupSensor()
+        {
+            // Same wiring as Bmp280Check, which is the isolated proof that this sensor
+            // reads correctly over I2C on this board.
+            Configuration.SetPinFunction(I2cDataPin, DeviceFunction.I2C1_DATA);
+            Configuration.SetPinFunction(I2cClockPin, DeviceFunction.I2C1_CLOCK);
+
+            var settings = new I2cConnectionSettings(I2cBusId, Bme280.SecondaryI2cAddress);
+            var device = I2cDevice.Create(settings);
+
+            return new Bme280(device)
+            {
+                TemperatureSampling = Sampling.LowPower,
+                PressureSampling = Sampling.UltraHighResolution,
+                HumiditySampling = Sampling.Standard,
+                FilterMode = Bmx280FilteringMode.X2,
+            };
+        }
+
+        private static void PublishReading(Bme280 sensor, IHomieClient homieClient)
+        {
+            var reading = sensor.Read();
+
+            if (!reading.TemperatureIsValid || !reading.PressureIsValid || !reading.HumidityIsValid)
+            {
+                // A sensor that stops answering is exactly what Homie's 'alert' state is
+                // for: "send this message when something is wrong". Publishing the last
+                // good value forever would be worse than saying nothing.
+                _logger.LogError($"Invalid BMP280 reading (temperature: {reading.TemperatureIsValid}, pressure: {reading.PressureIsValid}, humidity: {reading.HumidityIsValid}).");
+
+                if (homieClient.State != State.Alert)
+                {
+                    homieClient.Alert();
+                }
+
+                return;
+            }
+
+            if (homieClient.State == State.Alert)
+            {
+                _logger.LogInformation("BMP280 reading valid again.");
+                homieClient.Ready();
+            }
+
+            _temperatureProperty.Update(reading.Temperature.DegreesCelsius);
+            _humidityProperty.Update(reading.Humidity.Percent);
+            _pressureProperty.Update(reading.Pressure.Pascals);
         }
 
         // The Homie client owns the MQTT session on purpose: it is the only thing that
