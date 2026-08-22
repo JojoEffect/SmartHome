@@ -30,6 +30,19 @@ namespace SmartHome.IntegrationTests.MqttReconnectCheck
         private const string HeartbeatTopic = "homie/mqtt-reconnect-check/heartbeat";
         private const int HeartbeatIntervalMs = 2000;
 
+        // The echo pair exists to test the *subscription* half of the reconnect, which
+        // heartbeats alone cannot reach. Publishing resumes on its own the moment the
+        // socket is back, so a reconnect that restored the connection but replayed no
+        // subscriptions -- a live client subscribed to nothing, which is what a throw
+        // out of ResubscribeCachedTopics used to leave behind -- looked identical to a
+        // healthy one. The host publishes to the command topic after the outage and
+        // waits for it to come back on the echo topic; only a replayed subscription can
+        // produce that.
+        private const string EchoCommandTopic = "homie/mqtt-reconnect-check/echo/set";
+        private const string EchoTopic = "homie/mqtt-reconnect-check/echo";
+
+        private static ReconnectingMqttClient _client;
+
         public static void Main()
         {
             // ReconnectingMqttClient logs through LogDispatcher; without a factory its
@@ -40,7 +53,12 @@ namespace SmartHome.IntegrationTests.MqttReconnectCheck
             NetworkHelper.ConnectToConfiguredNetwork();
 
             var client = new ReconnectingMqttClient(BrokerHost);
+            _client = client;
             ConnectWithRetry(client);
+
+            client.MqttMsgPublishReceived += HandleEchoCommand;
+            client.Subscribe(new[] { EchoCommandTopic }, new[] { MqttQoSLevel.AtLeastOnce });
+            Debug.WriteLine($"MqttReconnectCheck: subscribed to {EchoCommandTopic}.");
 
             var counter = 0;
             while (true)
@@ -70,6 +88,24 @@ namespace SmartHome.IntegrationTests.MqttReconnectCheck
                 }
 
                 Thread.Sleep(HeartbeatIntervalMs);
+            }
+        }
+
+        private static void HandleEchoCommand(object sender, MqttMsgPublishEventArgs e)
+        {
+            if (e.Topic != EchoCommandTopic)
+            {
+                return;
+            }
+
+            try
+            {
+                _client.Publish(EchoTopic, e.Message, null, null, MqttQoSLevel.AtMostOnce, false);
+                Debug.WriteLine($"MqttReconnectCheck: echoed '{Encoding.UTF8.GetString(e.Message, 0, e.Message.Length)}'.");
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"MqttReconnectCheck: echo failed ({ex.Message}).");
             }
         }
 

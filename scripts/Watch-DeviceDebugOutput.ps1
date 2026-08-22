@@ -47,7 +47,14 @@ param(
 
     # Stop as soon as a line containing this text arrives; -DurationSeconds then acts
     # as a timeout rather than a fixed wait.
-    [string]$Until
+    [string]$Until,
+
+    # Dump the device's flash partition table instead of capturing output. The monitor
+    # has supported this since the deploy-address investigation, but no script exposed
+    # it -- so the only way to reach it was to hand-invoke `dotnet run`, outside the one
+    # entry point per workflow this repo works by, and outside the confirm-before-
+    # hardware path every other device-touching switch sits behind.
+    [switch]$DumpConfig
 )
 
 Set-StrictMode -Version Latest
@@ -72,6 +79,10 @@ if ($NoReboot) {
 if ($Until) {
     $toolArgs += '--until'
     $toolArgs += $Until
+}
+if ($DumpConfig) {
+    # The monitor early-returns on this, so nothing else in $toolArgs applies.
+    $toolArgs += '--dump-config'
 }
 
 # Build separately from run -- a --no-build run that fails because the device

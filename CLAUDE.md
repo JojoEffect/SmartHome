@@ -58,7 +58,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Sync-NanoFrameworkRepos.ps1 [-Force]` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
 | `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style | No | `smarthome-restore-packages` |
 | `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` | Raw serial capture of the device's native boot log only — nanoCLR silences this at `app_main()` and switches to binary WireProtocol, so this can't see managed output | Resets only | `smarthome-watch-serial` |
-| `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot] [-NoBuild] [-BuildOnly] [-Until <regex>]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
+| `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot] [-NoBuild] [-BuildOnly] [-Until <regex>] [-DumpConfig]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
 | `scripts\Common.ps1` | Shared helpers (env loading, MSBuild/vstest/adapter discovery, repo-sync, dev-env state) — dot-source, don't duplicate its logic | No | — |
 
 `Start-DevEnv.ps1` is the session bootstrap: it absorbed the old `Start-AgentWorkspace.ps1`,
@@ -238,13 +238,18 @@ The suite runs three kinds of test, and the kind is declared per entry in
   the broker is replaced. `HomieClientCheck` is this kind. Retained-ness is read from a *fresh*
   subscriber (`mosquitto_sub -F '%t %r %p'`), because MQTT only sets the retain flag when
   replaying from the store — a live retained publish arrives with the flag clear.
-- **`BrokerOutage`** — the host decides. The device only publishes a heartbeat; the runner takes
-  the broker away, brings a fresh one up, and asserts heartbeats reappear on `homie/#` with a
-  *higher* counter than before the outage. A lower counter means the app restarted rather than
-  reconnected, which is reported as `RESTARTED`, not `PASS`. `MqttReconnectCheck` is this kind,
-  and it deliberately emits no `[ITEST]` marker — a device claiming it reconnected would be a
-  second, weaker verdict competing with the evidence at the broker. See the
-  `smarthome-mqtt-reconnect` skill.
+- **`BrokerOutage`** — the host decides. The device publishes a heartbeat and subscribes to an
+  echo topic; the runner takes the broker away, brings a fresh one up, and asserts heartbeats
+  reappear on `homie/#` with a *higher* counter than before the outage. A lower counter means the
+  app restarted rather than reconnected, which is reported as `RESTARTED`, not `PASS`. It then
+  publishes a nonce to the echo command topic and requires it back — because heartbeats alone
+  only prove the *connection* returned. Publishing resumes the moment the socket is up, so a
+  reconnect that replayed no subscriptions (a live client subscribed to nothing, which is what a
+  throw out of `ResubscribeCachedTopics` used to leave behind) is indistinguishable from a
+  healthy one until something is sent *to* the device. `MqttReconnectCheck` is this kind, and it
+  deliberately emits no `[ITEST]` marker — a device claiming it reconnected would be a second,
+  weaker verdict competing with the evidence at the broker. See the `smarthome-mqtt-reconnect`
+  skill.
 
 DeviceMarker tests report by writing a marker line to managed debug output:
 

@@ -9,7 +9,15 @@ description: Stream a SmartHome device's real managed-code debug output (Debug.W
 .\scripts\Watch-DeviceDebugOutput.ps1                              # 30s, reboots device to capture from boot
 .\scripts\Watch-DeviceDebugOutput.ps1 -DurationSeconds 60
 .\scripts\Deploy-ToDevice.ps1; .\scripts\Watch-DeviceDebugOutput.ps1 -NoReboot   # attach right after a flash
+.\scripts\Watch-DeviceDebugOutput.ps1 -Until 'ITEST'               # stop on a matching line; duration becomes a timeout
+.\scripts\Watch-DeviceDebugOutput.ps1 -BuildOnly                   # build the monitor, capture nothing
+.\scripts\Watch-DeviceDebugOutput.ps1 -DumpConfig                  # flash partition table instead of a capture
 ```
+
+`-DumpConfig` prints the device's flash partition table and exits without capturing. It is what
+the deploy-address investigation was done with, and it is the thing to reach for when a deploy
+lands but the CLR resolves zero assemblies — compare the deployment partition's address against
+`-DeployAddress` in `smarthome-deploy`.
 
 Builds and runs `tools\DeviceDebugMonitor`, a small standalone .NET console app on
 `nanoFramework.Tools.Debugger.Net` — the same library Visual Studio's nanoFramework debugger

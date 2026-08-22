@@ -16,35 +16,18 @@ namespace SmartHome.UnitTests
         private const string _testDeviceTopicId = "super-car";
         private const string _testDeviceName = "Super car";
 
-        private const string _testNodeWheelsTopicId = "wheels";
-        private const string _testNodeWheelsName = "Wheels";
-        private const string _testNodeWheelsType = "Gum";
-
+        // Only what the tests actually use. Fourteen further constants (wheels, lights,
+        // angle, speed, direction, colour) were declaration-only, describing a fixture
+        // no test in this file builds -- the first thing a reader had to disprove.
         private const string _testNodeEngineTopicId = "engine";
         private const string _testNodeEngineName = "Engine";
         private const string _testNodeEngineType = "V8";
-
-        private const string _testNodeLightsTopicId = "ligths";
-        private const string _testNodeLightsName = "Ligths";
-        private const string _testNodeLightsType = "LED";
-
-        private const string _testPropertyAngleTopicId = "angle";
-        private const string _testPropertyAngleName = "Angle";
-
-        private const string _testPropertySpeedTopicId = "speed";
-        private const string _testPropertySpeedName = "Speed";
-
-        private const string _testPropertyDirectionTopicId = "direction";
-        private const string _testPropertyDirectionName = "Direction";
 
         private const string _testPropertyTemperatureTopicId = "temperature";
         private const string _testPropertyTemperatureName = "Temperature";
 
         private const string _testPropertyIntensityTopicId = "intensity";
         private const string _testPropertyIntensityName = "Intensity";
-
-        private const string _testPropertyColorTopicId = "color";
-        private const string _testPropertyColorName = "Color";
 
         [Setup]
         public void Setup()

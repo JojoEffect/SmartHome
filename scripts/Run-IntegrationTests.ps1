@@ -109,6 +109,14 @@ $testCatalog = [ordered]@{
         OutageSeconds = @(3, 20)
         # How long to wait for heartbeats to resume once the broker is back.
         RecoverySeconds = 90
+        # The device subscribes to EchoCommandTopic and republishes whatever arrives to
+        # EchoTopic. Heartbeats only prove the connection came back; this pair is what
+        # proves the *subscriptions* were replayed with it. Must match the constants in
+        # that project's Program.cs.
+        EchoCommandTopic = 'homie/mqtt-reconnect-check/echo/set'
+        EchoTopic = 'homie/mqtt-reconnect-check/echo'
+        # How long to wait for the echo to come back.
+        CommandTimeoutSeconds = 30
     }
 }
 
@@ -132,7 +140,7 @@ if ($unknown.Count -gt 0) {
 $requiredCatalogKeys = @{
     'DeviceMarker'     = @('CaptureSeconds')
     'HomieConformance' = @('DeviceId', 'NodeId', 'SettleSeconds', 'CommandTimeoutSeconds', 'RecoverySeconds')
-    'BrokerOutage'     = @('HeartbeatTopic', 'SettleSeconds', 'OutageSeconds', 'RecoverySeconds')
+    'BrokerOutage'     = @('HeartbeatTopic', 'SettleSeconds', 'OutageSeconds', 'RecoverySeconds', 'EchoCommandTopic', 'EchoTopic', 'CommandTimeoutSeconds')
 }
 $knownKinds = (@($requiredCatalogKeys.Keys) | Sort-Object) -join ', '
 
@@ -229,27 +237,38 @@ function Test-DeviceConstant {
     # Compile-time constants in a device project can't be read from local.env.ps1,
     # so they drift. Comparing them up front turns "the test failed on a healthy
     # device" into a warning that names the two values.
+    #
+    # Takes an explicit path rather than deriving one under src\integrationTests. That
+    # derivation silently excluded the one app that actually ships: RoomSensor lives in
+    # src\devices, so Test-Path returned false and the check returned without a word --
+    # leaving the shipped device as the only one with no stale-broker warning.
     param(
-        [string]$TestName,
+        [string]$Label,
+        [string]$ProgramPath,
         [string]$Pattern,
         [string]$Expected,
         [string]$What
     )
 
-    $program = Join-Path $repoRoot "src\integrationTests\$TestName\Program.cs"
-    if (-not (Test-Path $program)) {
+    if (-not (Test-Path $ProgramPath)) {
         return
     }
 
-    $match = Select-String -Path $program -Pattern $Pattern | Select-Object -First 1
+    $match = Select-String -Path $ProgramPath -Pattern $Pattern | Select-Object -First 1
     if (-not $match) {
         return
     }
 
     $actual = $match.Matches[0].Groups[1].Value
     if ($actual -ne $Expected) {
-        Write-Warning ("{0}: {1} is '{2}' in Program.cs but '{3}' here. If it fails to connect, one of the two is stale." -f $TestName, $What, $actual, $Expected)
+        Write-Warning ("{0}: {1} is '{2}' in Program.cs but '{3}' here. If it fails to connect, one of the two is stale." -f $Label, $What, $actual, $Expected)
     }
+}
+
+function Get-IntegrationTestProgramPath {
+    param([string]$TestName)
+
+    return (Join-Path $repoRoot "src\integrationTests\$TestName\Program.cs")
 }
 
 function Wait-Heartbeat {
@@ -366,10 +385,58 @@ function Invoke-BrokerOutageCheck {
         Write-Host ("  recovered after {0}s outage: {1}" -f $outage, $latest.Line) -ForegroundColor Green
     }
 
+    # Heartbeats prove the connection came back. They do NOT prove the subscriptions
+    # did: publishing resumes the moment the socket is up, so a reconnect that restored
+    # the session and replayed nothing looks exactly the same from here. That is not
+    # hypothetical -- a throw out of ResubscribeCachedTopics used to leave precisely
+    # that state, connected and deaf, with one log line as evidence.
+    #
+    # So: send the device something and require it back. Only a replayed subscription
+    # can produce the echo.
+    $nonce = "echo-{0}" -f $latest.Counter
+    Write-Host ("  checking the subscription survived: publishing '{0}'..." -f $nonce) -ForegroundColor Cyan
+    Publish-HomieCommand -Port $Port -Topic $Settings.EchoCommandTopic -Payload $nonce
+
+    if (-not (Wait-ForEcho -Topic $Settings.EchoTopic -Payload $nonce -TimeoutSeconds $Settings.CommandTimeoutSeconds -Port $Port)) {
+        return @{
+            Outcome = 'FAIL'
+            Detail  = "heartbeats resumed but '$nonce' was never echoed on $($Settings.EchoTopic) -- the client reconnected without replaying its subscriptions"
+        }
+    }
+
+    Write-Host "  subscription replayed after the outage." -ForegroundColor Green
+
     return @{
         Outcome = 'PASS'
-        Detail  = "republished after outages of {0}s" -f ($Settings.OutageSeconds -join 's, ')
+        Detail  = "republished and stayed subscribed across outages of {0}s" -f ($Settings.OutageSeconds -join 's, ')
     }
+}
+
+function Wait-ForEcho {
+    # Polls the detached subscriber's homie/# log for $Topic carrying exactly $Payload.
+    # Log lines are "<topic> <0|1> <payload>", per Get-SmartHomeSubscriberArguments.
+    param(
+        [string]$Topic,
+        [string]$Payload,
+        [int]$TimeoutSeconds,
+        [string]$Port
+    )
+
+    $log = Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+
+    while ((Get-Date) -lt $deadline) {
+        $hit = Get-Content -Path $log -ErrorAction SilentlyContinue |
+            Where-Object { $_ -like "$Topic *" -and $_ -like "*$Payload" } |
+            Select-Object -First 1
+        if ($hit) {
+            return $true
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $false
 }
 
 function Get-MosquittoTool {
@@ -453,6 +520,13 @@ function Publish-HomieCommand {
 
 function Wait-ForRetainedValue {
     # Polls fresh snapshots until $Topic holds $Expected, or the timeout expires.
+    #
+    # Returns the winning snapshot alongside the verdict. It already holds the entire
+    # retained store, and callers used to throw it away and immediately spawn another
+    # 3s subscriber to fetch the same data. Reusing it is sound rather than merely
+    # cheaper: HandleDeviceStateChange publishes the full device info while the device
+    # is in Init and only then transitions out of it, so a snapshot containing
+    # $state=ready necessarily contains everything published before it.
     param(
         [string]$Port,
         [string]$Topic,
@@ -462,18 +536,19 @@ function Wait-ForRetainedValue {
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $seen = '<nothing>'
+    $snapshot = @{}
 
     while ((Get-Date) -lt $deadline) {
         $snapshot = Get-HomieRetainedSnapshot -Port $Port -SettleSeconds 2
         if ($snapshot.Contains($Topic)) {
             $seen = $snapshot[$Topic].Payload
             if ($seen -eq $Expected) {
-                return @{ Ok = $true; Seen = $seen }
+                return @{ Ok = $true; Seen = $seen; Snapshot = $snapshot }
             }
         }
     }
 
-    return @{ Ok = $false; Seen = $seen }
+    return @{ Ok = $false; Seen = $seen; Snapshot = $snapshot }
 }
 
 function Invoke-HomieConformanceCheck {
@@ -505,7 +580,8 @@ function Invoke-HomieConformanceCheck {
         }
     }
 
-    $snapshot = Get-HomieRetainedSnapshot -Port $Port -SettleSeconds 3
+    # The snapshot the wait already paid for, not a fresh 3s one.
+    $snapshot = $ready.Snapshot
     Write-Host ("  retained store holds {0} topics" -f $snapshot.Count) -ForegroundColor DarkGray
 
     function Test-Attribute {
@@ -666,7 +742,7 @@ function Invoke-HomieConformanceCheck {
         $script:conformanceFailures += "no re-announce after the broker was replaced (saw '$($reannounced.Seen)')"
     }
     else {
-        $after = Get-HomieRetainedSnapshot -Port $Port -SettleSeconds 3
+        $after = $reannounced.Snapshot
         foreach ($topic in "$root/`$homie", "$root/`$nodes", "$node/`$properties", "$node/integer-value/`$datatype") {
             if (-not $after.Contains($topic)) {
                 $script:conformanceFailures += "re-announce did not republish $topic"
@@ -689,12 +765,30 @@ function Invoke-HomieConformanceCheck {
 
 # ── Pre-flight ────────────────────────────────────────────────────────────────
 $expectedBroker = Get-OptionalEnvValue -Name 'SMARTHOME_MQTT_BROKER' -DefaultValue 'localhost'
+
+# RoomSensor is checked too, and first. It is the app that ships, it carries the same
+# hardcoded broker address, and the suite leaves it on the device -- so a stale constant
+# there outlives the run that would have warned about it.
+Test-DeviceConstant -Label 'RoomSensor' `
+                    -ProgramPath (Join-Path $repoRoot 'src\devices\RoomSensor\Program.cs') `
+                    -Pattern 'BrokerHost\s*=\s*"([^"]+)"' `
+                    -Expected $expectedBroker `
+                    -What 'BrokerHost'
+
 foreach ($testName in $Tests) {
-    Test-DeviceConstant -TestName $testName -Pattern 'BrokerHost\s*=\s*"([^"]+)"' -Expected $expectedBroker -What 'BrokerHost'
+    Test-DeviceConstant -Label $testName -ProgramPath (Get-IntegrationTestProgramPath -TestName $testName) -Pattern 'BrokerHost\s*=\s*"([^"]+)"' -Expected $expectedBroker -What 'BrokerHost'
 
     $settings = $testCatalog[$testName]
-    if ($settings.Contains('HeartbeatTopic')) {
-        Test-DeviceConstant -TestName $testName -Pattern 'HeartbeatTopic\s*=\s*"([^"]+)"' -Expected $settings.HeartbeatTopic -What 'HeartbeatTopic'
+
+    # Every topic the host and the device have to agree on, checked the same way.
+    foreach ($constant in 'HeartbeatTopic', 'EchoCommandTopic', 'EchoTopic') {
+        if ($settings.Contains($constant)) {
+            Test-DeviceConstant -Label $testName `
+                                -ProgramPath (Get-IntegrationTestProgramPath -TestName $testName) `
+                                -Pattern ('{0}\s*=\s*"([^"]+)"' -f $constant) `
+                                -Expected $settings[$constant] `
+                                -What $constant
+        }
     }
 
     if (($settings.Kind -eq 'BrokerOutage' -or $settings.Kind -eq 'HomieConformance') -and $NoBroker) {

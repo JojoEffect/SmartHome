@@ -19,12 +19,15 @@ as `smarthome-deploy`.
 
 ## What it actually does
 
-1. Deploys `src\integrationTests\MqttReconnectCheck`, which connects through `ReconnectingMqttClient` (`SmartHome.Mqtt`)
-   and publishes a heartbeat on `homie/mqtt-reconnect-check/heartbeat` every 2s, forever.
+1. Deploys `src\integrationTests\MqttReconnectCheck`, which connects through `ReconnectingMqttClient` (`SmartHome.Mqtt`),
+   publishes a heartbeat on `homie/mqtt-reconnect-check/heartbeat` every 2s forever, and
+   subscribes to `homie/mqtt-reconnect-check/echo/set`, echoing whatever arrives back on
+   `homie/mqtt-reconnect-check/echo`.
 2. Waits for the first heartbeat (up to 90s: boot + WiFi + connect).
 3. `Stop-DevEnv.ps1` — broker and subscriber both die, exactly as if the machine had lost it.
 4. Waits out the outage, then `Start-DevEnv.ps1 -Detached` brings up a **fresh** broker.
 5. Asserts a heartbeat reappears within 90s. Repeats for a second, longer outage.
+6. Publishes a nonce to the echo command topic and requires it back within 30s.
 
 Two outages by design: **3s** (inside one 5s reconnect cycle) and **20s** (several failed
 attempts, so the retry loop itself is under test). On Windows there's no graceful mosquitto
@@ -43,6 +46,19 @@ any fresh subscriber by the broker itself, which looks identical to the device h
 republished when it hadn't. `Start-DevEnv.ps1` also truncates the subscriber log on every start,
 so each phase reads a log that can only contain heartbeats from after that phase's broker came up.
 
+## Why step 6 exists
+
+Heartbeats prove the *connection* came back, and nothing more. Publishing resumes the instant the
+socket is up, so a reconnect that restored the session and replayed **no subscriptions** is
+indistinguishable from a healthy one — from the broker's side both just show heartbeats. That
+state is not hypothetical: a throw out of `ResubscribeCachedTopics` used to leave the client
+connected, publishing normally, and deaf to every `/set` until reboot, with a single
+`LogWarning` as the only evidence.
+
+The echo closes that gap. Only a subscription that was actually replayed can turn a publish *to*
+the device into a publish *from* it, so `FAIL — never echoed` means the reconnect dropped the
+subscriptions even though the heartbeats look fine.
+
 ## Reading a failure
 
 - `FAIL — no heartbeat within 90s of the broker returning` — the device did not reconnect. That
@@ -50,6 +66,10 @@ so each phase reads a log that can only contain heartbeats from after that phase
   `Connect()`, retrying every 5s via `ReconnectHandler`) either didn't fire or couldn't recover.
   CLAUDE.md has long called that path WIP, "blocked on an ESP32 nanoFramework target bug" —
   check the device log for the reconnect attempts before assuming the test is wrong.
+- `FAIL — heartbeats resumed but '<nonce>' was never echoed` — the connection came back without
+  its subscriptions. See "Why step 6 exists": the device is publishing normally and ignoring
+  every inbound message. Check the device log for `Resubscribing cached topics` and for a warning
+  from the reconnect thread immediately after a successful connect.
 - `NO-RESULT — no heartbeat within 90s` — it never connected in the first place, so nothing was
   disconnected. Check WiFi and the broker address; run `smarthome-integration-tests` for
   `WifiCheck`/`MqttCheck` first, which isolate those.

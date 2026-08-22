@@ -86,43 +86,60 @@ function Get-VsWherePath {
     return $null
 }
 
-function Get-MSBuildPath {
-    # Memoised in the global scope on purpose: vswhere costs ~440ms per call, and
-    # a suite run invokes Deploy-ToDevice.ps1 once per test -- those are separate
-    # script scopes but the same process, so a script-scoped cache would miss.
-    if ($global:SmartHomeMSBuildPath) {
-        return $global:SmartHomeMSBuildPath
+function Get-SmartHomeVsTool {
+    # One locate-and-memoise for every Visual Studio-resident tool. MSBuild and
+    # vstest.console had a copy each -- same five steps, differing only in the three
+    # strings below -- and the memo dance was spelled out twice more on top of the
+    # pre-declaration loop at the top of this file.
+    #
+    # Memoised in the global scope on purpose: vswhere costs ~440ms per call, and a
+    # suite run invokes Deploy-ToDevice.ps1 once per test -- those are separate script
+    # scopes but the same process, so a script-scoped cache would miss.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$MemoName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Requires,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Find,
+
+        # Used when vswhere is absent or finds nothing: bare name, resolved off PATH.
+        [Parameter(Mandatory = $true)]
+        [string]$Fallback
+    )
+
+    $memoPath = "variable:global:$MemoName"
+    if ((Test-Path $memoPath) -and (Get-Variable -Name $MemoName -Scope Global -ValueOnly)) {
+        return (Get-Variable -Name $MemoName -Scope Global -ValueOnly)
     }
 
-    $resolved = 'msbuild'
+    $resolved = $Fallback
     $vswhere = Get-VsWherePath
     if ($vswhere) {
-        $msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' 2>$null | Select-Object -First 1
-        if ($msbuild) {
-            $resolved = $msbuild
+        $found = & $vswhere -latest -requires $Requires -find $Find 2>$null | Select-Object -First 1
+        if ($found) {
+            $resolved = $found
         }
     }
 
-    $global:SmartHomeMSBuildPath = $resolved
+    Set-Variable -Name $MemoName -Scope Global -Value $resolved
     return $resolved
 }
 
+function Get-MSBuildPath {
+    return (Get-SmartHomeVsTool -MemoName 'SmartHomeMSBuildPath' `
+                                -Requires 'Microsoft.Component.MSBuild' `
+                                -Find 'MSBuild\**\Bin\MSBuild.exe' `
+                                -Fallback 'msbuild')
+}
+
 function Get-VsTestPath {
-    if ($global:SmartHomeVsTestPath) {
-        return $global:SmartHomeVsTestPath
-    }
-
-    $resolved = 'vstest.console'
-    $vswhere = Get-VsWherePath
-    if ($vswhere) {
-        $vstest = & $vswhere -latest -requires Microsoft.VisualStudio.Component.ManagedDesktop.Core -find 'Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe' 2>$null | Select-Object -First 1
-        if ($vstest) {
-            $resolved = $vstest
-        }
-    }
-
-    $global:SmartHomeVsTestPath = $resolved
-    return $resolved
+    return (Get-SmartHomeVsTool -MemoName 'SmartHomeVsTestPath' `
+                                -Requires 'Microsoft.VisualStudio.Component.ManagedDesktop.Core' `
+                                -Find 'Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe' `
+                                -Fallback 'vstest.console')
 }
 
 function Get-NanoFrameworkTestAdapterDir {

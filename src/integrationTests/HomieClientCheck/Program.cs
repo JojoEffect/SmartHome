@@ -139,25 +139,17 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
         // The runner cycles the broker while this device runs, so it can boot with no
         // broker present. A bare Connect() would throw out of Main and the CLR would
         // restart the app, turning the test into a reboot-loop meter.
+        //
+        // 20 attempts rather than the default 10: this test is deliberately started
+        // against a broker the runner is still cycling.
         private static void ConnectWithRetry()
         {
-            const int maxAttempts = 20;
-            const int retryDelayMs = 3000;
-
-            for (var attempt = 1; attempt <= maxAttempts; attempt++)
+            if (!_homieClient.ConnectWithRetry(maxAttempts: 20))
             {
-                Debug.WriteLine($"HomieClientCheck: connecting to {BrokerHost} (attempt {attempt}/{maxAttempts})...");
-
-                if (_homieClient.Connect())
-                {
-                    Debug.WriteLine("HomieClientCheck: connected and announced.");
-                    return;
-                }
-
-                Thread.Sleep(retryDelayMs);
+                throw new Exception($"Could not connect to {BrokerHost}.");
             }
 
-            throw new Exception($"Could not connect to {BrokerHost} after {maxAttempts} attempts.");
+            Debug.WriteLine("HomieClientCheck: connected and announced.");
         }
     }
 }

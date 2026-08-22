@@ -41,6 +41,21 @@ namespace SmartHome.Homie.V4
         bool Connect();
 
         /// <summary>
+        /// Calls <see cref="Connect"/> until it succeeds or the attempts run out.
+        /// </summary>
+        /// <remarks>
+        /// Here rather than in each app. Every device that connects has to retry -- the
+        /// broker is routinely not up yet at boot, and the integration suite cycles it
+        /// deliberately -- so each app had grown its own copy of the same loop, differing
+        /// only in the attempt count and in whether exhaustion returned false or threw.
+        /// That mattered beyond the duplication: the requirement that Connect() be safe
+        /// to call repeatedly is a property of this interface, and it had to be
+        /// rediscovered and re-checked against every hand-rolled call site.
+        /// </remarks>
+        /// <returns>False when every attempt failed.</returns>
+        bool ConnectWithRetry(int maxAttempts = 10, int retryDelayMs = 3000);
+
+        /// <summary>
         /// Publishes <c>disconnected</c> and closes the session. The spec: "You must
         /// send this message before cleanly disconnecting."
         /// </summary>

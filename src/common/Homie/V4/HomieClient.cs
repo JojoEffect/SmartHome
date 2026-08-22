@@ -9,6 +9,7 @@ using nanoFramework.Logging;
 using nanoFramework.M2Mqtt.Messages;
 using System;
 using System.Collections;
+using System.Threading;
 
 namespace SmartHome.Homie.V4
 {
@@ -21,6 +22,13 @@ namespace SmartHome.Homie.V4
         private readonly ILogger _logger;
         private readonly IReconnectingMqttClient _mqttClient;
         private readonly IDictionary _settablePropertiesTable;
+
+        // Derived once from _settablePropertiesTable, which is readonly and never
+        // mutated after construction. Subscribe and Unsubscribe each used to rebuild the
+        // topic array, and Subscribe rebuilt an all-AtLeastOnce QoS array in a loop, on
+        // every call -- four places to keep in step for a value fixed at construction.
+        private readonly string[] _settableCommandTopics;
+        private readonly MqttQoSLevel[] _settableQosLevels;
 
         // Where a re-announce lands once it has republished everything. Init normally
         // leads to Ready, but a device that was alerting or asleep when the broker went
@@ -65,6 +73,15 @@ namespace SmartHome.Homie.V4
             _homieLastWillSettings = homieLastWillSettings ?? _device.CreateLastWillSettings();
             _logger = this.GetCurrentClassLogger();
             _settablePropertiesTable = InitializeSettablePropertiesTable(device);
+
+            _settableCommandTopics = new string[_settablePropertiesTable.Count];
+            _settablePropertiesTable.Keys.CopyTo(_settableCommandTopics, 0);
+
+            _settableQosLevels = new MqttQoSLevel[_settableCommandTopics.Length];
+            for (int i = 0; i < _settableQosLevels.Length; i++)
+            {
+                _settableQosLevels[i] = MqttQoSLevel.AtLeastOnce;
+            }
         }
 
         /// <inheritdoc />
@@ -156,6 +173,28 @@ namespace SmartHome.Homie.V4
                 _logger.LogCritical(e, "Failed to connect.");
                 return false;
             }
+        }
+
+        /// <inheritdoc />
+        public bool ConnectWithRetry(int maxAttempts = 10, int retryDelayMs = 3000)
+        {
+            for (var attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                _logger.LogInformation($"Connecting Homie device '{_device.TopicId}' (attempt {attempt}/{maxAttempts})...");
+
+                if (Connect())
+                {
+                    return true;
+                }
+
+                if (attempt < maxAttempts)
+                {
+                    Thread.Sleep(retryDelayMs);
+                }
+            }
+
+            _logger.LogCritical($"Could not connect the Homie device '{_device.TopicId}' after {maxAttempts} attempts.");
+            return false;
         }
 
         private void ConnectInternal()
@@ -283,22 +322,13 @@ namespace SmartHome.Homie.V4
         {
             _logger.LogDebug("Subscribing to settable property topics...");
 
-            if (_settablePropertiesTable.Count == 0)
+            if (_settableCommandTopics.Length == 0)
             {
                 _logger.LogDebug("No settable properties found. Skipping MQTT subscribe.");
                 return;
             }
 
-            var topics = new string[_settablePropertiesTable.Count];
-            _settablePropertiesTable.Keys.CopyTo(topics, 0);
-
-            var qosLevels = new MqttQoSLevel[topics.Length];
-            for (int i = 0; i < qosLevels.Length; i++)
-            {
-                qosLevels[i] = MqttQoSLevel.AtLeastOnce;
-            }
-
-            _mqttClient.Subscribe(topics, qosLevels);
+            _mqttClient.Subscribe(_settableCommandTopics, _settableQosLevels);
             _mqttClient.MqttMsgPublishReceived -= HandleIncomingMessage;
             _mqttClient.MqttMsgPublishReceived += HandleIncomingMessage;
         }
@@ -307,15 +337,12 @@ namespace SmartHome.Homie.V4
         {
             _logger.LogDebug("Unsubscribing from settable property topics...");
 
-            if (_settablePropertiesTable.Count == 0)
+            if (_settableCommandTopics.Length == 0)
             {
                 return;
             }
 
-            var topics = new string[_settablePropertiesTable.Count];
-            _settablePropertiesTable.Keys.CopyTo(topics, 0);
-
-            _mqttClient.Unsubscribe(topics);
+            _mqttClient.Unsubscribe(_settableCommandTopics);
             _mqttClient.MqttMsgPublishReceived -= HandleIncomingMessage;
         }
 

@@ -24,6 +24,13 @@ namespace SmartHome.Devices.RoomSensor
         private const int I2cClockPin = 22;
         private const int MeasurementIntervalMs = 5000;
 
+        // Named rather than inline at the call site, so Run-IntegrationTests.ps1's
+        // stale-constant pre-flight can find it: that check greps for exactly this
+        // shape, and an inline literal was invisible to it. This address drifts from
+        // SMARTHOME_MQTT_BROKER in local.env.ps1 and is the usual reason a healthy
+        // device "can't reach the broker".
+        private const string BrokerHost = "192.168.1.238";
+
         private static FloatProperty _temperatureProperty;
         private static FloatProperty _humidityProperty;
         private static FloatProperty _pressureProperty;
@@ -100,12 +107,7 @@ namespace SmartHome.Devices.RoomSensor
             return device;
         }
 
-        public static IReconnectingMqttClient SetupMqttClient()
-        {
-            var mqttClient = new ReconnectingMqttClient("192.168.1.238");
-            return mqttClient;
-
-        }
+        public static IReconnectingMqttClient SetupMqttClient() => new ReconnectingMqttClient(BrokerHost);
 
         private static Bme280 SetupSensor()
         {
@@ -161,28 +163,17 @@ namespace SmartHome.Devices.RoomSensor
         // can only be set in CONNECT. Connecting the transport here first would produce
         // a session without it -- which is what this app did until 2026-08-21, leaving
         // the device stuck at 'ready' forever whenever it dropped off abruptly.
+        //
+        // The retry itself lives on IHomieClient now: every Homie device needs it, and
+        // three apps had grown their own copy of the same loop.
         private static void ConnectWithRetry(IHomieClient homieClient)
         {
-            const int maxAttempts = 10;
-            const int retryDelayMs = 3000;
-
-            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            if (!homieClient.ConnectWithRetry())
             {
-                _logger.LogDebug($"Connecting Homie device (attempt {attempt}/{maxAttempts})...");
-
-                if (homieClient.Connect())
-                {
-                    _logger.LogInformation("Homie device connected.");
-                    return;
-                }
-
-                if (attempt == maxAttempts)
-                {
-                    throw new Exception($"Could not connect the Homie device after {maxAttempts} attempts.");
-                }
-
-                Thread.Sleep(retryDelayMs);
+                throw new Exception("Could not connect the Homie device.");
             }
+
+            _logger.LogInformation("Homie device connected.");
         }
     }
 }
