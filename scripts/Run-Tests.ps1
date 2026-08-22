@@ -151,7 +151,18 @@ Results: $trxPath
 }
 
 if ($executed -lt $total) {
-    Write-Warning ("{0} of {1} tests were skipped." -f ($total - $executed), $total)
+    # A partial skip is a failure too, for the same reason the all-skipped case above is:
+    # the device-side launcher skips what it cannot load, and vstest still exits 0. This
+    # used to warn and then print "Tests passed", so 27 of 28 tests silently vanishing
+    # reported success.
+    Write-Error @"
+$($total - $executed) of $total tests were skipped -- this is NOT a pass.
+Tests are skipped when the device-side launcher cannot load or resolve them, so a
+partial skip usually means a test class or method failed to load rather than that it
+was deliberately excluded. Check the run output for 'Assembly::Load' / ArgumentException.
+Results: $trxPath
+"@
+    exit 1
 }
 
 Write-Host ""

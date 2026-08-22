@@ -1,7 +1,6 @@
 using SmartHome.Homie.V4.Enums;
 using SmartHome.Homie.V4.EventArgs;
 using System.Text;
-using System; // for Convert
 
 namespace SmartHome.Homie.V4.Properties
 {
@@ -10,19 +9,56 @@ namespace SmartHome.Homie.V4.Properties
         public byte R { get; set; }
         public byte G { get; set; }
         public byte B { get; set; }
-        public override readonly string ToString() => $"{R:X2}{G:X2}{B:X2}";
+
+        // Homie v4 defines an rgb payload as three comma-separated decimal components,
+        // "<r>,<g>,<b>". This emitted 6-digit hex ("FF8000") and TryParse rejected
+        // anything that wasn't exactly 6 characters, so a conforming controller sending
+        // "255,128,0" was dropped silently -- no value change, no reflection, no log.
+        //
+        // Dropping the hex also drops a format specifier: $"{R:X2}" compiles to
+        // string.Format, whose specifier branch in nanoFramework is reflection-only and
+        // throws NotImplementedException outright on a NoReflection target.
+        public override readonly string ToString() => $"{R},{G},{B}";
+
         public static bool TryParse(string value, out HomieColor color)
         {
             color = default;
-            if (value == null || value.Length != 6) return false;
-            try
+
+            if (value == null)
             {
-                color.R = (byte)Convert.ToInt32(value.Substring(0,2),16);
-                color.G = (byte)Convert.ToInt32(value.Substring(2,2),16);
-                color.B = (byte)Convert.ToInt32(value.Substring(4,2),16);
-                return true;
+                return false;
             }
-            catch { return false; }
+
+            var parts = value.Split(',');
+            if (parts.Length != 3)
+            {
+                return false;
+            }
+
+            if (!TryParseComponent(parts[0], out var r) ||
+                !TryParseComponent(parts[1], out var g) ||
+                !TryParseComponent(parts[2], out var b))
+            {
+                return false;
+            }
+
+            color.R = r;
+            color.G = g;
+            color.B = b;
+            return true;
+        }
+
+        private static bool TryParseComponent(string value, out byte component)
+        {
+            component = 0;
+
+            if (!int.TryParse(value.Trim(), out var parsed) || parsed < 0 || parsed > 255)
+            {
+                return false;
+            }
+
+            component = (byte)parsed;
+            return true;
         }
     }
 

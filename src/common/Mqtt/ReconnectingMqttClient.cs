@@ -12,6 +12,15 @@ namespace SmartHome.Mqtt
 {
     public class ReconnectingMqttClient : IReconnectingMqttClient
     {
+        // Matches MqttMsgConnect.KEEP_ALIVE_PERIOD_DEFAULT in the wrapped client. An
+        // overload that mirrors MqttClient's signature has to mirror its defaults too:
+        // this used to pass 5, so the keep-alive thread pinged every 5s and gave the
+        // broker 5s to answer before declaring the connection dead -- a disconnect the
+        // broker never saw, on the one test that measures reconnects.
+        private const ushort DefaultKeepAlivePeriodSeconds = 60;
+
+        private const int ReconnectDelayMs = 5_000;
+
         private readonly MqttClient _mqttCient;
         private readonly ILogger _logger;
         private Thread? _connectThread;
@@ -21,6 +30,12 @@ namespace SmartHome.Mqtt
         private bool _autoReconnectEnabled;
 
         private readonly object _reconnectSync = new();
+
+        // Guards _subscribedTopics only. Separate from _reconnectSync so a resubscribe
+        // never holds the reconnect lock while it blocks on the socket. The table is
+        // touched from three threads: the app's (Subscribe/Unsubscribe/Disconnect), the
+        // reconnect thread's (replay), and M2Mqtt's receive thread by way of Disconnect.
+        private readonly object _subscriptionSync = new();
 
         // cached connect params for reconnect
         private string? _clientId;
@@ -84,10 +99,19 @@ namespace SmartHome.Mqtt
             remove { _mqttCient.ConnectionOpened -= value; }
         }
 
-        public void Close() => _mqttCient.Close();
+        public void Close()
+        {
+            // Same teardown as Disconnect(). MqttClient.Close() drops the channel, and
+            // its receive thread reports that as ConnectionClosed -- so with
+            // auto-reconnect still armed and ReconnectHandler still attached, the
+            // wrapper would reopen the very session the caller just closed.
+            Teardown();
 
-        public MqttReasonCode Connect(string clientId) 
-            => Connect(clientId, null, null, willRetain: false, MqttQoSLevel.AtMostOnce, willFlag: false, null, null, cleanSession: true, 5);
+            _mqttCient.Close();
+        }
+
+        public MqttReasonCode Connect(string clientId)
+            => Connect(clientId, null, null, willRetain: false, MqttQoSLevel.AtMostOnce, willFlag: false, null, null, cleanSession: true, DefaultKeepAlivePeriodSeconds);
 
         public MqttReasonCode Connect(string clientId, string username, string password, bool willRetain, MqttQoSLevel willQosLevel, bool willFlag, string willTopic, string willMessage, bool cleanSession, ushort keepAlivePeriod)
         {
@@ -124,6 +148,17 @@ namespace SmartHome.Mqtt
         public void Disconnect()
         {
             _logger.LogDebug("Disconnect from MQTT broker...");
+
+            Teardown();
+
+            _mqttCient.Disconnect();
+        }
+
+        // Everything both Disconnect() and Close() have to undo. Disarming
+        // auto-reconnect first is what stops the teardown from being immediately
+        // reversed by our own ConnectionClosed handler.
+        private void Teardown()
+        {
             _autoReconnectEnabled = false;
 
             _mqttCient.ConnectionClosed -= ReconnectHandler;
@@ -140,9 +175,10 @@ namespace SmartHome.Mqtt
             }
 
             // Keep internal subscription cache in sync with the broker state.
-            _subscribedTopics.Clear();
-
-            _mqttCient.Disconnect();
+            lock (_subscriptionSync)
+            {
+                _subscribedTopics.Clear();
+            }
         }
 
         public void Init(string brokerHostName, int brokerPort, bool secure, byte[] caCert, byte[] clientCert, MqttSslProtocols sslProtocol)
@@ -160,13 +196,20 @@ namespace SmartHome.Mqtt
         public ushort Subscribe(string[] topics, MqttQoSLevel[] qosLevels)
         {
             _logger.LogDebug("Subscribing to topics...");
-            // Reuse the underlying client's subscribe method for all the input validation.
-            // If it succeeds, cache the subscribed topics.
+
+            // The returned id means "SUBSCRIBE was enqueued", nothing more: the wrapped
+            // client builds the message and queues it, without validating the topics,
+            // checking the connection, or waiting for SUBACK. So the cache below records
+            // intent to be replayed on reconnect -- it is not evidence the broker
+            // accepted anything.
             var messageId = _mqttCient.Subscribe(topics, qosLevels);
 
-            for (int i = 0; i < topics.Length; i++)
+            lock (_subscriptionSync)
             {
-                _subscribedTopics[topics[i]] = qosLevels[i];
+                for (int i = 0; i < topics.Length; i++)
+                {
+                    _subscribedTopics[topics[i]] = qosLevels[i];
+                }
             }
 
             return messageId;
@@ -175,13 +218,16 @@ namespace SmartHome.Mqtt
         public ushort Unsubscribe(string[] topics)
         {
             _logger.LogDebug("Unsubscribing from topics...");
-            // Reuse the underlying client's unsubscribe method for all the input validation.
-            // If it succeeds, remove the subscribed topics.
+
+            // Same caveat as Subscribe: enqueued, not acknowledged.
             var messageId = _mqttCient.Unsubscribe(topics);
 
-            for (int i = 0; i < topics.Length; i++)
+            lock (_subscriptionSync)
             {
-                _subscribedTopics.Remove(topics[i]);
+                for (int i = 0; i < topics.Length; i++)
+                {
+                    _subscribedTopics.Remove(topics[i]);
+                }
             }
 
             return messageId;
@@ -202,22 +248,44 @@ namespace SmartHome.Mqtt
         {
             _logger.LogInformation("Start reconnect...");
 
-            while (_autoReconnectEnabled && !_mqttCient.IsConnected)
+            // The loop condition deliberately does NOT include !IsConnected. Restoring a
+            // session is connect *and* resubscribe, and only the pair is worth returning
+            // on. When the guard was `!IsConnected`, a throw out of the resubscribe was
+            // caught, slept on, and then re-evaluated as "connected, nothing to do" -- so
+            // the thread exited leaving a live connection with no subscriptions replayed.
+            // Publishing kept working, every /set was silently ignored until reboot, and
+            // the only evidence was one LogWarning.
+            while (_autoReconnectEnabled)
             {
                 try
                 {
-                    if (TryReconnectOnce())
+                    if (!_mqttCient.IsConnected && !TryReconnectOnce())
                     {
-                        ResubscribeCachedTopics();
+                        Thread.Sleep(ReconnectDelayMs);
+                        continue;
+                    }
+
+                    // Disconnect() can have run while the connect was in flight. It has
+                    // already detached ReconnectHandler, so nothing else would ever close
+                    // the session this thread just opened -- and for a HomieClient
+                    // session that means the will fires against a device the app believes
+                    // it shut down.
+                    if (!_autoReconnectEnabled)
+                    {
+                        _logger.LogInformation("Disconnect requested during reconnect; closing the session that was just opened.");
+                        _mqttCient.Disconnect();
                         return;
                     }
+
+                    ResubscribeCachedTopics();
+                    return;
                 }
                 catch (Exception e)
                 {
                     _logger.LogWarning(e, "Reconnect attempt failed.");
                 }
 
-                Thread.Sleep(5_000);
+                Thread.Sleep(ReconnectDelayMs);
             }
         }
 
@@ -257,23 +325,35 @@ namespace SmartHome.Mqtt
 
         private void ResubscribeCachedTopics()
         {
-            if (_subscribedTopics.Count == 0)
+            string[] topics;
+            MqttQoSLevel[] qosLevels;
+
+            // Snapshot under the lock, then talk to the broker outside it. Enumerating
+            // the live table here raced every Subscribe/Unsubscribe/Disconnect on the app
+            // thread: sizing the arrays from Count and then walking the table are two
+            // steps, so a concurrent write produced either trailing nulls in `topics` or
+            // a collection-modified throw.
+            lock (_subscriptionSync)
             {
-                return;
+                if (_subscribedTopics.Count == 0)
+                {
+                    return;
+                }
+
+                topics = new string[_subscribedTopics.Count];
+                qosLevels = new MqttQoSLevel[_subscribedTopics.Count];
+
+                int i = 0;
+                foreach (DictionaryEntry entry in _subscribedTopics)
+                {
+                    topics[i] = (string)entry.Key;
+                    qosLevels[i] = (MqttQoSLevel)entry.Value;
+                    i++;
+                }
             }
 
             _logger.LogInformation("Resubscribing cached topics...");
 
-            var topics = new string[_subscribedTopics.Count];
-            var qosLevels = new MqttQoSLevel[_subscribedTopics.Count];
-
-            int i = 0;
-            foreach (DictionaryEntry entry in _subscribedTopics)
-            {
-                topics[i] = (string)entry.Key;
-                qosLevels[i] = (MqttQoSLevel)entry.Value;
-                i++;
-            }
             _mqttCient.Subscribe(topics, qosLevels);
         }
     }

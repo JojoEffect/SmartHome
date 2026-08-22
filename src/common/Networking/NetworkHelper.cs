@@ -56,8 +56,30 @@ namespace SmartHome.Networking
                 throw new Exception(message);
             }
 
-            var ipAddress = NetworkInterface.GetAllNetworkInterfaces()[0].IPv4Address;
-            Debug.WriteLine($"Connected to WiFi network with IP address {ipAddress}");
+            // Purely informational, and therefore guarded: the connect has already
+            // succeeded by this point, so nothing here is allowed to fail it. An
+            // unguarded [0] on an empty interface list threw out of a *successful*
+            // connect -- WifiCheck caught it and reported FAIL for a network the device
+            // had actually joined, and RoomSensor rethrew from Main and crash-looped.
+            try
+            {
+                var interfaces = NetworkInterface.GetAllNetworkInterfaces();
+
+                if (interfaces.Length == 0)
+                {
+                    Debug.WriteLine("Connected to WiFi network (no network interface reported an address).");
+                    return;
+                }
+
+                // Index 0 is the station interface on this board. On a board exposing
+                // several (AP plus station, or Ethernet) it is not guaranteed to be the
+                // one that just connected, so treat the value as a hint, not a fact.
+                Debug.WriteLine($"Connected to WiFi network with IP address {interfaces[0].IPv4Address}");
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Connected to WiFi network (could not read the IP address: {ex.Message}).");
+            }
         }
     }
 }

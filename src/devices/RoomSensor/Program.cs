@@ -50,7 +50,24 @@ namespace SmartHome.Devices.RoomSensor
 
                 while (true)
                 {
-                    PublishReading(sensor, homieClient);
+                    // The measurement loop survives a throw. Main's catch rethrows, which
+                    // the CLR turns into a reboot -- so before this, a single I2C NACK or
+                    // a publish into a link that had just dropped cost a restart, a WiFi
+                    // re-association, an MQTT reconnect, ~30s of readings, and a 'lost'
+                    // will fired on a device that was fine.
+                    //
+                    // Only unexpected faults land here. An invalid-but-readable sensor
+                    // result is not one: PublishReading drives alert/ready for that, and
+                    // a dropped link is the reconnect layer's job.
+                    try
+                    {
+                        PublishReading(sensor, homieClient);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to publish a reading; continuing with the next measurement.");
+                    }
+
                     Thread.Sleep(MeasurementIntervalMs);
                 }
             }

@@ -287,7 +287,7 @@ function Get-SmartHomeDevEnvPath {
         [string]$Port,
 
         [Parameter(Mandatory = $true)]
-        [ValidateSet('State', 'Config', 'BrokerLog', 'SubscriberLog', 'SubscriberErrorLog')]
+        [ValidateSet('State', 'Config', 'BrokerLog', 'SubscriberLog', 'SubscriberErrorLog', 'Snapshot')]
         [string]$Kind
     )
 
@@ -297,6 +297,10 @@ function Get-SmartHomeDevEnvPath {
         'BrokerLog'          { "mosquitto-$Port.log" }
         'SubscriberLog'      { "homie-$Port.log" }
         'SubscriberErrorLog' { "homie-$Port.err.log" }
+        # Retained-store reads by Run-IntegrationTests.ps1's conformance check. Short
+        # lived, and not part of a dev environment -- but it belongs in this vocabulary
+        # rather than being minted at the call site.
+        'Snapshot'           { "homie-snapshot-$Port.log" }
     }
 
     return (Join-Path ([System.IO.Path]::GetTempPath()) "$SmartHomeDevEnvPrefix-$suffix")
@@ -606,7 +610,11 @@ function Stop-SmartHomeDevEnv {
         Clear-SmartHomeDevEnvState -Port $Port
     }
 
-    $orphans = @(Get-SmartHomeOrphanProcess)
+    # -Port matters: without it Get-SmartHomeOrphanProcess falls back to matching '\d+',
+    # so a teardown for one port classified another port's healthy dev-env as an orphan
+    # -- warning about it, and killing it outright under -IncludeOrphans. That directly
+    # contradicts the per-port state design documented at the top of this section.
+    $orphans = @(Get-SmartHomeOrphanProcess -Port $Port)
     if ($IncludeOrphans) {
         foreach ($orphan in $orphans) {
             Write-Host ("  Stopping orphaned {0} (PID {1})..." -f $orphan.Name, $orphan.ProcessId) -ForegroundColor Yellow

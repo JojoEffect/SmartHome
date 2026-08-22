@@ -122,6 +122,40 @@ if ($unknown.Count -gt 0) {
     exit 1
 }
 
+# Validate the catalog before anything is built or flashed. Under
+# Set-StrictMode -Version Latest a missing key read as $settings.Foo throws
+# PropertyNotFoundException -- which surfaces 90s into a run as Outcome 'ERROR' with a
+# property-not-found message, rather than as the one-line configuration mistake it is.
+# Switching those reads to $settings['Foo'] would be worse, not better: that returns
+# $null, so a forgotten CaptureSeconds would silently become a zero-length window.
+# Adding a test is advertised above as "one line here", so that line gets checked.
+$requiredCatalogKeys = @{
+    'DeviceMarker'     = @('CaptureSeconds')
+    'HomieConformance' = @('DeviceId', 'NodeId', 'SettleSeconds', 'CommandTimeoutSeconds', 'RecoverySeconds')
+    'BrokerOutage'     = @('HeartbeatTopic', 'SettleSeconds', 'OutageSeconds', 'RecoverySeconds')
+}
+$knownKinds = (@($requiredCatalogKeys.Keys) | Sort-Object) -join ', '
+
+foreach ($catalogTestName in $Tests) {
+    $catalogEntry = $testCatalog[$catalogTestName]
+
+    if (-not $catalogEntry.Contains('Kind')) {
+        Write-Error ("Catalog entry '{0}' declares no Kind. Known kinds: {1}." -f $catalogTestName, $knownKinds)
+        exit 1
+    }
+
+    if (-not $requiredCatalogKeys.Contains($catalogEntry.Kind)) {
+        Write-Error ("Catalog entry '{0}' has unknown Kind '{1}'. Known kinds: {2}." -f $catalogTestName, $catalogEntry.Kind, $knownKinds)
+        exit 1
+    }
+
+    $missingKeys = @($requiredCatalogKeys[$catalogEntry.Kind] | Where-Object { -not $catalogEntry.Contains($_) })
+    if ($missingKeys.Count -gt 0) {
+        Write-Error ("Catalog entry '{0}' (Kind '{1}') is missing required setting(s): {2}." -f $catalogTestName, $catalogEntry.Kind, ($missingKeys -join ', '))
+        exit 1
+    }
+}
+
 if (-not $LogDirectory) {
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
     $LogDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "smarthome-integration-$stamp"
@@ -137,6 +171,58 @@ function Get-TestProjectPath {
     param([string]$TestName)
 
     return "src\integrationTests\$TestName\$TestName.nfproj"
+}
+
+# ── Broker lifetime ───────────────────────────────────────────────────────────
+# The stop/start recipe the host-decided checks need, in one place instead of six.
+#
+# These throw rather than returning an exit code, because an exit code was never
+# available: Start-DevEnv.ps1 and Stop-DevEnv.ps1 set $ErrorActionPreference = 'Stop'
+# and report failures with Write-Error, which is terminating -- so their `exit 1` never
+# runs and $LASTEXITCODE is never assigned. Every `if ($LASTEXITCODE -ne 0)` around
+# these calls was unreachable, and the carefully worded ERROR verdicts behind them could
+# not be produced; the exception surfaced instead as a raw PowerShell message blamed on
+# the test. Callers now catch and turn the message into the verdict they intended.
+
+function Start-SuiteBroker {
+    param([Parameter(Mandatory = $true)][string]$Port)
+
+    try {
+        & $startEnvScript -Detached -NoSync | Out-Null
+    }
+    catch {
+        throw "could not start the broker on port ${Port}: $($_.Exception.Message)"
+    }
+}
+
+function Stop-SuiteBroker {
+    param([Parameter(Mandatory = $true)][string]$Port)
+
+    try {
+        & $stopEnvScript | Out-Null
+    }
+    catch {
+        throw "could not stop the broker on port ${Port}: $($_.Exception.Message)"
+    }
+}
+
+function Restart-SuiteBroker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Port,
+
+        # Pause between stop and start. mosquitto is terminated rather than asked to
+        # exit and nothing waits for the listener to be released, so a caller that has
+        # seen the port still held can ask for a gap.
+        [int]$SettleSeconds = 0
+    )
+
+    Stop-SuiteBroker -Port $Port
+
+    if ($SettleSeconds -gt 0) {
+        Start-Sleep -Seconds $SettleSeconds
+    }
+
+    Start-SuiteBroker -Port $Port
 }
 
 function Test-DeviceConstant {
@@ -207,7 +293,6 @@ function Invoke-BrokerOutageCheck {
     # log on every start, so each phase reads a log that can only contain
     # heartbeats published after that phase's broker came up -- no stale hits.
     param(
-        [string]$TestName,
         [hashtable]$Settings,
         [string]$Port
     )
@@ -221,10 +306,11 @@ function Invoke-BrokerOutageCheck {
     # Start-DevEnv.ps1 truncates the log, which makes the baseline provably belong to
     # the instance now on the device.
     Write-Host "Cycling the broker so the baseline can only come from the new deploy..." -ForegroundColor DarkGray
-    & $stopEnvScript | Out-Null
-    & $startEnvScript -Detached -NoSync | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        return @{ Outcome = 'ERROR'; Detail = "could not restart the broker before measuring (exit code $LASTEXITCODE)" }
+    try {
+        Restart-SuiteBroker -Port $Port
+    }
+    catch {
+        return @{ Outcome = 'ERROR'; Detail = "$($_.Exception.Message) (before measuring)" }
     }
 
     Write-Host ("Waiting up to {0}s for the first heartbeat on {1}..." -f $Settings.SettleSeconds, $topic) -ForegroundColor Cyan
@@ -241,13 +327,20 @@ function Invoke-BrokerOutageCheck {
         $before = $latest.Counter
 
         Write-Host ("Taking the broker down for {0}s..." -f $outage) -ForegroundColor Cyan
-        & $stopEnvScript | Out-Null
+        try {
+            Stop-SuiteBroker -Port $Port
+        }
+        catch {
+            return @{ Outcome = 'ERROR'; Detail = "$($_.Exception.Message) (starting the ${outage}s outage)" }
+        }
         Start-Sleep -Seconds $outage
 
         Write-Host "Bringing a fresh broker up..." -ForegroundColor Cyan
-        & $startEnvScript -Detached -NoSync | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            return @{ Outcome = 'ERROR'; Detail = "could not restart the broker after the ${outage}s outage (exit code $LASTEXITCODE)" }
+        try {
+            Start-SuiteBroker -Port $Port
+        }
+        catch {
+            return @{ Outcome = 'ERROR'; Detail = "$($_.Exception.Message) (after the ${outage}s outage)" }
         }
 
         $latest = Wait-Heartbeat -Topic $topic -TimeoutSeconds $Settings.RecoverySeconds -Port $Port
@@ -283,7 +376,18 @@ function Get-MosquittoTool {
     param([string]$Name)
 
     $dir = Get-RequiredEnvValue -Name 'SMARTHOME_MOSQUITTO_DIR'
-    return (Join-Path $dir $Name)
+    $path = Join-Path $dir $Name
+
+    # Same guard and remediation Start-DevEnv.ps1 gives the same two binaries. Without
+    # it a wrong SMARTHOME_MOSQUITTO_DIR surfaced as a raw CommandNotFoundException --
+    # or, for the retained snapshot, as an empty read reported as a conformance FAIL,
+    # i.e. a machine-config problem blamed on the device.
+    if (-not (Test-Path $path)) {
+        Write-Error ("Not found: {0}`nCheck SMARTHOME_MOSQUITTO_DIR in local.env.ps1." -f $path)
+        exit 1
+    }
+
+    return $path
 }
 
 function Get-HomieRetainedSnapshot {
@@ -301,11 +405,19 @@ function Get-HomieRetainedSnapshot {
         [int]$SettleSeconds = 3
     )
 
-    $out = Join-Path ([System.IO.Path]::GetTempPath()) "smarthome-homie-snapshot-$Port.log"
+    $out = Get-SmartHomeDevEnvPath -Port $Port -Kind Snapshot
     Remove-Item -Path $out -Force -ErrorAction SilentlyContinue
 
     $sub = Get-MosquittoTool -Name 'mosquitto_sub.exe'
-    $command = '/c ""{0}" -h localhost -p {1} -t "homie/#" -F "%t %r %p" > "{2}" 2>&1"' -f $sub, $Port, $out
+
+    # Arguments come from Common.ps1, not from a second copy of them here. The parser
+    # below depends on the exact '%t %r %p' layout, and that layout is chosen and
+    # explained in Get-SmartHomeSubscriberArguments -- spelling it out again meant a
+    # one-line change in the file that owns it would silently break this reader.
+    # Quoting idiom matches Start-DevEnv.ps1's subscriber launch.
+    $subscriberArgs = (Get-SmartHomeSubscriberArguments -Port $Port |
+        ForEach-Object { if ($_ -match '[\s/#]') { '"{0}"' -f $_ } else { $_ } }) -join ' '
+    $command = '/c ""{0}" {1} > "{2}" 2>&1"' -f $sub, $subscriberArgs, $out
     $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
 
     Start-Sleep -Seconds $SettleSeconds
@@ -369,7 +481,6 @@ function Invoke-HomieConformanceCheck {
     # broker's side. Every assertion is collected rather than thrown, so one run
     # reports everything that is wrong instead of only the first thing.
     param(
-        [string]$TestName,
         [hashtable]$Settings,
         [string]$Port
     )
@@ -378,8 +489,11 @@ function Invoke-HomieConformanceCheck {
     $nodeId = $Settings.NodeId
     $root = "homie/$deviceId"
     $node = "$root/$nodeId"
-    $failures = @()
 
+    # One failure list, deliberately. There used to be a local $failures here as well,
+    # never appended to and never read -- so a reader had two candidate accumulators to
+    # reconcile, and an assertion added against the wrong one would have been collected
+    # into a list the verdict never reads: a silently passing conformance test.
     $script:conformanceFailures = @()
 
     Write-Host ("Waiting up to {0}s for {1} to announce..." -f $Settings.SettleSeconds, $deviceId) -ForegroundColor Cyan
@@ -540,11 +654,11 @@ function Invoke-HomieConformanceCheck {
 
     # ── a replaced broker gets the whole announcement again ──────────────────
     Write-Host "  replacing the broker to check the re-announce..." -ForegroundColor DarkGray
-    & $stopEnvScript | Out-Null
-    Start-Sleep -Seconds 5
-    & $startEnvScript -Detached -NoSync | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        return @{ Outcome = 'ERROR'; Detail = "could not restart the broker (exit code $LASTEXITCODE)" }
+    try {
+        Restart-SuiteBroker -Port $Port -SettleSeconds 5
+    }
+    catch {
+        return @{ Outcome = 'ERROR'; Detail = $_.Exception.Message }
     }
 
     $reannounced = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected 'ready' -TimeoutSeconds $Settings.RecoverySeconds
@@ -605,15 +719,13 @@ if (-not $NoBroker) {
     # stale state file itself, and an unconditional stop would enumerate every
     # process on the machine (~280ms) just to find nothing on the common path.
     if (Get-SmartHomeDevEnvState -Port $mqttPort) {
-        & $stopEnvScript | Out-Null
+        Stop-SuiteBroker -Port $mqttPort
     }
 
     Write-Host "Starting the local MQTT broker (detached)..." -ForegroundColor Cyan
-    & $startEnvScript -Detached -NoSync
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to start the local dev environment (exit code $LASTEXITCODE)."
-        exit $LASTEXITCODE
-    }
+    # Pre-flight, outside the per-test try: a broker that will not start is not a test
+    # failure, so let the message from Start-SuiteBroker end the run.
+    Start-SuiteBroker -Port $mqttPort
     $brokerStarted = $true
     Write-Host ""
 }
@@ -638,31 +750,33 @@ try {
         # capture failure arrives here as a terminating error, not an exit code.
         try {
             # ── Deploy ────────────────────────────────────────────────────────
+            # No exit-code check: per the comment above, a failure arrives here as a
+            # terminating error. One used to sit here and could never run.
             & $deployScript -Project (Get-TestProjectPath -TestName $testName) -Configuration $Configuration
-            if ($LASTEXITCODE -ne 0) {
-                throw "Deploy-ToDevice.ps1 exit code $LASTEXITCODE"
-            }
 
             Write-Host ""
 
+            # ── Host-decided ──────────────────────────────────────────────────
+            # Dispatch first, then handle the verdict once. The two kinds differ only in
+            # which function produces it; everything after was duplicated line for line,
+            # and had already drifted -- only one copy carried the comment explaining why
+            # the broker is restarted.
+            $verdict = $null
             if ($settings.Kind -eq 'HomieConformance') {
-                $verdict = Invoke-HomieConformanceCheck -TestName $testName -Settings $settings -Port $mqttPort
-                $outcome = $verdict.Outcome
-                $detail = $verdict.Detail
-
-                if (-not (Get-SmartHomeDevEnvState -Port $mqttPort)) {
-                    & $startEnvScript -Detached -NoSync | Out-Null
-                }
+                $verdict = Invoke-HomieConformanceCheck -Settings $settings -Port $mqttPort
             }
             elseif ($settings.Kind -eq 'BrokerOutage') {
-                # ── Host-decided ──────────────────────────────────────────────
-                $verdict = Invoke-BrokerOutageCheck -TestName $testName -Settings $settings -Port $mqttPort
+                $verdict = Invoke-BrokerOutageCheck -Settings $settings -Port $mqttPort
+            }
+
+            if ($null -ne $verdict) {
                 $outcome = $verdict.Outcome
                 $detail = $verdict.Detail
 
-                # Whatever happened, leave a broker up for the tests that follow.
+                # Both host-decided kinds take the broker away to make their measurement.
+                # Whatever happened, leave one up for the tests that follow.
                 if (-not (Get-SmartHomeDevEnvState -Port $mqttPort)) {
-                    & $startEnvScript -Detached -NoSync | Out-Null
+                    Start-SuiteBroker -Port $mqttPort
                 }
             }
             else {
@@ -755,7 +869,14 @@ try {
 finally {
     if ($brokerStarted) {
         Write-Host ""
-        & $stopEnvScript
+        # Raw call, deliberately not Stop-SuiteBroker: this is a finally, and a throw
+        # here would replace whatever outcome the suite had already reached.
+        try {
+            & $stopEnvScript
+        }
+        catch {
+            Write-Warning "Broker teardown failed: $($_.Exception.Message)"
+        }
     }
 }
 

@@ -20,6 +20,10 @@ namespace SmartHome.Homie.V4
         public const string SettableAttributeTopicId = "$settable";
         public const string RetainedAttributeTopicId = "$retained";
         public const string UnitAttributeTopicId = "$unit";
-        //Regex ^[a-z0-9]+[a-z0-9\\-_]*[^-_]$
+
+        // The topic-id rule lives in NamedHomieEntityBase.ValidateTopicId, which is what
+        // actually runs. A regex sketch used to sit here and disagreed with it -- it
+        // allowed '_', required at least two characters, and forbade a trailing '_' --
+        // leaving two statements of the rule and no way to tell which was intended.
     }
 }

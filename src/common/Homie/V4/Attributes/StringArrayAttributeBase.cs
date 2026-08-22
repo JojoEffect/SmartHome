@@ -1,3 +1,4 @@
+using SmartHome.Text;
 using System.Text;
 
 namespace SmartHome.Homie.V4.Attributes
@@ -14,6 +15,11 @@ namespace SmartHome.Homie.V4.Attributes
 
         public virtual string[] Value { get => _value; private set => _value = value; }
 
+        // The one place $nodes, $properties and $extensions are turned into their wire
+        // format. There used to be three: this loop, an identical private copy in
+        // ExtensionsAttribute, and StringUtils.Join via NodesAttribute -- and they
+        // disagreed on null, the first two returning empty where StringUtils.Join throws.
+        // Which one ran depended only on which subclass you happened to be holding.
         public override byte[] GetPayload()
         {
             if (Value == null || Value.Length == 0)
@@ -21,16 +27,7 @@ namespace SmartHome.Homie.V4.Attributes
                 return Encoding.UTF8.GetBytes(string.Empty);
             }
 
-            var payload = new StringBuilder();
-            for (int i = 0; i < Value.Length; i++)
-            {
-                if (i > 0)
-                {
-                    payload.Append(",");
-                }
-                payload.Append(Value[i]);
-            }
-            return Encoding.UTF8.GetBytes(payload.ToString());
+            return Encoding.UTF8.GetBytes(StringUtils.Join(",", Value));
         }
 
         public void Add(string value)

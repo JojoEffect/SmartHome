@@ -22,6 +22,21 @@ namespace SmartHome.Homie.V4
         private readonly IReconnectingMqttClient _mqttClient;
         private readonly IDictionary _settablePropertiesTable;
 
+        // Where a re-announce lands once it has republished everything. Init normally
+        // leads to Ready, but a device that was alerting or asleep when the broker went
+        // away has to come back to that same state -- otherwise surviving a broker
+        // restart would silently clear an alert nobody has resolved.
+        private State _postInitState = State.Ready;
+
+        // Whether this MQTT session has already been announced. The announce used to be
+        // triggered purely by control flow -- Connect() called TryChangeState(Init), and
+        // HandleConnectionOpen did the same -- which made correctness depend on the two
+        // never both running. That held only because the connection-change handlers were
+        // registered after ConnectInternal(), so the first CONNACK was missed by
+        // accident. Making the client own the fact instead means the order of those two
+        // no longer matters.
+        private bool _announcedThisSession;
+
         public HomieClient(Device device,
             IReconnectingMqttClient mqttClient,
             HomieClientSettings? deviceClientSettings = null,
@@ -38,7 +53,14 @@ namespace SmartHome.Homie.V4
             // stable id makes the new connection take the session over instead, so the
             // states stay ordered. Homie doesn't prescribe a client id; it does
             // prescribe one connection per device.
-            _homieClientSettings = deviceClientSettings ?? new HomieClientSettings { ClientId = device.TopicId };
+            _homieClientSettings = deviceClientSettings ?? new HomieClientSettings();
+            if (string.IsNullOrEmpty(_homieClientSettings.ClientId))
+            {
+                // Filled in here rather than defaulted on the settings type, so a caller
+                // who passes settings for a username or keep-alive cannot silently opt
+                // out of the stable id.
+                _homieClientSettings.ClientId = device.TopicId;
+            }
             _homiePublishSettings = homiePublishSettings ?? new HomiePublishSettings();
             _homieLastWillSettings = homieLastWillSettings ?? _device.CreateLastWillSettings();
             _logger = this.GetCurrentClassLogger();
@@ -87,6 +109,16 @@ namespace SmartHome.Homie.V4
                 _device.OnDeviceStateChange -= HandleDeviceStateChange;
                 _device.OnDeviceStateChange += HandleDeviceStateChange;
 
+                // A new session is about to be opened; nothing is announced on it yet.
+                _announcedThisSession = false;
+
+                // Detach for the duration of this connect so Connect() owns the announce
+                // ordering outright. M2Mqtt raises ConnectionOpened synchronously from
+                // CONNACK, so on a retry -- where these are still attached from the
+                // previous attempt -- HandleConnectionOpen would announce from inside
+                // ConnectInternal(), before the /set subscriptions exist.
+                UnregisterConnectionChangeHandlers();
+
                 if (_mqttClient.IsConnected)
                 {
                     _logger.LogWarning("MQTT client was already connected; that session cannot carry the Homie last will. Reconnecting it.");
@@ -101,12 +133,16 @@ namespace SmartHome.Homie.V4
                     return false;
                 }
 
+                // Safe to re-attach: CONNACK has been and gone, so from here these can
+                // only fire for a genuine later reconnect.
                 RegisterConnectionChangeHandlers();
 
                 RegisterPropertyUpdateHandlers();
                 SubscribeSettablePropertyTopics();
 
-                if (!_device.TryChangeState(State.Init))
+                // Subscriptions before the announcement, so a controller reacting to it
+                // cannot find the device deaf to /set.
+                if (!Announce())
                 {
                     Disconnect();
                     _logger.LogError("Failed to connect: unable to change device state to 'init' after connecting. Disconnecting.");
@@ -124,7 +160,10 @@ namespace SmartHome.Homie.V4
 
         private void ConnectInternal()
         {
-            var mqttCode = _mqttClient.Connect(
+            // Logged, not acted on: Connect() decides on IsConnected, because M2Mqtt
+            // signals some failures through this code and others by throwing. Assigning
+            // it and never reading it implied an inspection that was not happening.
+            var reasonCode = _mqttClient.Connect(
                                 _homieClientSettings.ClientId,
                                 _homieClientSettings.UserName,
                                 _homieClientSettings.Password,
@@ -136,16 +175,31 @@ namespace SmartHome.Homie.V4
                                 _homieClientSettings.CleanSession,
                                 _homieClientSettings.KeepAlivePeriod
                                 );
+
+            _logger.LogDebug($"MQTT CONNECT returned '{reasonCode}'.");
         }
 
         public void Disconnect()
         {
             _logger.LogDebug("Disconnect...");
 
+            // The state change is best-effort. It exists to publish $state=disconnected,
+            // which only lands while the transport is still up, and CanChangeState
+            // refuses it from 'disconnected' and 'lost'.
+            //
+            // The teardown must NOT hang off it. It used to: DisconnectInternal() was
+            // reachable only through the state-change handler, so a refused transition --
+            // a second Disconnect(), or one cleaning up after a failed Connect() -- left
+            // the MQTT session, the /set subscriptions and the state handler all live
+            // while this logged "Disconnected MQTT client anyways".
             if (!_device.TryChangeState(State.Disconnected))
             {
-                _logger.LogError("Failed to disconnect: unable to change device state to 'disconnected'. Disconnected MQTT client anyways.");
+                _logger.LogWarning($"Could not publish 'disconnected' from state '{_device.StateAttribute.Value.GetString()}'; tearing the session down regardless.");
             }
+
+            // Idempotent, and deliberately unconditional: on the success path the state
+            // handler above has already run it.
+            DisconnectInternal();
 
             UnregisterConnectionChangeHandlers();
         }
@@ -175,7 +229,17 @@ namespace SmartHome.Homie.V4
 
         private void DisconnectInternal()
         {
-            UnsubscribeSettablePropertyTopics();
+            _announcedThisSession = false;
+
+            // Guarded because this runs twice on the normal path: once from the
+            // state-change handler, and once from Disconnect() itself, which has to call
+            // it unconditionally since the transition can be refused. Without the guard
+            // the second pass would issue a second UNSUBSCRIBE for topics already gone.
+            if (_mqttClient.IsConnected)
+            {
+                UnsubscribeSettablePropertyTopics();
+            }
+
             UnregisterPropertyUpdateHandlers();
             _mqttClient.Disconnect();
             _device.OnDeviceStateChange -= HandleDeviceStateChange;
@@ -190,13 +254,21 @@ namespace SmartHome.Homie.V4
                     DisconnectInternal();
                     return;
                 case State.Init:
+                {
                     _mqttClient.PublishHomieDeviceInfo(_device, _homiePublishSettings, _logger);
-                    if (!_device.TryChangeState(State.Ready))
+
+                    // Consume the target: a first connect, and any re-announce from
+                    // Ready, both land on Ready.
+                    var postInitState = _postInitState;
+                    _postInitState = State.Ready;
+
+                    if (!_device.TryChangeState(postInitState))
                     {
-                        _logger.LogError("Failed to change device state to 'ready' after publishing device info. Disconnecting.");
+                        _logger.LogError($"Failed to change device state to '{postInitState.GetString()}' after publishing device info. Disconnecting.");
                         DisconnectInternal();
                     }
                     return;
+                }
                 case State.Ready:
                 case State.Sleeping:
                 case State.Alert:
@@ -252,17 +324,46 @@ namespace SmartHome.Homie.V4
             string topic = e.Topic;
             byte[] message = e.Message;
 
-            if (_settablePropertiesTable.Contains(topic))
+            if (!_settablePropertiesTable.Contains(topic))
             {
-                var property = (PropertyBase)_settablePropertiesTable[topic];
+                return;
+            }
 
+            var property = (PropertyBase)_settablePropertiesTable[topic];
+
+            // Everything below runs on M2Mqtt's dispatch thread, and that thread's
+            // catch-all does not merely log an escaping exception -- it calls
+            // OnConnectionClosing(), i.e. it treats one as a dead connection. Both calls
+            // here can throw for reasons that are nothing of the sort: Set() reflects the
+            // value back with a synchronous QoS-1 publish, which raises
+            // MqttCommunicationException whenever the link is momentarily down, and
+            // OnCommand runs arbitrary app code that typically publishes again. Unguarded,
+            // a flaky link during a /set escalated into a full teardown, reconnect and
+            // re-announce.
+            //
+            // Guarded separately: a command that failed to apply is still a command the
+            // app should hear about, since handlers act on the payload rather than on the
+            // property's resulting value.
+            try
+            {
                 // Set() reflects the value back to the property topic via OnUpdate, which
                 // is what the spec asks for. OnCommand is raised separately so an app can
                 // tell a controller's command from its own update -- property.OnUpdate
                 // fires for both and cannot distinguish them.
                 property.Set(message);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Failed to apply the command on '{topic}'.");
+            }
 
+            try
+            {
                 OnCommand?.Invoke(new HomieCommandEventArgs(property, message));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"An OnCommand handler threw for '{topic}'.");
             }
         }
 
@@ -284,10 +385,17 @@ namespace SmartHome.Homie.V4
             // about reconnects at all -- but a device that only re-announces on reboot
             // is invisible after every broker restart.
             //
-            // Going back through Init republishes everything and returns to Ready, the
-            // same path as first connect (see HandleDeviceStateChange).
-            if (!_device.TryChangeState(State.Init))
+            // Going back through Init republishes everything and returns to whatever the
+            // device was in (see HandleDeviceStateChange) -- Ready normally, but Alert or
+            // Sleeping are preserved: a broker restart is not a reason to clear an alert.
+            var stateBeforeReannounce = _device.StateAttribute.Value;
+            _postInitState = stateBeforeReannounce == State.Alert || stateBeforeReannounce == State.Sleeping
+                ? stateBeforeReannounce
+                : State.Ready;
+
+            if (!Announce())
             {
+                _postInitState = State.Ready;
                 _logger.LogError($"Reconnected but could not re-announce: state is '{_device.StateAttribute.Value.GetString()}'.");
             }
         }
@@ -296,7 +404,35 @@ namespace SmartHome.Homie.V4
         {
             _logger.LogInformation("MQTT connection closed handler called.");
 
+            // The announcement lives in the broker's retained store, so it dies with the
+            // session. Clearing this is what lets the next connection announce again.
+            _announcedThisSession = false;
+
             UnregisterPropertyUpdateHandlers();
+        }
+
+        // The single announce path, for both first connect and reconnect. Idempotent per
+        // session: whichever of the two gets there first does the work, and the other is
+        // a no-op, so neither has to know whether the other already ran.
+        private bool Announce()
+        {
+            if (_announcedThisSession)
+            {
+                _logger.LogDebug("Already announced on this session; not repeating it.");
+                return true;
+            }
+
+            // Set before the transition, not after: publishing device info re-enters this
+            // class through the state-change handler.
+            _announcedThisSession = true;
+
+            if (_device.TryChangeState(State.Init))
+            {
+                return true;
+            }
+
+            _announcedThisSession = false;
+            return false;
         }
 
         private void RegisterConnectionChangeHandlers()
@@ -354,8 +490,10 @@ namespace SmartHome.Homie.V4
             var retained = property.RetainedAttribute.Value;
             string topic = property.GetTopic();
 
-            _logger.LogDebug($"Publishing property update. Topic: {topic}, Retained: {retained}, Message: {System.Text.Encoding.UTF8.GetString(message, 0, message.Length)}");
-
+            // No log line here: PublishHomiePropertyValue already logs topic and payload,
+            // and this one decoded the same bytes a second time. Interpolated arguments
+            // are built whether or not anything consumes them, so on RoomSensor's 5s cycle
+            // that was a dozen throwaway strings per reading, forever.
             _mqttClient.PublishHomiePropertyValue(topic, message, _homiePublishSettings.PropertyUpdatePublishSettings, retained, _logger);
         }
 

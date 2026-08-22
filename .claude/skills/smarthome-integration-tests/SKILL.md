@@ -1,21 +1,30 @@
 ---
 name: smarthome-integration-tests
-description: Run the whole SmartHome on-device integration suite (WiFi, MQTT round-trip, BMP280) in one call. Use when asked to run the integration tests, verify the device's external dependencies, or isolate whether WiFi/broker/sensor is the broken one.
+description: Run the whole SmartHome on-device integration suite (WiFi, MQTT round-trip, BMP280, broker-outage recovery, Homie v4 conformance) in one call. Use when asked to run the integration tests, verify the device's external dependencies, or isolate whether WiFi/broker/sensor is the broken one.
 ---
 
 # SmartHome integration test suite
 
 Run `scripts\Run-IntegrationTests.ps1` — one call covers every project under
-`src\integrationTests`. Every test is deployed first; the verdict comes from one of two kinds:
+`src\integrationTests`. Every test is deployed first; the verdict comes from one of three kinds:
 
 - **`DeviceMarker`** (WifiCheck, MqttCheck, Bmp280Check) — the runner reboots the device,
   captures managed debug output, and reads the `[ITEST] <name> PASS/FAIL` marker.
 - **`BrokerOutage`** (MqttReconnectCheck) — the runner kills and recreates the broker under the
   live device and asserts heartbeats reappear on `homie/#`. See `smarthome-mqtt-reconnect` for
-  that one; it cannot run with `-NoBroker`.
+  that one.
+- **`HomieConformance`** (HomieClientCheck) — the host measures a purpose-built device against
+  the Homie v4 convention: mandatory attributes and their retained flags, one property of every
+  datatype with its `$format`/`$unit`/`$settable`/`$retained`, a `/set` command applied and
+  reflected back, the `alert` and `sleeping` states driven through a control property, and a full
+  re-announce after the broker is replaced. It emits no `[ITEST]` marker by design — the evidence
+  is what lands on the broker.
+
+Both host-decided kinds (`BrokerOutage`, `HomieConformance`) take the broker away and put a fresh
+one up, so neither can run with `-NoBroker`.
 
 ```powershell
-.\scripts\Run-IntegrationTests.ps1                              # all four checks
+.\scripts\Run-IntegrationTests.ps1                              # all five checks
 .\scripts\Run-IntegrationTests.ps1 -Tests WifiCheck,MqttCheck
 .\scripts\Run-IntegrationTests.ps1 -NoBroker                    # a broker is already running
 ```

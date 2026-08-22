@@ -418,12 +418,172 @@ namespace SmartHome.UnitTests
             Assert.AreEqual(afterConnect * 2, mqttClient.PublishCount);
         }
 
+        [TestMethod]
+        public void HomieClient_Announces_Once_When_Retry_Follows_A_Post_Handshake_Failure()
+        {
+            // The gap the FailNextConnect tests cannot reach. A first attempt that fails
+            // at the *transport* never registers the connection-change handlers, so the
+            // retry is clean. A first attempt that fails AFTER them -- here, at SUBSCRIBE
+            // -- leaves them attached, and the real client raises ConnectionOpened
+            // synchronously from CONNACK. The retry's ConnectInternal() would then
+            // announce from HandleConnectionOpen and Connect() would announce again.
+
+            // Arrange
+            var mqttClient = new MockMqttClient { FailNextSubscribe = true };
+            var device = BuildSinglePropertyDevice(out FloatProperty _, settable: true);
+            var homieClient = new HomieClient(device, mqttClient);
+
+            Assert.IsFalse(homieClient.Connect(), "the first attempt should fail at SUBSCRIBE");
+
+            var afterFailedAttempt = mqttClient.PublishCount;
+
+            // Act
+            Assert.IsTrue(homieClient.Connect(), "the retry should succeed");
+
+            // Assert -- exactly one announcement, and the device is usable.
+            // 16 is a single-property device's announcement: the same count
+            // HomieClient_Publish_On_Property_Update expects as 17, which is this plus
+            // one property update. A double announce would be 32.
+            var announcement = mqttClient.PublishCount - afterFailedAttempt;
+            Assert.AreEqual(16, announcement, "the retry did not announce the device exactly once");
+            Assert.IsTrue(mqttClient.IsConnected);
+            Assert.AreEqual(State.Ready, homieClient.State);
+        }
+
+        [TestMethod]
+        public void HomieClient_ReAnnounces_From_Alert_And_Returns_To_Alert()
+        {
+            // A broker restart while the device is alerting has to re-announce like any
+            // other -- Device.CanChangeState used to forbid Alert -> Init, so the device
+            // stayed invisible to the fresh broker -- and it must come back to 'alert'
+            // rather than being quietly cleared to 'ready'.
+
+            // Arrange
+            var mqttClient = new MockMqttClient();
+            var homieClient = new HomieClient(BuildSinglePropertyDevice(), mqttClient);
+            homieClient.Connect();
+
+            Assert.IsTrue(homieClient.Alert());
+            Assert.AreEqual(State.Alert, homieClient.State);
+
+            var beforeReconnect = mqttClient.PublishCount;
+
+            // Act -- the broker goes away and comes back
+            mqttClient.RaiseConnectionClosed();
+            mqttClient.RaiseConnectionOpened();
+
+            // Assert
+            Assert.IsTrue(mqttClient.PublishCount > beforeReconnect, "the device did not re-announce from 'alert'");
+            Assert.AreEqual(State.Alert, homieClient.State, "the re-announce cleared the alert");
+        }
+
+        [TestMethod]
+        public void HomieClient_Disconnect_Closes_The_Session_When_The_Transition_Is_Refused()
+        {
+            // Disconnected -> Disconnected is not a legal transition, so a second
+            // Disconnect() takes the refused path. That path used to log "Disconnected
+            // MQTT client anyways" and leave the session, the subscriptions and the
+            // handlers fully live.
+
+            // Arrange
+            var mqttClient = new MockMqttClient();
+            var device = BuildSinglePropertyDevice(out FloatProperty _, settable: true);
+            var homieClient = new HomieClient(device, mqttClient);
+            homieClient.Connect();
+            homieClient.Disconnect();
+
+            // Re-open a session behind the client's back, so the second Disconnect() has
+            // something real to close.
+            mqttClient.Connect("someone-else");
+            Assert.IsTrue(mqttClient.IsConnected);
+
+            // Act -- the device is already 'disconnected', so the transition is refused
+            homieClient.Disconnect();
+
+            // Assert
+            Assert.IsFalse(mqttClient.IsConnected, "Disconnect() left the MQTT session open");
+        }
+
+        [TestMethod]
+        public void HomieClient_Uses_The_Device_Topic_Id_When_Settings_Carry_No_ClientId()
+        {
+            // The stable client id must not be opt-out-by-accident: passing settings to
+            // set a keep-alive used to also hand you a fresh Guid per boot, which is what
+            // leaves a dead session's 'lost' will to fire after the reboot announced
+            // 'ready'.
+
+            // Arrange
+            var mqttClient = new MockMqttClient();
+            var settings = new SmartHome.Homie.V4.Settings.HomieClientSettings { KeepAlivePeriod = 30 };
+            var homieClient = new HomieClient(BuildSinglePropertyDevice(), mqttClient, settings);
+
+            // Act
+            homieClient.Connect();
+
+            // Assert
+            Assert.AreEqual(_testDeviceTopicId, mqttClient.ConnectedClientId);
+            Assert.AreEqual((ushort)30, mqttClient.KeepAlivePeriod, "the caller's own setting was discarded");
+        }
+
+        [TestMethod]
+        public void BooleanProperty_Announces_A_Spec_Legal_Payload()
+        {
+            // bool.ToString() returns "True"/"False", which Homie v4 does not permit.
+            // Update() always emitted lowercase; only the announce path was wrong, so the
+            // retained value was invalid until the first update overwrote it.
+
+            // Arrange
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
+            builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
+                        .AddBooleanProperty("running", "Running", false)
+                        .BuildProperty(out BooleanProperty property)
+                    .BuildNode()
+                .BuildDevice();
+
+            // Act & Assert
+            Assert.AreEqual("false", Encoding.UTF8.GetString(property.GetPayload(), 0, property.GetPayload().Length));
+
+            property.Update(true);
+            Assert.AreEqual("true", Encoding.UTF8.GetString(property.GetPayload(), 0, property.GetPayload().Length));
+        }
+
+        [TestMethod]
+        public void HomieColor_Round_Trips_The_Spec_Format()
+        {
+            // Homie v4's rgb payload is "<r>,<g>,<b>" in decimal. This used to emit and
+            // accept 6-digit hex only, so a conforming controller's command was dropped
+            // silently -- and the property could not read back its own payload.
+
+            // Act & Assert -- parse the spec format
+            Assert.IsTrue(HomieColor.TryParse("255,128,0", out var parsed));
+            Assert.AreEqual((byte)255, parsed.R);
+            Assert.AreEqual((byte)128, parsed.G);
+            Assert.AreEqual((byte)0, parsed.B);
+
+            // ... and emit it
+            Assert.AreEqual("255,128,0", parsed.ToString());
+
+            // ... and round-trip its own output
+            Assert.IsTrue(HomieColor.TryParse(parsed.ToString(), out var reparsed));
+            Assert.AreEqual(parsed.ToString(), reparsed.ToString());
+
+            // Rejections
+            Assert.IsFalse(HomieColor.TryParse("FF8000", out _), "hex is not the v4 format");
+            Assert.IsFalse(HomieColor.TryParse("255,128", out _), "too few components");
+            Assert.IsFalse(HomieColor.TryParse("256,0,0", out _), "component out of range");
+            Assert.IsFalse(HomieColor.TryParse(null, out _));
+        }
+
         private Device BuildSinglePropertyDevice()
+            => BuildSinglePropertyDevice(out FloatProperty _, settable: false);
+
+        private Device BuildSinglePropertyDevice(out FloatProperty property, bool settable)
         {
             var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
             return builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
                         .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, 0.0)
-                        .BuildProperty()
+                            .WithSettable(settable)
+                        .BuildProperty(out property)
                     .BuildNode()
                 .BuildDevice();
         }

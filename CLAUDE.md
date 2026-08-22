@@ -58,7 +58,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Sync-NanoFrameworkRepos.ps1 [-Force]` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
 | `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style | No | `smarthome-restore-packages` |
 | `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` | Raw serial capture of the device's native boot log only — nanoCLR silences this at `app_main()` and switches to binary WireProtocol, so this can't see managed output | Resets only | `smarthome-watch-serial` |
-| `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot] [-NoBuild]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
+| `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot] [-NoBuild] [-BuildOnly] [-Until <regex>]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
 | `scripts\Common.ps1` | Shared helpers (env loading, MSBuild/vstest/adapter discovery, repo-sync, dev-env state) — dot-source, don't duplicate its logic | No | — |
 
 `Start-DevEnv.ps1` is the session bootstrap: it absorbed the old `Start-AgentWorkspace.ps1`,
@@ -226,7 +226,7 @@ for the interface instead of racing it.
 - **`src/devices`** — real applications. Nothing here should exist only to prove a dependency
   works; that's what `integrationTests` is for.
 
-The suite runs two kinds of test, and the kind is declared per entry in
+The suite runs three kinds of test, and the kind is declared per entry in
 `$testCatalog` in `Run-IntegrationTests.ps1`:
 
 - **`DeviceMarker`** — the device decides. The runner captures managed debug output and reads
@@ -262,7 +262,7 @@ marker, add it to `$testCatalog` in `Run-IntegrationTests.ps1`.
 `Bmp280Check` links `IntegrationTest.cs` as a shared source file instead of referencing
 `TestSupport` as a project. That kept the WiFi/networking assemblies out of a deliberately
 network-free test; `TestSupport` is mscorlib-only now that `NetworkHelper` moved to
-`src/common/Device`, so the link is no longer strictly required — but it still avoids an
+`src/common/Networking`, so the link is no longer strictly required — but it still avoids an
 assembly on the device for one static class.
 
 The suite flashes each test in turn, so it **leaves the last one on the device** — redeploy

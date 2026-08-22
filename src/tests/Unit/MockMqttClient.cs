@@ -20,6 +20,14 @@ namespace SmartHome.UnitTests
         /// </summary>
         public bool FailNextConnect { get; set; } = false;
 
+        /// <summary>
+        /// Makes the next Subscribe() throw. Fails a connect attempt *after* the
+        /// connection-change handlers are attached, which FailNextConnect cannot reach --
+        /// that path is the one where a re-entrant HandleConnectionOpen could announce
+        /// the device a second time.
+        /// </summary>
+        public bool FailNextSubscribe { get; set; } = false;
+
         // Captured from the last CONNECT so tests can assert on what the Homie client
         // actually declares -- the last will above all, which Homie v4 requires and
         // which is only ever visible in CONNECT.
@@ -64,11 +72,22 @@ namespace SmartHome.UnitTests
             throw new NotImplementedException();
         }
 
+        // Connect() and Disconnect() raise their connection events, the way the real
+        // client does. This is not cosmetic fidelity: M2Mqtt handles CONNACK on the
+        // receive thread and calls OnMqttMsgConnack *before* releasing the handle that
+        // MqttClient.Connect() blocks on, so ConnectionOpened handlers have already run
+        // by the time Connect() returns. Likewise Disconnect() goes through
+        // OnConnectionClosing() to ConnectionClosed.
+        //
+        // While the mock stayed silent, HomieClient could be re-entered through those
+        // handlers in production in ways no test could express -- a retried Connect()
+        // announcing once from HandleConnectionOpen and again from Connect() itself.
         public MqttReasonCode Connect(string clientId)
         {
             ConnectedClientId = clientId;
             WillFlag = false;
             IsConnected = true;
+            ConnectionOpened?.Invoke(this, null);
             return MqttReasonCode.Success;
         }
 
@@ -88,12 +107,19 @@ namespace SmartHome.UnitTests
             WillRetain = willRetain;
             KeepAlivePeriod = keepAlivePeriod;
             IsConnected = true;
+            ConnectionOpened?.Invoke(this, null);
             return MqttReasonCode.Success;
         }
 
         public void Disconnect()
         {
+            var wasConnected = IsConnected;
             IsConnected = false;
+
+            if (wasConnected)
+            {
+                ConnectionClosed?.Invoke(this, System.EventArgs.Empty);
+            }
         }
 
         public void Init(string brokerHostName, int brokerPort, bool secure, byte[] caCert, byte[] clientCert, MqttSslProtocols sslProtocol)
@@ -121,6 +147,12 @@ namespace SmartHome.UnitTests
 
         public ushort Subscribe(string[] topics, MqttQoSLevel[] qosLevels)
         {
+            if (FailNextSubscribe)
+            {
+                FailNextSubscribe = false;
+                throw new Exception("Simulated SUBSCRIBE failure.");
+            }
+
             foreach (var _ in topics)
             {
                 SubscriptionCount++;
