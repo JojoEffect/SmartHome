@@ -99,24 +99,39 @@ picked up cold.
 
 ## Releases
 
-> **Not implemented yet.** None of the tooling below exists — tagging today produces a
-> git tag and nothing else. Tracked in
-> [#24](https://github.com/JojoEffect/SmartHome/issues/24). This section records the
-> agreed design so the issue does not have to re-derive it.
-
-The intent: manual and on demand. Tag when a set of changes is worth calling a version.
+Manual and on demand. Tag when a set of changes is worth calling a version:
 
 ```bash
 git tag v1.2.0 && git push origin v1.2.0
 ```
 
-MinVer will derive the version from the tag. Assemblies need an explicit stamping step:
-`.nfproj` is a classic project and takes its version from a checked-in
-`Properties/AssemblyInfo.cs` — all 14 are hardcoded to `1.0.0.0` — so MinVer's
-`$(Version)` reaches nothing on its own. The release build will rewrite those before
-compiling the artifacts, and attach each device's deployment `.bin`.
+**Tag a commit that already passed CI.** The release workflow does not re-run the unit
+tests: a release that quietly tests different code than the tag names would be worse than
+one that tests none.
 
-The changelog is written by hand — a generated one would list what changed, and the
+What then happens, in `.github/workflows/release.yml`:
+
+1. `minver-cli` derives the version from the tag. (The MinVer *NuGet package* is not used
+   — it works by setting the MSBuild `$(Version)` property, which SDK-style projects turn
+   into assembly attributes and classic `.nfproj` projects ignore entirely.)
+2. `scripts\Set-AssemblyVersion.ps1` writes that version into all 14
+   `Properties/AssemblyInfo.cs` files. `.nfproj` has no generated assembly info, so
+   without this step every assembly would ship claiming `1.0.0.0`. Nothing is committed —
+   this happens in the runner's working tree.
+3. The solution is rebuilt in `Release` and each device's deployment `.bin` is attached to
+   the release.
+
+Two things worth knowing before flashing a release image:
+
+- It is a **`Release`** build, so `Debug.WriteLine` is compiled out and
+  `Watch-DeviceDebugOutput.ps1` will show almost nothing. Build locally in `Debug` when
+  diagnosing.
+- The build uses `/t:Rebuild`, not `/t:Build`, because a plain incremental build silently
+  drops the deployment `.bin` — the same reason `Deploy-ToDevice.ps1` always rebuilds.
+
+Use `workflow_dispatch` with `dry-run` to exercise the whole thing without publishing.
+
+`CHANGELOG.md` is written by hand — a generated one would list what changed, and the
 interesting part is why.
 
 ## Local setup

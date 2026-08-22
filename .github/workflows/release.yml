@@ -1,0 +1,184 @@
+name: Release
+
+# Manual and on demand, per CONTRIBUTING.md. Tag when a set of changes is worth calling a
+# version; nothing fires on an ordinary merge.
+#
+# Tag a commit that already passed CI. This workflow does not re-run the unit tests: the
+# tag should point at something main has already verified, and a release that quietly
+# tests different code than the tag names would be worse than one that tests none.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Build and stamp, but publish nothing.
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+# Never cancel a release mid-flight: a half-published release is worse than a queued one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # MinVer reads tags and counts commits, so it needs the whole history. With the
+          # default shallow clone it silently reports 0.0.0-alpha.0.N for every release.
+          fetch-depth: 0
+
+      # CONTRIBUTING.md says to tag a commit that already passed CI. Said, but not
+      # enforced -- and the point of the ruleset on main was to stop relying on
+      # convention. A tag can be pushed at any commit, including one that never saw CI or
+      # never reached main, and the release would publish from it looking entirely
+      # official.
+      #
+      # Being an ancestor of main is the check that matters: everything on main passed the
+      # required check to get there.
+      - name: Verify the tag is on main
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git fetch origin main:refs/remotes/origin/main --quiet
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
+          if ($LASTEXITCODE -ne 0) {
+              throw "Tag ${{ github.ref_name }} points at a commit that is not on main. Releases are cut from main, which is the only branch whose commits have passed the required checks."
+          }
+          Write-Host "Tag ${{ github.ref_name }} is on main."
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - uses: nuget/setup-nuget@v2
+
+      - name: Set up nanoFramework build components
+        uses: ./.github/actions/setup-nanoframework
+        with:
+          github-token: ${{ github.token }}
+
+      # minver-cli, not the MinVer NuGet package. The package works by setting the MSBuild
+      # $(Version) property, which SDK-style projects turn into assembly attributes and
+      # classic .nfproj projects ignore entirely -- so it would integrate with nothing
+      # here. The CLI just reads the tags and prints a version, which is all we need.
+      - name: Install minver-cli
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '7.0.0'
+          if (dotnet tool list -g | Select-String -Pattern '^\s*minver-cli\s+') {
+              dotnet tool update -g minver-cli --version $version
+          }
+          else {
+              dotnet tool install -g minver-cli --version $version
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Could not install minver-cli $version." }
+
+      - name: Determine version
+        id: version
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (minver -t v -v e | Select-Object -Last 1).Trim()
+          if (-not $version) { throw "MinVer produced no version." }
+          Write-Host "Version: $version"
+          "version=$version" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # .nfproj takes its version from a checked-in AssemblyInfo.cs, so MinVer's number
+      # has to be written in before the build. Not committed -- this is the runner's
+      # working tree only.
+      - name: Stamp assembly versions
+        run: .\scripts\Set-AssemblyVersion.ps1 -Version '${{ steps.version.outputs.version }}'
+
+      - name: Restore packages.config dependencies
+        run: nuget restore SmartHome.sln
+
+      # /t:Rebuild, not /t:Build. A plain incremental build silently drops the deployment
+      # .bin -- the same reason Deploy-ToDevice.ps1 always rebuilds. Without this the
+      # release would publish no artifacts and look successful doing it.
+      #
+      # Release rather than Debug: Debug.WriteLine is [Conditional("DEBUG")], so release
+      # images produce no managed debug output and Watch-DeviceDebugOutput.ps1 will show
+      # little for them. That is the correct trade for a published artifact, but it is
+      # worth knowing before flashing one to diagnose something.
+      - name: Build release images
+        run: msbuild SmartHome.sln /t:Rebuild /p:Configuration=Release /v:minimal /nologo /nodeReuse:false
+
+      - name: Collect device images
+        id: collect
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $staging = Join-Path $env:RUNNER_TEMP 'release'
+          New-Item -ItemType Directory -Path $staging -Force | Out-Null
+
+          # An explicit list, not everything under src\devices. IrrigationControl and
+          # OvenControl build cleanly and produce ~32KB images that do nothing at all --
+          # they are stubs (#11, #12). Globbing the folder would attach them to the
+          # release, where "SmartHome.Devices.OvenControl.bin" under a version tag reads
+          # as a working oven controller. Flashing one replaces whatever was on the board
+          # with an app that idles.
+          #
+          # Adding a device here is therefore a deliberate act, taken when it does
+          # something. The guard below makes the opposite drift loud: if a listed project
+          # stops producing an image, the release fails rather than quietly shipping less
+          # than it says.
+          $shippable = @('SmartHome.Devices.RoomSensor')
+
+          $images = @()
+          foreach ($name in $shippable) {
+              $found = @(Get-ChildItem -Path 'src\devices' -Recurse -Filter "$name.bin" -File |
+                         Where-Object { $_.FullName -like '*\bin\Release\*' })
+
+              if ($found.Count -eq 0) {
+                  throw "No Release image for '$name'. Expected src\devices\*\bin\Release\$name.bin -- did the Rebuild produce it?"
+              }
+
+              $images += $found[0]
+          }
+
+          foreach ($image in $images) {
+              Copy-Item $image.FullName (Join-Path $staging $image.Name)
+              Write-Host ("  {0}  {1:N0} bytes" -f $image.Name, $image.Length)
+          }
+
+          "staging=$staging" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Collected $($images.Count) image(s)."
+
+      - name: Upload images as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: device-images-${{ steps.version.outputs.version }}
+          path: ${{ steps.collect.outputs.staging }}
+
+      # Only for a real tag, and never for a dry run. The release notes are deliberately
+      # not generated: CHANGELOG.md is written by hand, because a generated list says what
+      # changed and the interesting part is why.
+      # Spelled out rather than relying on `inputs.dry-run != true`. On a tag push the
+      # inputs context does not exist, so that expression depended on an empty value
+      # coercing to not-true -- correct today, and exactly the kind of subtlety that
+      # silently inverts. A push of a v-tag publishes; a manual run publishes only when
+      # dry-run was explicitly unticked.
+      - name: Publish GitHub release
+        if: >-
+          startsWith(github.ref, 'refs/tags/v') &&
+          (github.event_name == 'push' || inputs.dry-run == false)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = '${{ github.ref_name }}'
+          $files = (Get-ChildItem '${{ steps.collect.outputs.staging }}' -File | ForEach-Object { $_.FullName })
+
+          gh release create $tag $files `
+              --title $tag `
+              --notes "Device images built from $tag. See CHANGELOG.md for what changed and why."
+        env:
+          GH_TOKEN: ${{ github.token }}
