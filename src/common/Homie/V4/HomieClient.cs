@@ -159,7 +159,7 @@ namespace SmartHome.Homie.V4
 
                 // Subscriptions before the announcement, so a controller reacting to it
                 // cannot find the device deaf to /set.
-                if (!Announce())
+                if (!Announce(State.Ready))
                 {
                     Disconnect();
                     _logger.LogError("Failed to connect: unable to change device state to 'init' after connecting. Disconnecting.");
@@ -416,13 +416,12 @@ namespace SmartHome.Homie.V4
             // device was in (see HandleDeviceStateChange) -- Ready normally, but Alert or
             // Sleeping are preserved: a broker restart is not a reason to clear an alert.
             var stateBeforeReannounce = _device.StateAttribute.Value;
-            _postInitState = stateBeforeReannounce == State.Alert || stateBeforeReannounce == State.Sleeping
+            var postInitState = stateBeforeReannounce == State.Alert || stateBeforeReannounce == State.Sleeping
                 ? stateBeforeReannounce
                 : State.Ready;
 
-            if (!Announce())
+            if (!Announce(postInitState))
             {
-                _postInitState = State.Ready;
                 _logger.LogError($"Reconnected but could not re-announce: state is '{_device.StateAttribute.Value.GetString()}'.");
             }
         }
@@ -441,7 +440,7 @@ namespace SmartHome.Homie.V4
         // The single announce path, for both first connect and reconnect. Idempotent per
         // session: whichever of the two gets there first does the work, and the other is
         // a no-op, so neither has to know whether the other already ran.
-        private bool Announce()
+        private bool Announce(State postInitState)
         {
             if (_announcedThisSession)
             {
@@ -449,8 +448,14 @@ namespace SmartHome.Homie.V4
                 return true;
             }
 
-            // Set before the transition, not after: publishing device info re-enters this
-            // class through the state-change handler.
+            // Armed together with the flag, so the target can only ever be set for an
+            // announce that is actually going to run. Setting it at the call site meant a
+            // no-op Announce() left it primed, and the *next* announce -- possibly a
+            // first connect that should land on 'ready' -- would consume a stale 'alert'.
+            //
+            // Both set before the transition, not after: publishing device info re-enters
+            // this class through the state-change handler, which reads them.
+            _postInitState = postInitState;
             _announcedThisSession = true;
 
             if (_device.TryChangeState(State.Init))
@@ -459,6 +464,7 @@ namespace SmartHome.Homie.V4
             }
 
             _announcedThisSession = false;
+            _postInitState = State.Ready;
             return false;
         }
 

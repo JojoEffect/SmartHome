@@ -164,6 +164,17 @@ namespace SmartHome.Mqtt
             _mqttCient.ConnectionClosed -= ReconnectHandler;
             _mqttCient.ConnectionClosedRequest -= ReconnectHandler;
 
+            // Clear the cache BEFORE aborting the reconnect thread, not after. That
+            // thread takes _subscriptionSync to snapshot the cache, and Thread.Abort is
+            // not documented to release a monitor the aborted thread was holding -- so
+            // aborting first and then blocking on the same lock risks deadlocking the
+            // caller of Disconnect(). Taking it first cannot block for long: the lock is
+            // only ever held for a short CPU-bound copy, never across the socket.
+            lock (_subscriptionSync)
+            {
+                _subscribedTopics.Clear();
+            }
+
             // Under the lock: ReconnectHandler creates and assigns _connectThread inside
             // it, from M2Mqtt's receive thread. Reading the field outside meant a
             // reconnect could be started just after Disconnect() decided there was
@@ -172,12 +183,6 @@ namespace SmartHome.Mqtt
             {
                 _connectThread?.Abort();
                 _connectThread = null;
-            }
-
-            // Keep internal subscription cache in sync with the broker state.
-            lock (_subscriptionSync)
-            {
-                _subscribedTopics.Clear();
             }
         }
 

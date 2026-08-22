@@ -395,9 +395,13 @@ function Invoke-BrokerOutageCheck {
     # can produce the echo.
     $nonce = "echo-{0}" -f $latest.Counter
     Write-Host ("  checking the subscription survived: publishing '{0}'..." -f $nonce) -ForegroundColor Cyan
-    Publish-HomieCommand -Port $Port -Topic $Settings.EchoCommandTopic -Payload $nonce
 
-    if (-not (Wait-ForEcho -Topic $Settings.EchoTopic -Payload $nonce -TimeoutSeconds $Settings.CommandTimeoutSeconds -Port $Port)) {
+    # Republished on a schedule rather than sent once. A heartbeat only tells us the
+    # device's *publish* path is back: its loop resumes the moment IsConnected goes
+    # true, which is before the reconnect thread has finished replaying subscriptions.
+    # A single QoS-0 publish into that window reaches a broker with no subscriber for
+    # the topic and is dropped forever, so a healthy device would be reported FAIL.
+    if (-not (Wait-ForEcho -Topic $Settings.EchoTopic -Payload $nonce -TimeoutSeconds $Settings.CommandTimeoutSeconds -Port $Port -CommandTopic $Settings.EchoCommandTopic)) {
         return @{
             Outcome = 'FAIL'
             Detail  = "heartbeats resumed but '$nonce' was never echoed on $($Settings.EchoTopic) -- the client reconnected without replaying its subscriptions"
@@ -413,19 +417,34 @@ function Invoke-BrokerOutageCheck {
 }
 
 function Wait-ForEcho {
-    # Polls the detached subscriber's homie/# log for $Topic carrying exactly $Payload.
+    # Polls the detached subscriber's homie/# log for $Topic carrying exactly $Payload,
+    # republishing the command each round until it comes back.
     # Log lines are "<topic> <0|1> <payload>", per Get-SmartHomeSubscriberArguments.
+    #
+    # The republish is the point. The device's subscription is replayed by the reconnect
+    # thread *after* the connect succeeds, while its publish loop resumes as soon as the
+    # socket is up -- so there is a window in which heartbeats are flowing and the
+    # command topic has no subscriber. A QoS-0 publish into that window is dropped by
+    # the broker with no trace, and waiting alone would then report a healthy device as
+    # FAIL. Re-sending costs nothing and closes the race.
     param(
         [string]$Topic,
         [string]$Payload,
         [int]$TimeoutSeconds,
-        [string]$Port
+        [string]$Port,
+        [string]$CommandTopic
     )
 
     $log = Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 
     while ((Get-Date) -lt $deadline) {
+        Publish-HomieCommand -Port $Port -Topic $CommandTopic -Payload $Payload
+
+        # Give the round trip a moment before reading, so the common case costs one
+        # publish and one read rather than spinning.
+        Start-Sleep -Milliseconds 500
+
         $hit = Get-Content -Path $log -ErrorAction SilentlyContinue |
             Where-Object { $_ -like "$Topic *" -and $_ -like "*$Payload" } |
             Select-Object -First 1

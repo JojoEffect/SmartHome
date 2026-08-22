@@ -42,11 +42,34 @@ namespace SmartHome.Homie.V4
                 return _topic;
             }
 
-            _topic = Parent is null
+            var topic = Parent is null
                 ? $"{Constants.RootTopicId}{Constants.TopicSeparator}{TopicId}"
                 : $"{Parent.GetTopic()}{Constants.TopicSeparator}{TopicId}";
 
-            return _topic;
+            // Only memoise once the chain reaches a Device. The builder attaches a
+            // property to its node before it attaches that node to the device, so during
+            // that window a property's chain is incomplete and its topic is missing the
+            // device level. Caching then would make it permanently wrong, and clearing
+            // _topic when Parent changes does not help -- that only clears the entity
+            // being re-parented, never the descendants whose topics also just changed.
+            // The walk costs one pass per entity, and only until the tree is finished.
+            if (IsRootedAtDevice())
+            {
+                _topic = topic;
+            }
+
+            return topic;
+        }
+
+        private bool IsRootedAtDevice()
+        {
+            IHomieEntity entity = this;
+            while (entity.Parent is not null)
+            {
+                entity = entity.Parent;
+            }
+
+            return entity is Device;
         }
     }
 }
