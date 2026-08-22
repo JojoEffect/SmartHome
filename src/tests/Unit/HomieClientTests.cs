@@ -628,6 +628,30 @@ namespace SmartHome.UnitTests
         }
 
         [TestMethod]
+        public void FloatProperty_Rejects_Values_With_No_Homie_Representation()
+        {
+            // double.ToString returns "NaN" / "Infinity" *before* it looks at a format
+            // string, so fixed-decimal rendering cannot make these publishable. A
+            // controller cannot parse them, and neither can this device: double.TryParse
+            // would refuse the property's own payload. Rejected at the boundary, because
+            // only the caller can decide what a non-finite reading means.
+            var device = BuildSinglePropertyDevice(out FloatProperty property, settable: false);
+            Assert.IsNotNull(device);
+
+            Assert.ThrowsException(typeof(ArgumentException), () => property.Update(double.NaN));
+            Assert.ThrowsException(typeof(ArgumentException), () => property.Update(double.PositiveInfinity));
+            Assert.ThrowsException(typeof(ArgumentException), () => property.Update(double.NegativeInfinity));
+
+            // ... including as an initial value, which would otherwise be announced.
+            Assert.ThrowsException(typeof(ArgumentException),
+                () => new FloatProperty("temperature", "Temperature", initialValue: double.NaN));
+
+            // A finite value still goes through.
+            property.Update(1.25);
+            Assert.AreEqual("1.25", Encoding.UTF8.GetString(property.GetPayload(), 0, property.GetPayload().Length));
+        }
+
+        [TestMethod]
         public void FloatProperty_Rejects_A_Precision_It_Cannot_Deliver()
         {
             Assert.ThrowsException(typeof(ArgumentException),
