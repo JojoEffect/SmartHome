@@ -28,7 +28,7 @@ jobs:
       # after the PR, so a changelog can be assembled from titles while commit bodies
       # stay free prose -- which matters in this repository, where those bodies carry
       # the reasoning for why the code looks the way it does.
-      - uses: amannn/action-semantic-pull-request@v5
+      - uses: amannn/action-semantic-pull-request@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
