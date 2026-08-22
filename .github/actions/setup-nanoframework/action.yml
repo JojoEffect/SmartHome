@@ -1,0 +1,86 @@
+name: Set up nanoFramework build components
+description: >
+  Installs the nanoFramework MSBuild components that .nfproj files need, into the location
+  they already look for them. Windows runners only.
+
+inputs:
+  vsix-repository:
+    description: Repository publishing the Visual Studio extension VSIX.
+    required: false
+    default: nanoframework/nf-Visual-Studio-extension
+  github-token:
+    description: Token used to download the VSIX release asset.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Every .nfproj resolves its build targets through
+    # $(NanoFrameworkProjectSystemPath), which it sets *itself* to
+    # $(MSBuildExtensionsPath)\nanoFramework\v1.0\ -- a path that exists only where the
+    # Visual Studio extension is installed. No hosted runner has one.
+    #
+    # The components ship inside that extension's VSIX (27 files, ~1.2 MB) and a VSIX is a
+    # zip, so they are extracted into exactly that location. Installing them where the
+    # projects already look, rather than redirecting the projects, means every script in
+    # scripts\ works unmodified -- Run-Tests.ps1 runs its own msbuild, and a global
+    # property passed to one msbuild call would not reach it.
+    #
+    # Exporting the path via GITHUB_ENV instead does nothing at all: the project-level
+    # assignment on line 4 of each .nfproj overrides an environment variable, and because
+    # the imports are guarded by Exists() conditions they then fail silently rather than
+    # erroring. Every project reports MSB4057, "The target Build does not exist".
+    #
+    # nanoFramework's own repositories solve this with the InstallNanoMSBuildComponents
+    # Azure DevOps task, which has no GitHub Actions equivalent; this is that task's job
+    # done by hand.
+    - name: Install nanoFramework MSBuild components
+      shell: powershell
+      run: |
+        $ErrorActionPreference = 'Stop'
+        gh release download --repo '${{ inputs.vsix-repository }}' `
+                            --pattern '*.vsix' --dir "$env:RUNNER_TEMP" --clobber
+        $vsix = Get-ChildItem "$env:RUNNER_TEMP\*.vsix" | Select-Object -First 1
+        Write-Host "Using $($vsix.Name)"
+
+        # MSBuildExtensionsPath is the MSBuild folder of the VS install, i.e. the
+        # grandparent of MSBuild.exe (which sits in MSBuild\Current\Bin).
+        $msbuildExe = (Get-Command msbuild).Source
+        $extensions = Split-Path (Split-Path $msbuildExe -Parent) -Parent | Split-Path -Parent
+        $components = Join-Path $extensions 'nanoFramework\v1.0'
+        Write-Host "Installing components into $components"
+        if (-not (Test-Path $components)) { New-Item -ItemType Directory -Path $components -Force | Out-Null }
+
+        # Entry-by-entry via ZipFile rather than Expand-Archive. Expand-Archive fails
+        # outright on this VSIX, and we only want 27 of its 96 entries anyway. Inside the
+        # archive they live under a literal '$MSBuild' folder, and the Rules subfolder must
+        # keep its structure.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($vsix.FullName)
+        $prefix = '$MSBuild/nanoFramework/v1.0/'
+        $count = 0
+        try {
+            foreach ($entry in $zip.Entries) {
+                if (-not $entry.FullName.StartsWith($prefix)) { continue }
+                $relative = $entry.FullName.Substring($prefix.Length)
+                if (-not $relative -or -not $entry.Name) { continue }
+
+                $target = Join-Path $components $relative
+                $dir = Split-Path $target -Parent
+                if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+                $count++
+            }
+        }
+        finally {
+            $zip.Dispose()
+        }
+
+        if (-not (Test-Path (Join-Path $components 'NFProjectSystem.props'))) {
+            throw "nanoFramework MSBuild components not found under '$prefix'. The VSIX layout changed."
+        }
+
+        Write-Host "Extracted $count component files."
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
