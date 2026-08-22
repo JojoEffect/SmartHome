@@ -13,6 +13,16 @@ jobs:
   conventional-title:
     name: Conventional Commits
     runs-on: ubuntu-latest
+    # Dependabot's titles are machine-generated and already consistent -- but it always
+    # capitalises the verb ("ci: Bump the actions group with 5 updates"), which the
+    # lower-case subject rule below rejects. Its titles cannot be reconfigured, so without
+    # this every Dependabot pull request would carry a permanent red X that nobody can
+    # clear. Relaxing the rule for everyone to accommodate a bot would be the wrong way
+    # round; skipping the bot is not.
+    #
+    # Safe to skip rather than fail: this check is advisory. The ruleset on main requires
+    # only "Build and unit test", so a skipped job blocks nothing.
+    if: github.actor != 'dependabot[bot]'
     steps:
       # Titles only, not individual commits. Merging produces one merge commit named
       # after the PR, so a changelog can be assembled from titles while commit bodies
