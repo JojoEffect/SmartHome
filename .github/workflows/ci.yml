@@ -34,12 +34,12 @@ jobs:
         shell: powershell
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@v3
 
-      - uses: nuget/setup-nuget@v2
+      - uses: nuget/setup-nuget@v4
 
       # Extracted into a composite action: the release workflow needs the identical
       # setup, and the reasoning behind it is long enough that a second copy would
@@ -109,7 +109,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results
           path: src/tests/Unit/TestResults/
