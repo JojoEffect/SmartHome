@@ -6,6 +6,7 @@ using nanoFramework.Logging;
 using nanoFramework.Logging.Debug;
 using nanoFramework.M2Mqtt.Messages;
 using nanoFramework.TestFramework;
+using System;
 using System.Text;
 
 namespace SmartHome.UnitTests
@@ -555,6 +556,85 @@ namespace SmartHome.UnitTests
             Assert.IsFalse(HomieColor.TryParse("255,128", out _), "too few components");
             Assert.IsFalse(HomieColor.TryParse("256,0,0", out _), "component out of range");
             Assert.IsFalse(HomieColor.TryParse(null, out _));
+        }
+
+        [TestMethod]
+        public void FloatProperty_Publishes_A_Value_A_Controller_Can_Read_Back()
+        {
+            // The bug this guards: double.ToString() on nanoFramework uses "G" and renders
+            // 21.5 as "21.499999999999999". A controller writing 21.5 and reading that back
+            // is the complaint; the device is also unable to parse its own retained payload
+            // back to the value it meant.
+            //
+            // Value-dependent, which is why it survived: 0.1 renders correctly.
+
+            // Arrange
+            var device = BuildSinglePropertyDevice(out FloatProperty property, settable: true);
+            Assert.IsNotNull(device);
+
+            // Act
+            property.Update(21.5);
+            var payload = Encoding.UTF8.GetString(property.GetPayload(), 0, property.GetPayload().Length);
+
+            // Assert
+            Assert.AreEqual("21.50", payload);
+            Assert.IsFalse(payload.IndexOf("21.4999") >= 0, "the payload fell back to G formatting");
+
+            // ... and the payload parses back to the value it represents
+            Assert.IsTrue(double.TryParse(payload, out var parsed));
+            Assert.AreEqual(21.5, parsed);
+        }
+
+        [TestMethod]
+        public void FloatProperty_Uses_A_Dot_As_The_Decimal_Separator()
+        {
+            // Homie requires a dot. nanoFramework's Double has no
+            // ToString(format, IFormatProvider) overload, so this cannot be pinned at the
+            // call site -- the formatter reads NumberFormatInfo.CurrentInfo, which is
+            // invariant only until something references nanoFramework.System.Globalization.
+            var device = BuildSinglePropertyDevice(out FloatProperty property, settable: false);
+            Assert.IsNotNull(device);
+
+            property.Update(-3.25);
+            var payload = Encoding.UTF8.GetString(property.GetPayload(), 0, property.GetPayload().Length);
+
+            Assert.AreEqual("-3.25", payload);
+            Assert.IsFalse(payload.IndexOf(',') >= 0, "a comma reached the wire");
+        }
+
+        [TestMethod]
+        public void FloatProperty_Honours_The_Precision_It_Was_Given()
+        {
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
+            builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
+                        .AddFloatProperty("whole", "Whole", 0.0)
+                            .WithDecimals(0)
+                        .BuildProperty(out FloatProperty whole)
+                        .AddFloatProperty("precise", "Precise", 0.0)
+                            .WithDecimals(4)
+                        .BuildProperty(out FloatProperty precise)
+                    .BuildNode()
+                .BuildDevice();
+
+            whole.Update(1234.5678);
+            precise.Update(1234.5678);
+
+            Assert.AreEqual("1235", Encoding.UTF8.GetString(whole.GetPayload(), 0, whole.GetPayload().Length));
+            Assert.AreEqual("1234.5678", Encoding.UTF8.GetString(precise.GetPayload(), 0, precise.GetPayload().Length));
+
+            // No group separator at any precision -- "N" would produce "1,234.57", which
+            // no controller could parse.
+            Assert.AreEqual(0, Encoding.UTF8.GetString(precise.GetPayload(), 0, precise.GetPayload().Length).Split(',').Length - 1);
+        }
+
+        [TestMethod]
+        public void FloatProperty_Rejects_A_Precision_It_Cannot_Deliver()
+        {
+            Assert.ThrowsException(typeof(ArgumentException),
+                () => new FloatProperty("temperature", "Temperature", decimals: -1));
+
+            Assert.ThrowsException(typeof(ArgumentException),
+                () => new FloatProperty("temperature", "Temperature", decimals: 16));
         }
 
         private Device BuildSinglePropertyDevice()
