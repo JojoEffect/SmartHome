@@ -65,7 +65,8 @@ $parts = @($numeric -split '\.')
 while ($parts.Count -lt 4) { $parts += '0' }
 $assemblyVersion = $parts -join '.'
 
-Write-Host ("Stamping {0}  (from '{1}')" -f $assemblyVersion, $Version) -ForegroundColor Cyan
+$verb = if ($Check) { 'Checking for' } else { 'Stamping' }
+Write-Host ("{0} {1}  (from '{2}')" -f $verb, $assemblyVersion, $Version) -ForegroundColor Cyan
 
 $files = @(Get-ChildItem -Path (Join-Path $repoRoot 'src') -Recurse -Filter 'AssemblyInfo.cs' -File)
 if ($files.Count -eq 0) {
