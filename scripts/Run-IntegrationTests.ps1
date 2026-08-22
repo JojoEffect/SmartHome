@@ -684,6 +684,19 @@ function Invoke-HomieConformanceCheck {
         'enum-value'    = 'high'
     }
 
+    # What the device is expected to publish back, where that differs from what was sent.
+    # A float property renders at its declared precision, so 21.5 comes back as '21.50'
+    # from a two-decimal property -- that is the point, not an artefact.
+    #
+    # Compared as an exact string, deliberately. This used to compare floats numerically
+    # with a 0.001 tolerance, to tolerate nanoFramework's double.ToString() rendering 21.5
+    # as '21.499999999999999'. That tolerance was hiding the bug rather than measuring it:
+    # the payload a controller reads is a string, and '21.499999999999999' is a defect
+    # whatever it parses to. Exact comparison is what makes this test guard the fix.
+    $expectedEcho = @{
+        'float-value' = '21.50'
+    }
+
     foreach ($property in $commands.Keys) {
         Publish-HomieCommand -Port $Port -Topic "$node/$property/set" -Payload $commands[$property]
     }
@@ -701,27 +714,14 @@ function Invoke-HomieConformanceCheck {
         $stillPending = @()
 
         foreach ($property in $pending) {
-            $expected = $commands[$property]
+            $expected = if ($expectedEcho.Contains($property)) { $expectedEcho[$property] } else { $commands[$property] }
             $topic = "$node/$property"
             $seen = if ($snapshot.Contains($topic)) { $snapshot[$topic].Payload } else { $null }
             $lastSeen[$property] = $seen
 
+            # Every datatype, floats included, must match exactly.
             if ($seen -eq $expected) {
                 continue
-            }
-
-            # A float set to 21.5 comes back as 21.499999999999999: that is
-            # nanoFramework's double.ToString(), not a protocol fault, so compare
-            # floats numerically. Every other datatype must match exactly.
-            if ($property -eq 'float-value' -and $seen) {
-                $seenValue = 0.0
-                # InvariantCulture on purpose: the device publishes '21.4999...' with a
-                # dot, and this machine's culture is de-DE, where the plain overload
-                # wants a comma and simply fails to parse.
-                $parsed = [double]::TryParse($seen, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$seenValue)
-                if ($parsed -and [Math]::Abs($seenValue - [double]$expected) -lt 0.001) {
-                    continue
-                }
             }
 
             $stillPending += $property
@@ -731,7 +731,8 @@ function Invoke-HomieConformanceCheck {
     }
 
     foreach ($property in $pending) {
-        $script:conformanceFailures += "/set on $property did not come back on the property topic (saw '$($lastSeen[$property])', expected '$($commands[$property])')"
+        $wanted = if ($expectedEcho.Contains($property)) { $expectedEcho[$property] } else { $commands[$property] }
+        $script:conformanceFailures += "/set on $property did not come back on the property topic (saw '$($lastSeen[$property])', expected '$wanted')"
     }
 
     # ── the lifecycle states a device can be driven into ─────────────────────
