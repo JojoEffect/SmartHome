@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  CI run settings: the same 34 unit tests, executed on the nanoclr *virtual device*
+  instead of a physical board.
+
+  This is a second file rather than a switch inside nano.runsettings because the settings
+  are declarative and a reviewer should be able to see, in one place, exactly what CI
+  runs. The local default (nano.runsettings) still targets real hardware, so running
+  .\scripts\Run-Tests.ps1 with no arguments behaves as it always has.
+
+  Pass it with:  .\scripts\Run-Tests.ps1 -RunSettings nano.ci.runsettings
+
+  Worth knowing: the virtual device runs the same managed IL through the same CLR, so it
+  catches everything except behaviour that depends on the physical target, meaning WiFi,
+  I2C, and timing against real peripherals. Those live in src\integrationTests and cannot
+  run here at all.
+
+  (No double hyphens anywhere in this file: XML forbids them inside comments, and
+  vstest.console rejects the whole settings file rather than ignoring the comment.)
+-->
+<RunSettings>
+   <RunConfiguration>
+       <ResultsDirectory>.\TestResults</ResultsDirectory>
+       <!-- Generous next to the ~18s a local hardware run takes: a cold CI agent pays for
+            the first nanoclr start, and a timeout here is indistinguishable from a hang,
+            which is a miserable thing to debug from a log. -->
+       <TestSessionTimeout>300000</TestSessionTimeout>
+       <TargetFrameworkVersion>net48</TargetFrameworkVersion>
+       <TargetPlatform>x64</TargetPlatform>
+   </RunConfiguration>
+   <nanoFrameworkAdapter>
+       <Logging>Detailed</Logging>
+       <IsRealHardware>False</IsRealHardware>
+       <RealHardwarePort></RealHardwarePort>
+       <!-- Empty: use whichever CLR the nanoclr global tool installed. The workflow pins
+            that tool to an explicit version, so the runtime under the tests is
+            reproducible while the version itself lives in exactly one place, next to the
+            install step. -->
+       <CLRVersion></CLRVersion>
+       <PathToLocalCLRInstance></PathToLocalCLRInstance>
+   </nanoFrameworkAdapter>
+</RunSettings>

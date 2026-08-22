@@ -1,0 +1,68 @@
+version: 2
+
+updates:
+  # GitHub Actions: safe to take. Pinned action versions rot quietly, and a stale
+  # action is a CI failure that has nothing to do with the code.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+    labels:
+      - 'type: task'
+      - 'area: infra'
+
+  # NuGet: NOT safe to take on a green check alone. Read the note below before merging
+  # any of these.
+  #
+  # CLAUDE.md pins nanoFramework.CoreLibrary, Hardware.Esp32, Logging and M2Mqtt to
+  # versions matching the firmware actually flashed on the device. A mismatch does not
+  # fail the build -- it produces a device-side Link failure at *runtime*, so a
+  # Dependabot PR can be entirely green in CI and still brick a deploy. CI runs on the
+  # virtual device, which is not the firmware on your board.
+  #
+  # Every NuGet bump therefore needs a hardware run (Run-Tests.ps1 and
+  # Run-IntegrationTests.ps1) before merge, and possibly a matching firmware update via
+  # nanoff. The nanoframework-sync agent checks package versions against the pinned
+  # sibling checkouts and is the right tool for triaging these.
+  #
+  # Grouped and monthly so they arrive as one reviewable batch rather than a trickle of
+  # individually-plausible PRs.
+  # 'directories', not 'directory: /'. Every packages.config in this repository lives in a
+  # project folder under src/ -- there is nothing at the root but SmartHome.sln -- so a
+  # root-only scan finds no manifests and this whole block would silently never fire,
+  # while CONTRIBUTING.md and the pull request template describe a review ritual around
+  # pull requests that never arrive.
+  #
+  # Unverified caveat, stated rather than assumed: Dependabot's NuGet support recognises
+  # .csproj/.vbproj/.fsproj and packages.config, and .nfproj is not on that list. The
+  # packages.config files should be discovered on their own, but if no NuGet pull request
+  # has appeared a month after this lands, that is the reason, and this block should be
+  # removed rather than left looking like cover it does not provide.
+  - package-ecosystem: nuget
+    directories:
+      - /src/common/*
+      - /src/devices/*
+      - /src/integrationTests/*
+      - /src/tests/*
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      nanoframework:
+        patterns:
+          - 'nanoFramework.*'
+      other:
+        patterns: ['*']
+        exclude-patterns:
+          - 'nanoFramework.*'
+    commit-message:
+      prefix: build
+    labels:
+      - 'type: task'
+      - 'area: infra'
+      - 'status: blocked'
