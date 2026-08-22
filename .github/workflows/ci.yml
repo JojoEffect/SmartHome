@@ -145,7 +145,15 @@ jobs:
               dotnet tool install -g nanoclr --version $version
           }
           if ($LASTEXITCODE -ne 0) { throw "Could not install nanoclr $version." }
-          nanoclr --help | Select-Object -First 1
+
+          # Confirm via `dotnet tool list`, not by invoking nanoclr. Two reasons: the
+          # global tools directory is added to PATH for *subsequent* steps, not this one,
+          # and a native command's exit code becomes the step's exit code -- so a probe
+          # like `nanoclr --help` fails the step whether or not the tool is fine.
+          if (-not (dotnet tool list -g | Select-String -Pattern '^\s*nanoclr\s+')) {
+              throw "nanoclr is not present after install."
+          }
+          Write-Host "nanoclr $version ready."
 
       # Run-Tests.ps1 sources scripts\local.env.ps1, which is git-ignored because it holds
       # per-machine settings. CI has no machine to describe, so the template stands in --
