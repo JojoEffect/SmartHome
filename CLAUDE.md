@@ -353,12 +353,30 @@ drift apart easily, and a stale one is the usual reason a healthy device "can't 
 broker". `Run-IntegrationTests.ps1` warns when `MqttCheck`'s constant isn't an address of the
 host machine.
 
-## Next steps
+## Open work
 
-Known open work lives in [`NEXT-STEPS.md`](NEXT-STEPS.md) — a to-do list, not a changelog. The
-headline item is a device-agnostic `HomieClientCheck` that exercises the whole convention rather
-than whichever parts RoomSensor happens to use; two real spec bugs were found by reading the
-spec instead of by a failing test, which is the wrong way round.
+**GitHub issues are the backlog.** There is no to-do file in the repository — `NEXT-STEPS.md`
+was one, and keeping it alongside issues meant two places to look and neither trusted. Check
+the issue list before starting anything:
+
+```bash
+gh issue list --state open
+```
+
+Issues are labelled `type:` (bug/feature/task/spike), `area:` (homie/infra/sensor) and
+`status:` (in-progress/blocked/review). Anything `status: blocked` names in its body exactly
+what it is waiting for, so it can be picked up cold.
+
+## Development process
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) is the source of truth for how work moves: trunk-based
+branching off a protected `main`, Conventional Commits enforced on PR titles only, and what CI
+can and cannot verify.
+
+The part worth knowing before you touch anything: **CI builds every project and runs the unit
+tests on the nanoclr virtual device, but it cannot run the integration suite** — that needs a
+real ESP32, a real network and a real broker. Hardware verification is a manual step, and the
+pull request should say what was run on hardware, or say plainly that nothing was.
 
 ## Project skills
 

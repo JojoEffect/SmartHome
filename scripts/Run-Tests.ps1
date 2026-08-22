@@ -31,7 +31,14 @@
 param(
     [string]$Project = 'src\tests\Unit\Unit.nfproj',
 
-    [string]$Configuration = 'Debug'
+    [string]$Configuration = 'Debug',
+
+    # Run settings file, relative to the project directory. The default targets real
+    # hardware. CI passes nano.ci.runsettings instead, which sets IsRealHardware=False
+    # so the tests execute on the nanoclr virtual device -- the same 34 tests, no board
+    # required. Kept as a parameter rather than a switch so the settings stay declarative
+    # and reviewable in-repo.
+    [string]$RunSettings = 'nano.runsettings'
 )
 
 Set-StrictMode -Version Latest
@@ -70,7 +77,7 @@ if (-not (Test-Path $testDll)) {
     exit 1
 }
 
-$runSettings = Join-Path $projectDir 'nano.runsettings'
+$runSettings = Join-Path $projectDir $RunSettings
 if (-not (Test-Path $runSettings)) {
     Write-Error "Run settings not found: $runSettings"
     exit 1

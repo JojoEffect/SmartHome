@@ -1,0 +1,53 @@
+version: 2
+
+updates:
+  # GitHub Actions: safe to take. Pinned action versions rot quietly, and a stale
+  # action is a CI failure that has nothing to do with the code.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+    labels:
+      - 'type: task'
+      - 'area: infra'
+
+  # NuGet: NOT safe to take on a green check alone. Read the note below before merging
+  # any of these.
+  #
+  # CLAUDE.md pins nanoFramework.CoreLibrary, Hardware.Esp32, Logging and M2Mqtt to
+  # versions matching the firmware actually flashed on the device. A mismatch does not
+  # fail the build -- it produces a device-side Link failure at *runtime*, so a
+  # Dependabot PR can be entirely green in CI and still brick a deploy. CI runs on the
+  # virtual device, which is not the firmware on your board.
+  #
+  # Every NuGet bump therefore needs a hardware run (Run-Tests.ps1 and
+  # Run-IntegrationTests.ps1) before merge, and possibly a matching firmware update via
+  # nanoff. The nanoframework-sync agent checks package versions against the pinned
+  # sibling checkouts and is the right tool for triaging these.
+  #
+  # Grouped and monthly so they arrive as one reviewable batch rather than a trickle of
+  # individually-plausible PRs.
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      nanoframework:
+        patterns:
+          - 'nanoFramework.*'
+      other:
+        patterns: ['*']
+        exclude-patterns:
+          - 'nanoFramework.*'
+    commit-message:
+      prefix: build
+    labels:
+      - 'type: task'
+      - 'area: infra'
+      - 'status: blocked'

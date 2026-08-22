@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same branch makes the previous run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and unit test
+    # Windows is not a preference. .nfproj is a classic MSBuild project and the
+    # nanoFramework build tasks are Windows-only.
+    runs-on: windows-latest
+
+    # Windows PowerShell 5.1 throughout, not pwsh. The repository's scripts are written
+    # and verified against 5.1, whose Set-StrictMode -Version Latest behaves differently
+    # from PowerShell 7's -- notably around missing hashtable keys. CI should run the
+    # interpreter the scripts were written for, or it is testing something else.
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - uses: nuget/setup-nuget@v2
+
+      # The .nfproj files resolve their build targets through
+      # $(NanoFrameworkProjectSystemPath), which normally points inside a Visual Studio
+      # install. The components ship in the VS extension's VSIX -- 14 files, ~1.2 MB --
+      # and a VSIX is just a zip, so CI extracts them and points the property at them.
+      # Nothing is installed into Visual Studio.
+      #
+      # nanoFramework's own repositories solve this with the InstallNanoMSBuildComponents
+      # Azure DevOps task, which has no GitHub Actions equivalent; this is that task's
+      # job done by hand.
+      - name: Install nanoFramework MSBuild components
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release download --repo nanoframework/nf-Visual-Studio-extension `
+                              --pattern '*.vsix' --dir "$env:RUNNER_TEMP" --clobber
+          $vsix = Get-ChildItem "$env:RUNNER_TEMP\*.vsix" | Select-Object -First 1
+          Write-Host "Using $($vsix.Name)"
+
+          # Entry-by-entry via ZipFile rather than Expand-Archive. Expand-Archive fails
+          # outright on this VSIX (verified locally), and we only want 27 of its 96
+          # entries anyway. Inside the archive they live under a literal '$MSBuild'
+          # folder, and the Rules subfolder must keep its structure.
+          $components = Join-Path $env:RUNNER_TEMP 'nfcomponents'
+          if (Test-Path $components) { Remove-Item $components -Recurse -Force }
+          New-Item -ItemType Directory -Path $components -Force | Out-Null
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($vsix.FullName)
+          $prefix = '$MSBuild/nanoFramework/v1.0/'
+          $count = 0
+          try {
+              foreach ($entry in $zip.Entries) {
+                  if (-not $entry.FullName.StartsWith($prefix)) { continue }
+                  $relative = $entry.FullName.Substring($prefix.Length)
+                  if (-not $relative -or -not $entry.Name) { continue }
+
+                  $target = Join-Path $components $relative
+                  $dir = Split-Path $target -Parent
+                  if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+                  [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+                  $count++
+              }
+          }
+          finally {
+              $zip.Dispose()
+          }
+
+          if (-not (Test-Path (Join-Path $components 'NFProjectSystem.props'))) {
+              throw "nanoFramework MSBuild components not found under '$prefix'. The VSIX layout changed."
+          }
+
+          # Trailing separator matters: the imports concatenate directly, as in
+          # $(NanoFrameworkProjectSystemPath)NFProjectSystem.props
+          "NanoFrameworkProjectSystemPath=$components\" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Extracted $count component files."
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # msbuild /t:Restore is a no-op for this project style -- see
+      # scripts\Restore-Packages.ps1 for the same note.
+      - name: Restore packages.config dependencies
+        run: nuget restore SmartHome.sln
+
+      - name: Build solution
+        run: msbuild SmartHome.sln /p:Configuration=Debug /v:minimal /nologo /nodeReuse:false
+
+      # The virtual device: the same CLR, run on the host. This is what lets the 34 unit
+      # tests run without a board.
+      - name: Install nanoclr
+        run: dotnet tool install -g nanoclr
+
+      # Run-Tests.ps1 sources scripts\local.env.ps1, which is git-ignored because it holds
+      # per-machine settings. CI has no machine to describe, so the template stands in --
+      # its COM port is never used, because IsRealHardware is False.
+      - name: Provide a local environment file
+        shell: powershell
+        run: Copy-Item scripts\local.env.template.ps1 scripts\local.env.ps1
+
+      # Deliberately the same entry point developers use, not a bespoke vstest line. It
+      # carries the rule that a run which executed zero tests is a failure -- vstest exits
+      # 0 when every test is *skipped*, and this repository has already shipped three
+      # commits on a green run that executed nothing.
+      - name: Run unit tests on the virtual device
+        shell: powershell
+        run: .\scripts\Run-Tests.ps1 -RunSettings nano.ci.runsettings
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: src/tests/Unit/TestResults/
+          if-no-files-found: warn
