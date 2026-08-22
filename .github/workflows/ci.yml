@@ -7,10 +7,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# A newer push to the same branch makes the previous run irrelevant.
+# A newer push to a pull request makes the previous run irrelevant. Pushes to main are
+# NOT cancelled: with CI as a required check, a cancelled run leaves that commit neither
+# passed nor failed, so two merges in quick succession could leave main carrying a commit
+# nothing ever verified.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -119,8 +122,30 @@ jobs:
 
       # The virtual device: the same CLR, run on the host. This is what lets the 34 unit
       # tests run without a board.
+      # Pinned, and install-or-update rather than plain install.
+      #
+      # Pinned because an unpinned CLR means the runtime under the tests can change with
+      # no commit in this repository -- green today, red tomorrow, nothing to bisect.
+      # Bump this deliberately, like any other dependency.
+      #
+      # Install-or-update because `dotnet tool install` exits 1 when the tool is already
+      # present. A hosted runner is fresh every time so plain install works there, but it
+      # would fail on the very first re-run of the self-hosted runner in #26, where the
+      # global tool persists between jobs.
       - name: Install nanoclr
-        run: dotnet tool install -g nanoclr
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '1.1.122'
+          $installed = (dotnet tool list -g | Select-String -Pattern '^\s*nanoclr\s')
+          if ($installed) {
+              Write-Host "nanoclr already present; updating to $version."
+              dotnet tool update -g nanoclr --version $version
+          }
+          else {
+              dotnet tool install -g nanoclr --version $version
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Could not install nanoclr $version." }
+          nanoclr --help | Select-Object -First 1
 
       # Run-Tests.ps1 sources scripts\local.env.ps1, which is git-ignored because it holds
       # per-machine settings. CI has no machine to describe, so the template stands in --

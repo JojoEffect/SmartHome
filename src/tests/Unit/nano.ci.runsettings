@@ -33,8 +33,9 @@
        <IsRealHardware>False</IsRealHardware>
        <RealHardwarePort></RealHardwarePort>
        <!-- Empty: use whichever CLR the nanoclr global tool installed. The workflow pins
-            the tool, so this stays reproducible without the version living in two
-            places. -->
+            that tool to an explicit version, so the runtime under the tests is
+            reproducible while the version itself lives in exactly one place, next to the
+            install step. -->
        <CLRVersion></CLRVersion>
        <PathToLocalCLRInstance></PathToLocalCLRInstance>
    </nanoFrameworkAdapter>

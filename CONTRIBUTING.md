@@ -16,9 +16,13 @@ Branch names take the form `<type>/<short-description>`, using the same types as
 messages: `feat/`, `fix/`, `chore/`, `ci/`, `docs/`, `refactor/`, `test/`. Agent-created
 branches may use a `claude/` prefix.
 
-`main` is protected: direct pushes are blocked, a pull request is required, and CI must
-pass. There is no approval requirement — there is one human here, and requiring a second
-would just mean disabling the rule the first time it mattered.
+`main` is meant to be protected: direct pushes blocked, a pull request required, and CI
+green before merge. There is no approval requirement — there is one human here, and
+requiring a second would just mean disabling the rule the first time it mattered.
+
+> **Not yet enforced.** The ruleset is a repository setting and has to be applied by the
+> repository owner; until then this section describes a convention, not a guard rail.
+> Tracked in [#23](https://github.com/JojoEffect/SmartHome/issues/23).
 
 ## Pull requests
 
@@ -95,15 +99,25 @@ picked up cold.
 
 ## Releases
 
-Manual and on demand. Tag when a set of changes is worth calling a version:
+> **Not implemented yet.** None of the tooling below exists — tagging today produces a
+> git tag and nothing else. Tracked in
+> [#24](https://github.com/JojoEffect/SmartHome/issues/24). This section records the
+> agreed design so the issue does not have to re-derive it.
+
+The intent: manual and on demand. Tag when a set of changes is worth calling a version.
 
 ```bash
 git tag v1.2.0 && git push origin v1.2.0
 ```
 
-MinVer derives the version from the tag, the release build stamps it into the assemblies,
-and the workflow attaches each device's deployment `.bin`. The changelog is written by
-hand — a generated one would list what changed, and the interesting part is why.
+MinVer will derive the version from the tag. Assemblies need an explicit stamping step:
+`.nfproj` is a classic project and takes its version from a checked-in
+`Properties/AssemblyInfo.cs` — all 14 are hardcoded to `1.0.0.0` — so MinVer's
+`$(Version)` reaches nothing on its own. The release build will rewrite those before
+compiling the artifacts, and attach each device's deployment `.bin`.
+
+The changelog is written by hand — a generated one would list what changed, and the
+interesting part is why.
 
 ## Local setup
 
