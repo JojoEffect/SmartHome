@@ -540,15 +540,44 @@ function Get-HomieRetainedSnapshot {
     Start-Sleep -Seconds $SnapshotSettleSeconds
     Stop-SmartHomeProcessTree -ProcessId $process.Id
 
+    # Last message per topic wins -- except that a repeat of the SAME payload only adds
+    # to what is known about it.
+    #
+    # A QoS-1 publish whose PUBACK is late gets retransmitted: M2Mqtt resends an in-flight
+    # message with DupFlag set, up to MqttSettings.MaximumAttemptsRetry (3). So a snapshot
+    # can hold a live duplicate of a value the broker also replayed from its store,
+    # arriving after the replayed copy. Overwriting on payload equality threw away the
+    # retain flag that replay had just proved, and Test-Attribute reported "not retained"
+    # for three attributes of 53 that plainly were.
+    #
+    # Measured, not guessed: a 40s capture of one re-announce holds a retransmitted tail
+    # of the last property's attributes, and counter values arriving out of order (146
+    # after 147) -- which nothing but retransmission explains.
+    #
+    # A DIFFERENT payload still replaces both fields. That is what keeps the flag
+    # meaningful: a value delivered only live must not inherit the retained-ness of the
+    # value it replaced, which is exactly the bug Wait-ForRetainedValue's flag check
+    # exists to catch.
     $snapshot = @{}
     foreach ($line in @(Get-Content -Path $out -ErrorAction SilentlyContinue)) {
         # "<topic> <0|1> <payload>", and the payload may itself contain spaces.
         $match = [regex]::Match($line, '^(\S+)\s+([01])\s?(.*)$')
-        if ($match.Success) {
-            $snapshot[$match.Groups[1].Value] = @{
-                Retained = $match.Groups[2].Value -eq '1'
-                Payload  = $match.Groups[3].Value
-            }
+        if (-not $match.Success) {
+            continue
+        }
+
+        $topic = $match.Groups[1].Value
+        $retained = $match.Groups[2].Value -eq '1'
+        $payload = $match.Groups[3].Value
+
+        if ($snapshot.Contains($topic) -and $snapshot[$topic].Payload -eq $payload) {
+            $snapshot[$topic].Retained = $snapshot[$topic].Retained -or $retained
+            continue
+        }
+
+        $snapshot[$topic] = @{
+            Retained = $retained
+            Payload  = $payload
         }
     }
 
