@@ -244,7 +244,7 @@ if ($Detached) {
 
         Write-Error @"
 The homie/# subscriber exited immediately (exit code $($subscriber.ExitCode)); broker stopped again.
-$(if ($reason) { "Subscriber output:`n$reason" } else { 'It produced no output. Check that mosquitto_sub can reach localhost:' + $mqttPort + '.' })
+$(if ($reason) { "Subscriber output:`n$reason" } else { 'It produced no output. Check that mosquitto_sub can reach 127.0.0.1:' + $mqttPort + '.' })
 "@
         exit 1
     }
@@ -269,7 +269,7 @@ if ($Detached) {
 }
 
 Write-Host ""
-Write-Host ("Subscribing to homie/# on localhost:{0}  (Ctrl+C to stop)" -f $mqttPort) -ForegroundColor Cyan
+Write-Host ("Subscribing to homie/# on 127.0.0.1:{0}  (Ctrl+C to stop)" -f $mqttPort) -ForegroundColor Cyan
 Write-Host ('-' * 69)
 
 try {

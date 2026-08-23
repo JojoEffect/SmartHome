@@ -333,7 +333,18 @@ function Get-SmartHomeSubscriberArguments {
     # ("All messages MUST be sent as retained, UNLESS stated otherwise") and only the
     # broker can confirm it, but -v prints topic and payload only. Lines become
     # "<topic> <0|1> <payload>", which readers still match by topic prefix.
-    return @('-h', 'localhost', '-p', $Port, '-t', $SmartHomeHomieTopic, '-F', '%t %r %p')
+    # 127.0.0.1, not 'localhost'. Measured, not guessed: 'localhost' resolves to ::1
+    # first, and Start-DevEnv.ps1 binds the broker to 0.0.0.0 -- IPv4 only, deliberately,
+    # so a real device on the LAN can reach it. Every client therefore attempts IPv6,
+    # waits out the connect timeout, and only then falls back.
+    #
+    #   mosquitto_sub -h localhost   first message after 2.03s, 2.03s, 2.06s
+    #   mosquitto_sub -h 127.0.0.1   first message after 0.02s, 0.02s, 0.12s
+    #
+    # Two seconds on every subscriber and every publish. The integration suite takes
+    # about a dozen retained-store snapshots per conformance run, so this alone was
+    # roughly half that test's duration.
+    return @('-h', '127.0.0.1', '-p', $Port, '-t', $SmartHomeHomieTopic, '-F', '%t %r %p')
 }
 
 # ── Dev environment: state ────────────────────────────────────────────────────

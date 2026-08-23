@@ -488,8 +488,16 @@ function Get-HomieRetainedSnapshot {
     # for the handle-inheritance reason documented in Start-DevEnv.ps1.
     param(
         [string]$Port,
+
+        # Ceiling, not a fixed wait. See the polling note below.
         [int]$SettleSeconds = 3
     )
+
+    # How long the output has to stay unchanged before the replay is considered finished.
+    # The store arrives as one contiguous burst on localhost, so a quarter of a second of
+    # silence after the last line is a comfortable margin -- the gap between lines within
+    # a burst is sub-millisecond.
+    $quietMilliseconds = 250
 
     $out = Get-SmartHomeDevEnvPath -Port $Port -Kind Snapshot
     Remove-Item -Path $out -Force -ErrorAction SilentlyContinue
@@ -506,7 +514,39 @@ function Get-HomieRetainedSnapshot {
     $command = '/c ""{0}" {1} > "{2}" 2>&1"' -f $sub, $subscriberArgs, $out
     $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
 
-    Start-Sleep -Seconds $SettleSeconds
+    # Wait for the replay to finish, rather than waiting out a fixed window. The broker
+    # sends its whole retained store within milliseconds of SUBACK on localhost, so the
+    # flat Start-Sleep this replaces was almost entirely idle -- and it was paid on every
+    # poll iteration of Wait-ForRetainedValue, which is what made HomieClientCheck the
+    # slowest test in the suite.
+    #
+    # Stop once the file has been quiet for $quietMilliseconds, with $SettleSeconds as the
+    # ceiling. An empty store still costs the full ceiling, unavoidably: "nothing is
+    # retained" and "nothing has arrived yet" look identical from here, and returning
+    # early on the second would report an announcing device as silent.
+    $deadline = (Get-Date).AddSeconds($SettleSeconds)
+    $lastSize = -1
+    $lastChange = Get-Date
+
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 50
+
+        $size = 0
+        if (Test-Path $out) {
+            $size = (Get-Item $out).Length
+        }
+
+        if ($size -ne $lastSize) {
+            $lastSize = $size
+            $lastChange = Get-Date
+            continue
+        }
+
+        if ($size -gt 0 -and ((Get-Date) - $lastChange).TotalMilliseconds -ge $quietMilliseconds) {
+            break
+        }
+    }
+
     Stop-SmartHomeProcessTree -ProcessId $process.Id
 
     $snapshot = @{}
@@ -534,7 +574,10 @@ function Publish-HomieCommand {
     # Non-retained, as the convention requires of a controller: "A Homie controller
     # publishes to the set command topic with non-retained messages only."
     $pub = Get-MosquittoTool -Name 'mosquitto_pub.exe'
-    & $pub -h 'localhost' -p $Port -t $Topic -m $Payload | Out-Null
+    # 127.0.0.1 for the same reason as Get-SmartHomeSubscriberArguments: 'localhost'
+    # costs a two-second IPv6 connect timeout against an IPv4-only broker, and
+    # Wait-ForEcho republishes on every poll round.
+    & $pub -h '127.0.0.1' -p $Port -t $Topic -m $Payload | Out-Null
 }
 
 function Wait-ForRetainedValue {
