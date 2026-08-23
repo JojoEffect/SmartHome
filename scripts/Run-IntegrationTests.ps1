@@ -489,15 +489,20 @@ function Get-HomieRetainedSnapshot {
     param(
         [string]$Port,
 
-        # Ceiling, not a fixed wait. See the polling note below.
-        [int]$SettleSeconds = 3
+        # Sized for the replay alone. It used to be 3, because two of those seconds were
+        # spent on an IPv6 connect timeout that no longer happens -- see
+        # Get-SmartHomeSubscriberArguments. With the connect at ~0.02s the whole retained
+        # store lands well inside a second.
+        #
+        # A fixed window on purpose. An earlier version of this ended the wait once the
+        # output had been quiet for 250ms, on the assumption that the replay arrives as
+        # one contiguous burst. It does not: the output is buffered and lands in chunks
+        # with gaps, so the snapshot was cut short mid-replay and every topic that had not
+        # arrived yet was reported as "not retained". The conformance check failed with
+        # seven of those. Guessing at when a stream has finished is not worth the
+        # fragility here; a second of wall clock is.
+        [int]$SettleSeconds = 1
     )
-
-    # How long the output has to stay unchanged before the replay is considered finished.
-    # The store arrives as one contiguous burst on localhost, so a quarter of a second of
-    # silence after the last line is a comfortable margin -- the gap between lines within
-    # a burst is sub-millisecond.
-    $quietMilliseconds = 250
 
     $out = Get-SmartHomeDevEnvPath -Port $Port -Kind Snapshot
     Remove-Item -Path $out -Force -ErrorAction SilentlyContinue
@@ -514,39 +519,7 @@ function Get-HomieRetainedSnapshot {
     $command = '/c ""{0}" {1} > "{2}" 2>&1"' -f $sub, $subscriberArgs, $out
     $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
 
-    # Wait for the replay to finish, rather than waiting out a fixed window. The broker
-    # sends its whole retained store within milliseconds of SUBACK on localhost, so the
-    # flat Start-Sleep this replaces was almost entirely idle -- and it was paid on every
-    # poll iteration of Wait-ForRetainedValue, which is what made HomieClientCheck the
-    # slowest test in the suite.
-    #
-    # Stop once the file has been quiet for $quietMilliseconds, with $SettleSeconds as the
-    # ceiling. An empty store still costs the full ceiling, unavoidably: "nothing is
-    # retained" and "nothing has arrived yet" look identical from here, and returning
-    # early on the second would report an announcing device as silent.
-    $deadline = (Get-Date).AddSeconds($SettleSeconds)
-    $lastSize = -1
-    $lastChange = Get-Date
-
-    while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 50
-
-        $size = 0
-        if (Test-Path $out) {
-            $size = (Get-Item $out).Length
-        }
-
-        if ($size -ne $lastSize) {
-            $lastSize = $size
-            $lastChange = Get-Date
-            continue
-        }
-
-        if ($size -gt 0 -and ((Get-Date) - $lastChange).TotalMilliseconds -ge $quietMilliseconds) {
-            break
-        }
-    }
-
+    Start-Sleep -Seconds $SettleSeconds
     Stop-SmartHomeProcessTree -ProcessId $process.Id
 
     $snapshot = @{}
@@ -601,7 +574,7 @@ function Wait-ForRetainedValue {
     $snapshot = @{}
 
     while ((Get-Date) -lt $deadline) {
-        $snapshot = Get-HomieRetainedSnapshot -Port $Port -SettleSeconds 2
+        $snapshot = Get-HomieRetainedSnapshot -Port $Port
         if ($snapshot.Contains($Topic)) {
             $seen = $snapshot[$Topic].Payload
             if ($seen -eq $Expected) {
@@ -753,7 +726,7 @@ function Invoke-HomieConformanceCheck {
     $deadline = (Get-Date).AddSeconds($Settings.CommandTimeoutSeconds)
 
     while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
-        $snapshot = Get-HomieRetainedSnapshot -Port $Port -SettleSeconds 2
+        $snapshot = Get-HomieRetainedSnapshot -Port $Port
         $stillPending = @()
 
         foreach ($property in $pending) {
