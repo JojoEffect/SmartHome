@@ -8,6 +8,7 @@ using SmartHome.Homie.V4;
 using SmartHome.Homie.V4.Builder;
 using SmartHome.Homie.V4.Enums;
 using SmartHome.Homie.V4.EventArgs;
+using SmartHome.Homie.V4.Extensions;
 using SmartHome.Homie.V4.Properties;
 using SmartHome.Mqtt;
 using SmartHome.Networking;
@@ -33,12 +34,17 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
         // The lifecycle property is how the host drives $state: publishing 'alert',
         // 'sleeping' or 'ready' to its /set topic moves the device, which is the only
         // way to exercise those states from outside.
-        private const string LifecycleReady = "ready";
-        private const string LifecycleAlert = "alert";
-        private const string LifecycleSleeping = "sleeping";
+        //
+        // The names are taken from the State enum rather than spelled out here. They are
+        // the convention's own vocabulary and StateExtensions.GetString() already owns
+        // it; a private copy would drift from $state, which is precisely the value the
+        // host compares this property against. This array is the single source for both
+        // the $format string and the set of commands HandleLifecycleCommand accepts.
+        private static readonly State[] LifecycleStates = { State.Ready, State.Alert, State.Sleeping };
 
         private static IHomieClient _homieClient;
         private static IntegerProperty _counter;
+        private static EnumProperty _lifecycle;
 
         public static void Main()
         {
@@ -99,12 +105,33 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
                     .AddIntegerProperty("counter", "Counter", 0)
                         .WithRetained(false)
                     .BuildProperty(out _counter)
-                    .AddEnumProperty("lifecycle", "Lifecycle control", LifecycleReady)
+                    .AddEnumProperty("lifecycle", "Lifecycle control", State.Ready.GetString())
                         .WithSettable(true)
-                        .WithFormat($"{LifecycleReady},{LifecycleAlert},{LifecycleSleeping}")
-                    .BuildProperty()
+                        .WithFormat(BuildLifecycleFormat())
+                    .BuildProperty(out _lifecycle)
                 .BuildNode()
             .BuildDevice();
+        }
+
+        // Not StringUtils.Join: it takes string[], so using it would mean building an
+        // intermediate array of names to join -- two passes and an extra allocation for a
+        // three-element list. SmartHome.Text is on the device either way (SmartHome.Homie
+        // references it), so the trade here is about the second pass, not the assembly.
+        private static string BuildLifecycleFormat()
+        {
+            var format = new StringBuilder();
+
+            for (var i = 0; i < LifecycleStates.Length; i++)
+            {
+                if (i > 0)
+                {
+                    format.Append(',');
+                }
+
+                format.Append(LifecycleStates[i].GetString());
+            }
+
+            return format.ToString();
         }
 
         private static void HandleCommand(HomieCommandEventArgs args)
@@ -119,21 +146,45 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
                 return;
             }
 
-            switch (payload)
+            HandleLifecycleCommand(payload);
+
+            // Publish what the device actually is, over the optimistic reflection the
+            // library already made.
+            //
+            // Reflecting a command onto its own property is right for an ordinary
+            // property, but this one's value is a *request*, and a request can be turned
+            // down: Device.CanChangeState refuses illegal transitions (alert -> sleeping
+            // among them), and an unknown payload is not a state at all. Either way the
+            // reflection would leave the retained store advertising a state the device is
+            // not in, contradicting the $state published right beside it -- and retained,
+            // so every controller connecting later reads the contradiction too.
+            //
+            // Actuators copying this device should do the same: reflect the outcome, not
+            // the command.
+            _lifecycle.Update(_homieClient.State.GetString());
+        }
+
+        private static void HandleLifecycleCommand(string payload)
+        {
+            foreach (var state in LifecycleStates)
             {
-                case LifecycleAlert:
-                    Debug.WriteLine($"HomieClientCheck: alert -> {_homieClient.Alert()}");
-                    return;
-                case LifecycleSleeping:
-                    Debug.WriteLine($"HomieClientCheck: sleep -> {_homieClient.Sleep()}");
-                    return;
-                case LifecycleReady:
-                    Debug.WriteLine($"HomieClientCheck: ready -> {_homieClient.Ready()}");
-                    return;
-                default:
-                    Debug.WriteLine($"HomieClientCheck: unknown lifecycle command '{payload}'.");
-                    return;
+                if (payload != state.GetString())
+                {
+                    continue;
+                }
+
+                var applied = state switch
+                {
+                    State.Alert => _homieClient.Alert(),
+                    State.Sleeping => _homieClient.Sleep(),
+                    _ => _homieClient.Ready(),
+                };
+
+                Debug.WriteLine($"HomieClientCheck: '{payload}' -> {applied}");
+                return;
             }
+
+            Debug.WriteLine($"HomieClientCheck: unknown lifecycle command '{payload}'.");
         }
 
         // The runner cycles the broker while this device runs, so it can boot with no

@@ -714,6 +714,11 @@ function Invoke-HomieConformanceCheck {
     Test-Attribute -Topic "$node/integer-value/`$format" -Expected '0:100'
     Test-Attribute -Topic "$node/enum-value/`$format" -Expected 'low,medium,high'
     Test-Attribute -Topic "$node/color-value/`$format" -Expected 'rgb'
+    # Built by HomieClientCheck from the State enum rather than spelled out there, so
+    # that the vocabulary a controller is offered cannot drift from the vocabulary
+    # $state is published in. This assertion is what notices if that derivation breaks.
+    Test-Attribute -Topic "$node/lifecycle/`$format" -Expected 'ready,alert,sleeping'
+    Test-Attribute -Topic "$node/lifecycle/`$settable" -Expected 'true'
     Test-Attribute -Topic "$node/integer-value/`$unit" -Expected '#'
     Test-Attribute -Topic "$node/float-value/`$unit" -AnyValue
 
@@ -794,19 +799,55 @@ function Invoke-HomieConformanceCheck {
     }
 
     # ── the lifecycle states a device can be driven into ─────────────────────
-    Write-Host "  driving `$state through alert and sleeping..." -ForegroundColor DarkGray
-    # ready -> alert -> ready -> sleeping -> ready. Not ready -> alert -> sleeping:
-    # alert may only return to ready (or disconnect), so that would be asking the
-    # device for a transition the convention's own state machine forbids.
-    foreach ($state in 'alert', 'ready', 'sleeping', 'ready') {
-        Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $state
+    Write-Host "  driving `$state through alert, sleeping and a refused transition..." -ForegroundColor DarkGray
+    # ready -> alert -> ready -> sleeping -> ready, with the one transition the
+    # convention's own state machine forbids asked for in the middle. alert may only
+    # return to ready (or disconnect), so alert -> sleeping must be refused -- and a
+    # device that advertises it as done anyway is the defect the Refused step measures.
+    $lifecycleSteps = @(
+        @{ Command = 'alert';    Expect = 'alert';    Refused = $false }
+        @{ Command = 'sleeping'; Expect = 'alert';    Refused = $true  }
+        @{ Command = 'ready';    Expect = 'ready';    Refused = $false }
+        @{ Command = 'sleeping'; Expect = 'sleeping'; Refused = $false }
+        @{ Command = 'ready';    Expect = 'ready';    Refused = $false }
+    )
+
+    foreach ($step in $lifecycleSteps) {
+        Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $step.Command
+
+        if ($step.Refused) {
+            # Nothing to wait for here -- the assertion is that nothing changed -- so one
+            # settled snapshot IS the measurement rather than a poll for it, and it carries
+            # both topics.
+            #
+            # HomieClient reflects a /set payload onto its property before the app ever
+            # sees it: right for an ordinary property, wrong for one whose value is a
+            # request that can be turned down. Uncorrected, the retained store ends up
+            # advertising matrix/lifecycle=sleeping beside $state=alert, and every
+            # controller that connects afterwards reads that contradiction out of the
+            # store rather than seeing it go by.
+            $refused = Get-HomieRetainedSnapshot -Port $Port
+            $stateAfter = if ($refused.Contains("$root/`$state")) { $refused["$root/`$state"].Payload } else { $null }
+            $lifecycleAfter = if ($refused.Contains("$node/lifecycle")) { $refused["$node/lifecycle"].Payload } else { $null }
+
+            if ($stateAfter -ne $step.Expect) {
+                $script:conformanceFailures += "forbidden $($step.Expect) -> $($step.Command) transition was applied (`$state is '$stateAfter')"
+            }
+
+            if ($lifecycleAfter -ne $step.Expect) {
+                $script:conformanceFailures += "refused '$($step.Command)' left $nodeId/lifecycle advertising '$lifecycleAfter' while `$state is '$stateAfter'"
+            }
+
+            continue
+        }
+
         # -RequireRetained $false: this reads Ok/Seen only and discards the snapshot. The
         # device writes $state within milliseconds of the command, so insisting on a
         # replayed copy would spend a second full snapshot re-observing the same value,
         # four times per run.
-        $reached = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected $state -TimeoutSeconds $Settings.CommandTimeoutSeconds -RequireRetained $false
+        $reached = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected $step.Expect -TimeoutSeconds $Settings.CommandTimeoutSeconds -RequireRetained $false
         if (-not $reached.Ok) {
-            $script:conformanceFailures += "device did not reach `$state='$state' on command (saw '$($reached.Seen)')"
+            $script:conformanceFailures += "device did not reach `$state='$($step.Expect)' on '$($step.Command)' (saw '$($reached.Seen)')"
         }
     }
 
@@ -841,7 +882,7 @@ function Invoke-HomieConformanceCheck {
 
     return @{
         Outcome = 'PASS'
-        Detail  = "attributes, datatypes, retained flags, /set round-trip, alert/sleeping and re-announce all conform"
+        Detail  = "attributes, datatypes, retained flags, /set round-trip, alert/sleeping, a refused transition and re-announce all conform"
     }
 }
 

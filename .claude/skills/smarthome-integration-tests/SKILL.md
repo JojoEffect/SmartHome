@@ -16,8 +16,9 @@ Run `scripts\Run-IntegrationTests.ps1` — one call covers every project under
 - **`HomieConformance`** (HomieClientCheck) — the host measures a purpose-built device against
   the Homie v4 convention: mandatory attributes and their retained flags, one property of every
   datatype with its `$format`/`$unit`/`$settable`/`$retained`, a `/set` command applied and
-  reflected back, the `alert` and `sleeping` states driven through a control property, and a full
-  re-announce after the broker is replaced. It emits no `[ITEST]` marker by design — the evidence
+  reflected back, the `alert` and `sleeping` states driven through a control property, a refused
+  transition that must not be advertised as if it had happened, and a full re-announce after the
+  broker is replaced. It emits no `[ITEST]` marker by design — the evidence
   is what lands on the broker.
 
 Both host-decided kinds (`BrokerOutage`, `HomieConformance`) take the broker away and put a fresh
