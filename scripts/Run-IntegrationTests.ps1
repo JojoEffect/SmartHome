@@ -489,19 +489,27 @@ function Get-HomieRetainedSnapshot {
     param(
         [string]$Port,
 
-        # Sized for the replay alone. It used to be 3, because two of those seconds were
-        # spent on an IPv6 connect timeout that no longer happens -- see
-        # Get-SmartHomeSubscriberArguments. With the connect at ~0.02s the whole retained
-        # store lands well inside a second.
+        # Three seconds, and it stays three seconds. Two attempts at shortening it both
+        # broke the conformance check, and the measurements are worth keeping so nobody
+        # repeats them:
         #
-        # A fixed window on purpose. An earlier version of this ended the wait once the
-        # output had been quiet for 250ms, on the assumption that the replay arrives as
-        # one contiguous burst. It does not: the output is buffered and lands in chunks
-        # with gaps, so the snapshot was cut short mid-replay and every topic that had not
-        # arrived yet was reported as "not retained". The conformance check failed with
-        # seven of those. Guessing at when a stream has finished is not worth the
-        # fragility here; a second of wall clock is.
-        [int]$SettleSeconds = 1
+        #   - Ending the wait after 250ms of quiet output: 7 failures. The output is
+        #     buffered and lands in chunks, so "quiet" does not mean "finished".
+        #   - A flat 1s: 3 failures, 54 topics where a healthy run sees ~78.
+        #   - mosquitto_sub -W 1, waiting for it to exit rather than killing it:
+        #     complete, but 6.3s -- slower than what it replaced.
+        #
+        # Against a *static* store a 1s kill captures everything (verified: 80/80 seeded
+        # topics), which is what made the short window look safe in isolation. The real
+        # snapshot runs while the device is mid-announce, so live publishes interleave
+        # with the retained replay and there is simply more to receive. That is the
+        # variable, and it is not one this code can observe.
+        #
+        # What did change: with the IPv6 timeout gone from
+        # Get-SmartHomeSubscriberArguments, these three seconds are now three seconds of
+        # *listening* rather than two seconds of connecting and one of listening. Same
+        # cost, three times the margin.
+        [int]$SettleSeconds = 3
     )
 
     $out = Get-SmartHomeDevEnvPath -Port $Port -Kind Snapshot
@@ -516,6 +524,7 @@ function Get-HomieRetainedSnapshot {
     # Quoting idiom matches Start-DevEnv.ps1's subscriber launch.
     $subscriberArgs = (Get-SmartHomeSubscriberArguments -Port $Port |
         ForEach-Object { if ($_ -match '[\s/#]') { '"{0}"' -f $_ } else { $_ } }) -join ' '
+
     $command = '/c ""{0}" {1} > "{2}" 2>&1"' -f $sub, $subscriberArgs, $out
     $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
 
