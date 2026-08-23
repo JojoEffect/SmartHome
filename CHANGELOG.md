@@ -12,6 +12,22 @@ are cut manually — see the Releases section of [`CONTRIBUTING.md`](CONTRIBUTIN
 Nothing released yet. The entries below describe what exists on `main` today, so the first
 tagged version has something to say for itself.
 
+### Fixed
+
+- **Float properties publish a value a controller can read back.** They rendered with
+  `double.ToString()`, which on nanoFramework uses `"G"` and turns `21.5` into
+  `21.499999999999999` — value-dependently, since `0.1` came out correctly, which is how
+  it survived this long. They now render at a declared precision (two decimals by
+  default, set per property with `WithDecimals`).
+
+  The alternatives were measured on the virtual device rather than assumed: round-trip
+  format `"R"` throws `NotImplementedException` on this runtime, and `"N"` inserts a
+  thousands separator that would corrupt the payload outright.
+
+  The conformance check now compares float echoes as exact strings. It previously
+  compared numerically with a tolerance, which tolerated the defect instead of measuring
+  it. ([#10](https://github.com/JojoEffect/SmartHome/issues/10))
+
 ### Devices
 
 - **RoomSensor** publishes real BMP280 temperature, humidity and pressure over Homie v4
