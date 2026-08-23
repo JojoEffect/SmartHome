@@ -298,6 +298,25 @@ function Invoke-GitCloneOrUpdate {
 $SmartHomeDevEnvPrefix = 'smarthome'
 $SmartHomeHomieTopic = 'homie/#'
 
+# The address host-side mosquitto clients dial. 127.0.0.1, not 'localhost'. Measured, not
+# guessed: 'localhost' resolves to ::1 first, and Start-DevEnv.ps1 binds the broker to
+# 0.0.0.0 -- IPv4 only, deliberately, so a real device on the LAN can reach it. Every
+# client therefore attempts IPv6, waits out the connect timeout, and only then falls back.
+#
+#   mosquitto_sub -h localhost   first message after 2.03s, 2.03s, 2.06s
+#   mosquitto_sub -h 127.0.0.1   first message after 0.02s, 0.02s, 0.12s
+#
+# Two seconds on every subscriber and every publish, and worse than slow: a 2s snapshot
+# window used to be spent almost entirely connecting, so it captured nearly nothing and
+# the polling loops only hid that by retrying.
+#
+# Deliberately NOT the SMARTHOME_MQTT_BROKER setting, and not configurable. That variable
+# is the address the *device* dials to reach this machine (192.168.1.238 here); pointing
+# host-side clients at it would send them out over the LAN to reach a broker on the same
+# box, and break the moment the DHCP lease changes. The port is genuinely shared -- both
+# sides must agree on it -- the host is not.
+$SmartHomeLocalBrokerHost = '127.0.0.1'
+
 function Get-SmartHomeDevEnvPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -333,7 +352,10 @@ function Get-SmartHomeSubscriberArguments {
     # ("All messages MUST be sent as retained, UNLESS stated otherwise") and only the
     # broker can confirm it, but -v prints topic and payload only. Lines become
     # "<topic> <0|1> <payload>", which readers still match by topic prefix.
-    return @('-h', 'localhost', '-p', $Port, '-t', $SmartHomeHomieTopic, '-F', '%t %r %p')
+    #
+    # Host from $SmartHomeLocalBrokerHost, which carries the reasoning for why it is not
+    # 'localhost'.
+    return @('-h', $SmartHomeLocalBrokerHost, '-p', $Port, '-t', $SmartHomeHomieTopic, '-F', '%t %r %p')
 }
 
 # ── Dev environment: state ────────────────────────────────────────────────────

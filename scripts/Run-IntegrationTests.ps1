@@ -476,6 +476,31 @@ function Get-MosquittoTool {
     return $path
 }
 
+# How long a snapshot subscriber listens. Three seconds, and it stays three seconds --
+# a fixed value rather than a parameter, because there is nothing here for a caller to
+# choose. Two attempts at shortening it both broke the conformance check, and the
+# measurements are worth keeping so nobody repeats them:
+#
+#   - Ending the wait after 250ms of quiet output: 7 failures. The output is buffered and
+#     lands in chunks, so "quiet" does not mean "finished".
+#   - A flat 1s: 3 failures, 54 topics where a healthy run sees ~64.
+#   - mosquitto_sub -W 1, waiting for it to exit rather than killing it: complete, but
+#     6.3s -- slower than what it replaced.
+#
+# Against a *static* store a 1s kill captures everything (verified: 80/80 seeded topics),
+# which is what made the short window look safe in isolation. The real snapshot runs while
+# the device is mid-announce, so live publishes interleave with the retained replay and
+# there is simply more to receive.
+#
+# Wait-ForRetainedValue now detects a mid-announce snapshot by its retain flag and retries,
+# so for that path the window is no longer the only defence. It still is for the callers
+# that read a snapshot without a flag guard -- Test-Attribute and the /set verification --
+# which is why it stays at three.
+#
+# With the IPv6 timeout gone from Get-SmartHomeSubscriberArguments these are three seconds
+# of *listening*, where they used to be two of connecting and one of listening.
+$SnapshotSettleSeconds = 3
+
 function Get-HomieRetainedSnapshot {
     # What a controller joining *now* would see: the broker's retained store.
     #
@@ -486,9 +511,15 @@ function Get-HomieRetainedSnapshot {
     #
     # mosquitto_sub is wrapped in cmd.exe for the redirect and then killed as a tree,
     # for the handle-inheritance reason documented in Start-DevEnv.ps1.
+    #
+    # Both retained and live deliveries come back, flag intact. What the flag *means* is
+    # the caller's decision, and the four callers deliberately differ: Wait-ForRetainedValue
+    # requires it when it hands the snapshot on, Test-Attribute reports it as data, the
+    # $retained=false check needs unretained messages to be present at all, and the /set
+    # verification ignores it because a live echo is equally good evidence the command was
+    # applied. Do not filter here.
     param(
-        [string]$Port,
-        [int]$SettleSeconds = 3
+        [string]$Port
     )
 
     $out = Get-SmartHomeDevEnvPath -Port $Port -Kind Snapshot
@@ -506,7 +537,7 @@ function Get-HomieRetainedSnapshot {
     $command = '/c ""{0}" {1} > "{2}" 2>&1"' -f $sub, $subscriberArgs, $out
     $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
 
-    Start-Sleep -Seconds $SettleSeconds
+    Start-Sleep -Seconds $SnapshotSettleSeconds
     Stop-SmartHomeProcessTree -ProcessId $process.Id
 
     $snapshot = @{}
@@ -534,23 +565,45 @@ function Publish-HomieCommand {
     # Non-retained, as the convention requires of a controller: "A Homie controller
     # publishes to the set command topic with non-retained messages only."
     $pub = Get-MosquittoTool -Name 'mosquitto_pub.exe'
-    & $pub -h 'localhost' -p $Port -t $Topic -m $Payload | Out-Null
+    # Host from Common.ps1, which owns the reasoning. Not a literal here: the broker
+    # address is shared vocabulary, and a second spelling is one a future change to the
+    # listener binding would miss.
+    & $pub -h $SmartHomeLocalBrokerHost -p $Port -t $Topic -m $Payload | Out-Null
 }
 
 function Wait-ForRetainedValue {
-    # Polls fresh snapshots until $Topic holds $Expected, or the timeout expires.
+    # Polls fresh snapshots until $Topic is *retained* with $Expected, or the timeout
+    # expires.
     #
-    # Returns the winning snapshot alongside the verdict. It already holds the entire
-    # retained store, and callers used to throw it away and immediately spawn another
-    # 3s subscriber to fetch the same data. Reusing it is sound rather than merely
-    # cheaper: HandleDeviceStateChange publishes the full device info while the device
-    # is in Init and only then transitions out of it, so a snapshot containing
-    # $state=ready necessarily contains everything published before it.
+    # By default the retain flag is part of the condition, for the retain=0 reason in
+    # Get-HomieRetainedSnapshot: a subscriber that connects mid-announce receives the rest
+    # of that announce live, and accepting such a snapshot hands the caller one where most
+    # topics look unretained.
+    #
+    # This went unnoticed for as long as it did because 'localhost' cost a two-second IPv6
+    # connect timeout, which reliably delayed the subscriber past the end of the announce.
+    # The check was passing on an accident of timing; removing that delay produced 31
+    # spurious "not retained" failures, which is how it came to light.
+    #
+    # It is also what makes returning the snapshot sound. The device publishes its full
+    # device info while in Init and only then transitions out, so $state arrives last: a
+    # subscriber that saw $state *replayed* necessarily connected after everything before
+    # it was already in the store. $state arriving retained is, in effect, the "device has
+    # finished announcing" signal, and this turned it from an assumed invariant into an
+    # enforced one.
     param(
         [string]$Port,
         [string]$Topic,
         [string]$Expected,
-        [int]$TimeoutSeconds
+        [int]$TimeoutSeconds,
+
+        # Turn off when only Ok/Seen are read and the snapshot is discarded. Waiting for a
+        # *replayed* value costs a whole extra 3s snapshot whenever the device happens to
+        # publish it just after the subscriber connected -- a coin flip for a value the
+        # device writes within milliseconds of a command. Nothing is lost by accepting the
+        # live delivery there: the payload is the same, and $state's retained-ness is
+        # already asserted once against the announce snapshot.
+        [bool]$RequireRetained = $true
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -558,10 +611,10 @@ function Wait-ForRetainedValue {
     $snapshot = @{}
 
     while ((Get-Date) -lt $deadline) {
-        $snapshot = Get-HomieRetainedSnapshot -Port $Port -SettleSeconds 2
+        $snapshot = Get-HomieRetainedSnapshot -Port $Port
         if ($snapshot.Contains($Topic)) {
             $seen = $snapshot[$Topic].Payload
-            if ($seen -eq $Expected) {
+            if ($seen -eq $Expected -and ((-not $RequireRetained) -or $snapshot[$Topic].Retained)) {
                 return @{ Ok = $true; Seen = $seen; Snapshot = $snapshot }
             }
         }
@@ -702,7 +755,7 @@ function Invoke-HomieConformanceCheck {
     }
 
     # One snapshot per round, not one per property. Every reflection is checked
-    # against the same snapshot, so five properties cost one 2s subscriber instead of
+    # against the same snapshot, so five properties cost one snapshot instead of
     # five -- the snapshot has to be a fresh subscriber (retain flags are only set on
     # replay), which is what makes it expensive.
     $pending = @($commands.Keys)
@@ -710,7 +763,7 @@ function Invoke-HomieConformanceCheck {
     $deadline = (Get-Date).AddSeconds($Settings.CommandTimeoutSeconds)
 
     while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
-        $snapshot = Get-HomieRetainedSnapshot -Port $Port -SettleSeconds 2
+        $snapshot = Get-HomieRetainedSnapshot -Port $Port
         $stillPending = @()
 
         foreach ($property in $pending) {
@@ -720,6 +773,11 @@ function Invoke-HomieConformanceCheck {
             $lastSeen[$property] = $seen
 
             # Every datatype, floats included, must match exactly.
+            #
+            # The retain flag is deliberately not part of this. Unlike the waits above,
+            # what is being proven here is that the device applied the command -- a live
+            # echo is equally good evidence of that, and requiring a replayed copy would
+            # cost an extra snapshot round for nothing.
             if ($seen -eq $expected) {
                 continue
             }
@@ -742,7 +800,11 @@ function Invoke-HomieConformanceCheck {
     # device for a transition the convention's own state machine forbids.
     foreach ($state in 'alert', 'ready', 'sleeping', 'ready') {
         Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $state
-        $reached = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected $state -TimeoutSeconds $Settings.CommandTimeoutSeconds
+        # -RequireRetained $false: this reads Ok/Seen only and discards the snapshot. The
+        # device writes $state within milliseconds of the command, so insisting on a
+        # replayed copy would spend a second full snapshot re-observing the same value,
+        # four times per run.
+        $reached = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected $state -TimeoutSeconds $Settings.CommandTimeoutSeconds -RequireRetained $false
         if (-not $reached.Ok) {
             $script:conformanceFailures += "device did not reach `$state='$state' on command (saw '$($reached.Seen)')"
         }
