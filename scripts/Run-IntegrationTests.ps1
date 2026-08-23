@@ -563,14 +563,25 @@ function Publish-HomieCommand {
 }
 
 function Wait-ForRetainedValue {
-    # Polls fresh snapshots until $Topic holds $Expected, or the timeout expires.
+    # Polls fresh snapshots until $Topic is *retained* with $Expected, or the timeout
+    # expires.
     #
-    # Returns the winning snapshot alongside the verdict. It already holds the entire
-    # retained store, and callers used to throw it away and immediately spawn another
-    # 3s subscriber to fetch the same data. Reusing it is sound rather than merely
-    # cheaper: HandleDeviceStateChange publishes the full device info while the device
-    # is in Init and only then transitions out of it, so a snapshot containing
-    # $state=ready necessarily contains everything published before it.
+    # The retain flag is part of the condition, not decoration. A snapshot subscriber
+    # that connects while the device is still announcing receives the rest of that
+    # announce live, and a live delivery carries retain=0 -- MQTT only sets the flag when
+    # replaying from the store. Accepting such a snapshot yields one where two thirds of
+    # the topics look unretained, and the caller then reports a conforming device as
+    # broken.
+    #
+    # This went unnoticed for as long as it did because 'localhost' cost a two-second
+    # IPv6 connect timeout, which reliably delayed the subscriber past the end of the
+    # announce. The check was passing on an accident of timing. Removing that delay
+    # produced 31 spurious "not retained" failures, which is how it came to light.
+    #
+    # Requiring the flag is also what makes returning the snapshot safe. The device
+    # publishes its full device info while in Init and only then transitions out of it,
+    # so $state arrives last; a subscriber that saw $state *replayed* necessarily
+    # connected after everything before it was already in the store.
     param(
         [string]$Port,
         [string]$Topic,
@@ -586,7 +597,7 @@ function Wait-ForRetainedValue {
         $snapshot = Get-HomieRetainedSnapshot -Port $Port
         if ($snapshot.Contains($Topic)) {
             $seen = $snapshot[$Topic].Payload
-            if ($seen -eq $Expected) {
+            if ($seen -eq $Expected -and $snapshot[$Topic].Retained) {
                 return @{ Ok = $true; Seen = $seen; Snapshot = $snapshot }
             }
         }
