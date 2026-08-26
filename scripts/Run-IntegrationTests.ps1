@@ -501,6 +501,11 @@ function Get-MosquittoTool {
 # of *listening*, where they used to be two of connecting and one of listening.
 $SnapshotSettleSeconds = 3
 
+# Snapshots taken so far, across the whole run. Declared here rather than left to the
+# first ++ because Set-StrictMode -Version Latest makes incrementing an unset variable a
+# terminating error, which would arrive as an 'ERROR' verdict blamed on the device.
+$script:snapshotsTaken = 0
+
 function Get-HomieRetainedSnapshot {
     # What a controller joining *now* would see: the broker's retained store.
     #
@@ -539,6 +544,12 @@ function Get-HomieRetainedSnapshot {
 
     Start-Sleep -Seconds $SnapshotSettleSeconds
     Stop-SmartHomeProcessTree -ProcessId $process.Id
+
+    # Counted, not estimated. Nearly the whole wall clock of a conformance run is spent
+    # in this function, and the poll loops that call it decide at runtime how many times
+    # they need to -- so the number of snapshots a run actually took is the one figure
+    # that explains its duration, and it cannot be read off the code.
+    $script:snapshotsTaken++
 
     # Last message per topic wins -- except that a repeat of the SAME payload only adds
     # to what is known about it.
@@ -652,6 +663,62 @@ function Wait-ForRetainedValue {
     return @{ Ok = $false; Seen = $seen; Snapshot = $snapshot }
 }
 
+# ── Phase timing ──────────────────────────────────────────────────────────────
+# The summary reports one number per test, and that number covers the deploy as well as
+# the measurement -- so when this check went from 59s to 73s between two runs there was
+# nothing to attribute the difference to, only arithmetic about how many snapshots a new
+# step "ought" to cost. That arithmetic was wrong by 14s and could not be checked.
+#
+# What actually varies is how many times a poll loop has to take a 3s snapshot before the
+# device catches up, and that is a runtime fact. Recording seconds and snapshots per phase
+# turns the next unexplained delta into a line someone can point at.
+#
+# Start/stop rather than a scriptblock wrapper: the phases share $snapshot and the
+# failure list, and & { } would run them in a child scope where those assignments are
+# invisible to the phases that follow.
+$script:conformancePhases = @()
+$script:currentPhase = $null
+
+function Start-ConformancePhase {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    Stop-ConformancePhase
+    $script:currentPhase = @{
+        Name             = $Name
+        Started          = Get-Date
+        SnapshotsAtStart = $script:snapshotsTaken
+    }
+}
+
+function Stop-ConformancePhase {
+    if ($null -eq $script:currentPhase) {
+        return
+    }
+
+    $script:conformancePhases += [pscustomobject]@{
+        Name      = $script:currentPhase.Name
+        Seconds   = [math]::Round(((Get-Date) - $script:currentPhase.Started).TotalSeconds, 1)
+        Snapshots = $script:snapshotsTaken - $script:currentPhase.SnapshotsAtStart
+    }
+    $script:currentPhase = $null
+}
+
+function Write-ConformancePhaseBreakdown {
+    # Called from the test loop, not from the check itself: the check returns from four
+    # places (two of them failure paths), and those are exactly the runs whose timing is
+    # worth seeing. One call after it returns covers all four.
+    Stop-ConformancePhase
+
+    if ($script:conformancePhases.Count -eq 0) {
+        return
+    }
+
+    Write-Host ("  phase breakdown ({0}s per snapshot):" -f $SnapshotSettleSeconds) -ForegroundColor DarkGray
+    foreach ($phase in $script:conformancePhases) {
+        Write-Host ("    {0,-22} {1,6}s  {2,2} snapshot(s)" -f $phase.Name, $phase.Seconds, $phase.Snapshots) -ForegroundColor DarkGray
+    }
+}
+
 function Invoke-HomieConformanceCheck {
     # Measures a purpose-built device against the Homie v4 convention, from the
     # broker's side. Every assertion is collected rather than thrown, so one run
@@ -671,7 +738,10 @@ function Invoke-HomieConformanceCheck {
     # reconcile, and an assertion added against the wrong one would have been collected
     # into a list the verdict never reads: a silently passing conformance test.
     $script:conformanceFailures = @()
+    $script:conformancePhases = @()
+    $script:currentPhase = $null
 
+    Start-ConformancePhase -Name 'announce'
     Write-Host ("Waiting up to {0}s for {1} to announce..." -f $Settings.SettleSeconds, $deviceId) -ForegroundColor Cyan
     $ready = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected 'ready' -TimeoutSeconds $Settings.SettleSeconds
     if (-not $ready.Ok) {
@@ -701,6 +771,8 @@ function Invoke-HomieConformanceCheck {
             $script:conformanceFailures += "$Topic is '$($snapshot[$Topic].Payload)', expected '$Expected'"
         }
     }
+
+    Start-ConformancePhase -Name 'attributes'
 
     # ── mandatory device attributes ──────────────────────────────────────────
     Test-Attribute -Topic "$root/`$homie" -Expected '4'
@@ -762,6 +834,7 @@ function Invoke-HomieConformanceCheck {
     }
 
     # ── a controller command is applied and reflected back ───────────────────
+    Start-ConformancePhase -Name '/set round-trip'
     Write-Host "  driving /set commands..." -ForegroundColor DarkGray
     $commands = @{
         'integer-value' = '42'
@@ -828,6 +901,7 @@ function Invoke-HomieConformanceCheck {
     }
 
     # ── the lifecycle states a device can be driven into ─────────────────────
+    Start-ConformancePhase -Name 'lifecycle'
     Write-Host "  driving `$state through alert, sleeping and a refused transition..." -ForegroundColor DarkGray
     # ready -> alert -> ready -> sleeping -> ready, with the one transition the
     # convention's own state machine forbids asked for in the middle. alert may only
@@ -881,6 +955,7 @@ function Invoke-HomieConformanceCheck {
     }
 
     # ── a replaced broker gets the whole announcement again ──────────────────
+    Start-ConformancePhase -Name 're-announce'
     Write-Host "  replacing the broker to check the re-announce..." -ForegroundColor DarkGray
     try {
         Restart-SuiteBroker -Port $Port -SettleSeconds 5
@@ -988,6 +1063,9 @@ try {
         Write-Host ('=' * 69)
 
         $testStarted = Get-Date
+        # Always defined, so the result object below can read it on every path -- including
+        # the one where the deploy itself is what threw.
+        $deploySeconds = 0
         $outcome = $null
         $detail = $null
 
@@ -1000,6 +1078,12 @@ try {
             # terminating error. One used to sit here and could never run.
             & $deployScript -Project (Get-TestProjectPath -TestName $testName) -Configuration $Configuration
 
+            # Timed apart from the measurement that follows. Deploy-ToDevice.ps1 always
+            # /t:Rebuild's, so this is a full build plus a flash and swings by tens of
+            # seconds with nothing to do with the test -- folded into one number, it is
+            # indistinguishable from the test getting slower.
+            $deploySeconds = [int]((Get-Date) - $testStarted).TotalSeconds
+
             Write-Host ""
 
             # ── Host-decided ──────────────────────────────────────────────────
@@ -1010,6 +1094,7 @@ try {
             $verdict = $null
             if ($settings.Kind -eq 'HomieConformance') {
                 $verdict = Invoke-HomieConformanceCheck -Settings $settings -Port $mqttPort
+                Write-ConformancePhaseBreakdown
             }
             elseif ($settings.Kind -eq 'BrokerOutage') {
                 $verdict = Invoke-BrokerOutageCheck -Settings $settings -Port $mqttPort
@@ -1100,11 +1185,12 @@ try {
         }
 
         $results += [pscustomobject]@{
-            Test    = $testName
-            Outcome = $outcome
-            Detail  = $detail
-            Log     = if (Test-Path $logFile) { $logFile } else { $null }
-            Seconds = [int]((Get-Date) - $testStarted).TotalSeconds
+            Test          = $testName
+            Outcome       = $outcome
+            Detail        = $detail
+            Log           = if (Test-Path $logFile) { $logFile } else { $null }
+            Seconds       = [int]((Get-Date) - $testStarted).TotalSeconds
+            DeploySeconds = $deploySeconds
         }
 
         $color = if ($outcome -eq 'PASS') { 'Green' } else { 'Red' }
@@ -1132,12 +1218,18 @@ Write-Host ('=' * 69)
 Write-Host "Integration test summary" -ForegroundColor Cyan
 Write-Host ('=' * 69)
 
+# Total, then how much of it was the deploy. A test that "got slower" is usually a build
+# that did, and the two used to be one number -- which is how a 14s swing on
+# HomieClientCheck came to be attributed to the check itself.
 foreach ($result in $results) {
     $color = if ($result.Outcome -eq 'PASS') { 'Green' } else { 'Red' }
-    Write-Host ("  {0,-20} {1,-12} {2,5}s  {3}" -f $result.Test, $result.Outcome, $result.Seconds, $result.Detail) -ForegroundColor $color
+    $timing = "{0}s ({1}s deploy)" -f $result.Seconds, $result.DeploySeconds
+    Write-Host ("  {0,-20} {1,-12} {2,-16} {3}" -f $result.Test, $result.Outcome, $timing, $result.Detail) -ForegroundColor $color
 }
 
-Write-Host ("  {0,-20} {1,-12} {2,5}s" -f 'TOTAL', '', (($results | Measure-Object -Property Seconds -Sum).Sum)) -ForegroundColor DarkGray
+$totalSeconds = ($results | Measure-Object -Property Seconds -Sum).Sum
+$totalDeploySeconds = ($results | Measure-Object -Property DeploySeconds -Sum).Sum
+Write-Host ("  {0,-20} {1,-12} {2,-16}" -f 'TOTAL', '', ("{0}s ({1}s deploy)" -f $totalSeconds, $totalDeploySeconds)) -ForegroundColor DarkGray
 
 $failed = @($results | Where-Object { $_.Outcome -ne 'PASS' })
 

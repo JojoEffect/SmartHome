@@ -49,6 +49,14 @@ Reading the result:
 - **exit 1** — the summary names each non-passing test and prints its captured device log path.
   Start there.
 
+Reading the timing: each summary line is `<total>s (<deploy>s deploy)`. The deploy is a full
+`/t:Rebuild` plus a flash and swings by tens of seconds independently of the test, so a run that
+looks slower is usually a build that was — compare the *difference*, not the total.
+`HomieConformance` additionally prints a per-phase breakdown (announce, attributes, `/set`
+round-trip, lifecycle, re-announce) with the number of 3s retained-store snapshots each phase
+took. That count is decided at runtime by how many polls a step needs, so it is the figure that
+explains a conformance run's duration; nothing about it is derivable from reading the script.
+
 Outcomes other than PASS/FAIL:
 
 - `NO-RESULT` — no marker within the capture window. The app crashed before reporting, or wasn't
