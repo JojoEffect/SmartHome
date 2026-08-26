@@ -695,9 +695,15 @@ function Stop-ConformancePhase {
         return
     }
 
+    # Rendered here, invariant, rather than left as a double for the -f below to format.
+    # These lines get pasted into pull requests and issues, and -f formats in the host's
+    # culture -- on this machine that produced '16,7s', which reads as a thousands
+    # separator to everyone who wasn't sitting at the machine.
+    $elapsed = ((Get-Date) - $script:currentPhase.Started).TotalSeconds
+
     $script:conformancePhases += [pscustomobject]@{
         Name      = $script:currentPhase.Name
-        Seconds   = [math]::Round(((Get-Date) - $script:currentPhase.Started).TotalSeconds, 1)
+        Seconds   = $elapsed.ToString('0.0', [cultureinfo]::InvariantCulture)
         Snapshots = $script:snapshotsTaken - $script:currentPhase.SnapshotsAtStart
     }
     $script:currentPhase = $null
