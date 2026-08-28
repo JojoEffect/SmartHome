@@ -182,7 +182,7 @@ device owns a connection rather than being one, and exposing `Publish`/`Subscrib
 let an app publish an attribute non-retained or `$state` out of order. The `Device` model (built
 with `HomieDeviceBuilder`) says what the device *is*; `IHomieClient` is what you *do* with it.
 
-Two things to know when writing an actuator (Irrigation, Oven):
+Three things to know when writing an actuator (Irrigation, Oven):
 
 - Act on `IHomieClient.OnCommand`, not on `property.OnUpdate`. The property event fires both
   when a controller sets a value and when the device updates its own, and cannot tell them
@@ -190,6 +190,13 @@ Two things to know when writing an actuator (Irrigation, Oven):
 - Settable properties are subscribed on `homie/[device]/[node]/[property]/set`, as the spec
   requires. Until 2026-08-21 the code subscribed to the property *value* topic instead, so
   commands were never received and the device re-consumed its own retained publishes.
+- Reflect the outcome, not the command. `HomieClient` publishes a `/set` payload onto the
+  property before `OnCommand` runs, which is right for an ordinary property and wrong for one
+  whose value is a *request* the device can turn down — an illegal `$state` transition, an out
+  of range setpoint, a relay that failed to close. Publish the real value over it once the
+  command has been applied or refused, or the retained store advertises a state the device is
+  not in, to every controller that connects afterwards. `HomieClientCheck` does this for its
+  `lifecycle` property and the conformance suite asserts it.
 
 `HomieClient` owns its MQTT session and must: Homie v4 requires the connection to carry a last
 will setting `homie/[device-id]/$state` to `lost`, and a will can only be declared in CONNECT.
@@ -235,8 +242,9 @@ The suite runs three kinds of test, and the kind is declared per entry in
 - **`HomieConformance`** — the host measures a purpose-built device against the Homie v4
   convention: mandatory attributes and their retained flags, one property of every datatype with
   its `$format`/`$unit`/`$settable`/`$retained`, a `/set` command applied and reflected back, the
-  `alert` and `sleeping` states driven through a control property, and a full re-announce after
-  the broker is replaced. `HomieClientCheck` is this kind. Retained-ness is read from a *fresh*
+  `alert` and `sleeping` states driven through a control property, a refused transition that
+  must not be advertised as if it had happened, and a full re-announce after the broker is
+  replaced. `HomieClientCheck` is this kind. Retained-ness is read from a *fresh*
   subscriber (`mosquitto_sub -F '%t %r %p'`), because MQTT only sets the retain flag when
   replaying from the store — a live retained publish arrives with the flag clear.
 - **`BrokerOutage`** — the host decides. The device publishes a heartbeat and subscribes to an

@@ -501,6 +501,11 @@ function Get-MosquittoTool {
 # of *listening*, where they used to be two of connecting and one of listening.
 $SnapshotSettleSeconds = 3
 
+# Snapshots taken so far, across the whole run. Declared here rather than left to the
+# first ++ because Set-StrictMode -Version Latest makes incrementing an unset variable a
+# terminating error, which would arrive as an 'ERROR' verdict blamed on the device.
+$script:snapshotsTaken = 0
+
 function Get-HomieRetainedSnapshot {
     # What a controller joining *now* would see: the broker's retained store.
     #
@@ -522,33 +527,135 @@ function Get-HomieRetainedSnapshot {
         [string]$Port
     )
 
+    $capture = Start-HomieCapture -Port $Port
+    return ConvertTo-HomieSnapshot -Lines (Stop-HomieCapture -Capture $capture)
+}
+
+function Start-HomieCapture {
+    # Opens the fresh-subscriber window that Get-HomieRetainedSnapshot measures through,
+    # without closing it. Split out so a caller can publish *inside* the window: the
+    # refused-transition step has to observe messages the device emits in response to a
+    # command, and a window opened after the command would miss them.
+    #
+    # Callers that only want the settled result should use Get-HomieRetainedSnapshot,
+    # which is this plus Stop-HomieCapture plus ConvertTo-HomieSnapshot.
+    param(
+        [string]$Port,
+
+        # Block until the subscriber has actually connected, for a caller that publishes
+        # inside the window. Start-Process returns as soon as cmd.exe exists, well before
+        # mosquitto_sub has a session, so a publish issued immediately after this returns
+        # can reach the broker first and the response it triggers is then missed entirely
+        # -- which would read as "the command never arrived" and fail the refused step on
+        # a healthy device.
+        #
+        # A subscriber to homie/# gets the whole retained store the moment it subscribes,
+        # so the first byte in the output file is the connection being live. Callers that
+        # only want the settled result do not need this: their 3s sleep starts before the
+        # connection and is a window, not a measurement of anything published inside it.
+        [int]$WaitForConnectSeconds = 0
+    )
+
     $out = Get-SmartHomeDevEnvPath -Port $Port -Kind Snapshot
     Remove-Item -Path $out -Force -ErrorAction SilentlyContinue
 
     $sub = Get-MosquittoTool -Name 'mosquitto_sub.exe'
 
     # Arguments come from Common.ps1, not from a second copy of them here. The parser
-    # below depends on the exact '%t %r %p' layout, and that layout is chosen and
-    # explained in Get-SmartHomeSubscriberArguments -- spelling it out again meant a
-    # one-line change in the file that owns it would silently break this reader.
+    # depends on the exact '%t %r %p' layout, and that layout is chosen and explained in
+    # Get-SmartHomeSubscriberArguments -- spelling it out again meant a one-line change in
+    # the file that owns it would silently break this reader.
     # Quoting idiom matches Start-DevEnv.ps1's subscriber launch.
     $subscriberArgs = (Get-SmartHomeSubscriberArguments -Port $Port |
         ForEach-Object { if ($_ -match '[\s/#]') { '"{0}"' -f $_ } else { $_ } }) -join ' '
     $command = '/c ""{0}" {1} > "{2}" 2>&1"' -f $sub, $subscriberArgs, $out
     $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
 
-    Start-Sleep -Seconds $SnapshotSettleSeconds
-    Stop-SmartHomeProcessTree -ProcessId $process.Id
+    if ($WaitForConnectSeconds -gt 0) {
+        $connectDeadline = (Get-Date).AddSeconds($WaitForConnectSeconds)
+        while ((Get-Date) -lt $connectDeadline) {
+            $captured = Get-Item -Path $out -ErrorAction SilentlyContinue
+            if ($null -ne $captured -and $captured.Length -gt 0) {
+                break
+            }
 
+            Start-Sleep -Milliseconds 100
+        }
+    }
+
+    return @{ ProcessId = $process.Id; Path = $out }
+}
+
+function Stop-HomieCapture {
+    # Closes the window and returns every line it caught, in arrival order.
+    param(
+        [hashtable]$Capture,
+
+        # Time to leave the window open before closing it. Defaults to the same settle
+        # used by a plain snapshot, so a caller that publishes inside the window gets the
+        # same amount of time for the response as one that publishes before it.
+        [int]$SettleSeconds = $SnapshotSettleSeconds
+    )
+
+    # Counted here rather than where the lines are parsed: this is the function that
+    # spends the time, and one closed window is one snapshot however many ways its lines
+    # are later read. Nearly the whole wall clock of a conformance run is these windows,
+    # and the poll loops decide at runtime how many they need -- so the count is the one
+    # figure that explains a run's duration, and it cannot be read off the code.
+    $script:snapshotsTaken++
+
+    Start-Sleep -Seconds $SettleSeconds
+    Stop-SmartHomeProcessTree -ProcessId $Capture.ProcessId
+
+    return @(Get-Content -Path $Capture.Path -ErrorAction SilentlyContinue)
+}
+
+function ConvertTo-HomieSnapshot {
+    # Collapses captured lines to one entry per topic. Kept apart from the capture so the
+    # same lines can be read twice: as a settled per-topic view, and as the ordered
+    # sequence that view deliberately throws away.
+    param(
+        [string[]]$Lines
+    )
+
+    # Last message per topic wins -- except that a repeat of the SAME payload only adds
+    # to what is known about it.
+    #
+    # A QoS-1 publish whose PUBACK is late gets retransmitted: M2Mqtt resends an in-flight
+    # message with DupFlag set, up to MqttSettings.MaximumAttemptsRetry (3). So a snapshot
+    # can hold a live duplicate of a value the broker also replayed from its store,
+    # arriving after the replayed copy. Overwriting on payload equality threw away the
+    # retain flag that replay had just proved, and Test-Attribute reported "not retained"
+    # for three attributes of 53 that plainly were.
+    #
+    # Measured, not guessed: a 40s capture of one re-announce holds a retransmitted tail
+    # of the last property's attributes, and counter values arriving out of order (146
+    # after 147) -- which nothing but retransmission explains.
+    #
+    # A DIFFERENT payload still replaces both fields. That is what keeps the flag
+    # meaningful: a value delivered only live must not inherit the retained-ness of the
+    # value it replaced, which is exactly the bug Wait-ForRetainedValue's flag check
+    # exists to catch.
     $snapshot = @{}
-    foreach ($line in @(Get-Content -Path $out -ErrorAction SilentlyContinue)) {
+    foreach ($line in $Lines) {
         # "<topic> <0|1> <payload>", and the payload may itself contain spaces.
         $match = [regex]::Match($line, '^(\S+)\s+([01])\s?(.*)$')
-        if ($match.Success) {
-            $snapshot[$match.Groups[1].Value] = @{
-                Retained = $match.Groups[2].Value -eq '1'
-                Payload  = $match.Groups[3].Value
-            }
+        if (-not $match.Success) {
+            continue
+        }
+
+        $topic = $match.Groups[1].Value
+        $retained = $match.Groups[2].Value -eq '1'
+        $payload = $match.Groups[3].Value
+
+        if ($snapshot.Contains($topic) -and $snapshot[$topic].Payload -eq $payload) {
+            $snapshot[$topic].Retained = $snapshot[$topic].Retained -or $retained
+            continue
+        }
+
+        $snapshot[$topic] = @{
+            Retained = $retained
+            Payload  = $payload
         }
     }
 
@@ -603,7 +710,16 @@ function Wait-ForRetainedValue {
         # device writes within milliseconds of a command. Nothing is lost by accepting the
         # live delivery there: the payload is the same, and $state's retained-ness is
         # already asserted once against the announce snapshot.
-        [bool]$RequireRetained = $true
+        [bool]$RequireRetained = $true,
+
+        # A controller command to (re)publish at the top of every poll round, for the
+        # reason set out at the /set round-trip loop: a /set is non-retained, so one that
+        # arrives while the device is not subscribed is dropped and no amount of further
+        # polling can recover it. Callers waiting on something the device produces by
+        # itself -- the announce, the re-announce -- pass neither of these and nothing is
+        # published.
+        [string]$RepublishTopic,
+        [string]$RepublishPayload
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -611,6 +727,10 @@ function Wait-ForRetainedValue {
     $snapshot = @{}
 
     while ((Get-Date) -lt $deadline) {
+        if ($RepublishTopic) {
+            Publish-HomieCommand -Port $Port -Topic $RepublishTopic -Payload $RepublishPayload
+        }
+
         $snapshot = Get-HomieRetainedSnapshot -Port $Port
         if ($snapshot.Contains($Topic)) {
             $seen = $snapshot[$Topic].Payload
@@ -621,6 +741,68 @@ function Wait-ForRetainedValue {
     }
 
     return @{ Ok = $false; Seen = $seen; Snapshot = $snapshot }
+}
+
+# ── Phase timing ──────────────────────────────────────────────────────────────
+# The summary reports one number per test, and that number covers the deploy as well as
+# the measurement -- so when this check went from 59s to 73s between two runs there was
+# nothing to attribute the difference to, only arithmetic about how many snapshots a new
+# step "ought" to cost. That arithmetic was wrong by 14s and could not be checked.
+#
+# What actually varies is how many times a poll loop has to take a 3s snapshot before the
+# device catches up, and that is a runtime fact. Recording seconds and snapshots per phase
+# turns the next unexplained delta into a line someone can point at.
+#
+# Start/stop rather than a scriptblock wrapper: the phases share $snapshot and the
+# failure list, and & { } would run them in a child scope where those assignments are
+# invisible to the phases that follow.
+$script:conformancePhases = @()
+$script:currentPhase = $null
+
+function Start-ConformancePhase {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    Stop-ConformancePhase
+    $script:currentPhase = @{
+        Name             = $Name
+        Started          = Get-Date
+        SnapshotsAtStart = $script:snapshotsTaken
+    }
+}
+
+function Stop-ConformancePhase {
+    if ($null -eq $script:currentPhase) {
+        return
+    }
+
+    # Rendered here, invariant, rather than left as a double for the -f below to format.
+    # These lines get pasted into pull requests and issues, and -f formats in the host's
+    # culture -- on this machine that produced '16,7s', which reads as a thousands
+    # separator to everyone who wasn't sitting at the machine.
+    $elapsed = ((Get-Date) - $script:currentPhase.Started).TotalSeconds
+
+    $script:conformancePhases += [pscustomobject]@{
+        Name      = $script:currentPhase.Name
+        Seconds   = $elapsed.ToString('0.0', [cultureinfo]::InvariantCulture)
+        Snapshots = $script:snapshotsTaken - $script:currentPhase.SnapshotsAtStart
+    }
+    $script:currentPhase = $null
+}
+
+function Write-ConformancePhaseBreakdown {
+    # Called from the test loop, not from the check itself: the check returns from four
+    # places (two of them failure paths), and those are exactly the runs whose timing is
+    # worth seeing. One call after it returns covers all four.
+    Stop-ConformancePhase
+
+    if ($script:conformancePhases.Count -eq 0) {
+        return
+    }
+
+    Write-Host ("  phase breakdown ({0}s per snapshot):" -f $SnapshotSettleSeconds) -ForegroundColor DarkGray
+    foreach ($phase in $script:conformancePhases) {
+        Write-Host ("    {0,-22} {1,6}s  {2,2} snapshot(s)" -f $phase.Name, $phase.Seconds, $phase.Snapshots) -ForegroundColor DarkGray
+    }
 }
 
 function Invoke-HomieConformanceCheck {
@@ -642,7 +824,10 @@ function Invoke-HomieConformanceCheck {
     # reconcile, and an assertion added against the wrong one would have been collected
     # into a list the verdict never reads: a silently passing conformance test.
     $script:conformanceFailures = @()
+    $script:conformancePhases = @()
+    $script:currentPhase = $null
 
+    Start-ConformancePhase -Name 'announce'
     Write-Host ("Waiting up to {0}s for {1} to announce..." -f $Settings.SettleSeconds, $deviceId) -ForegroundColor Cyan
     $ready = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected 'ready' -TimeoutSeconds $Settings.SettleSeconds
     if (-not $ready.Ok) {
@@ -672,6 +857,8 @@ function Invoke-HomieConformanceCheck {
             $script:conformanceFailures += "$Topic is '$($snapshot[$Topic].Payload)', expected '$Expected'"
         }
     }
+
+    Start-ConformancePhase -Name 'attributes'
 
     # ── mandatory device attributes ──────────────────────────────────────────
     Test-Attribute -Topic "$root/`$homie" -Expected '4'
@@ -714,6 +901,11 @@ function Invoke-HomieConformanceCheck {
     Test-Attribute -Topic "$node/integer-value/`$format" -Expected '0:100'
     Test-Attribute -Topic "$node/enum-value/`$format" -Expected 'low,medium,high'
     Test-Attribute -Topic "$node/color-value/`$format" -Expected 'rgb'
+    # Built by HomieClientCheck from the State enum rather than spelled out there, so
+    # that the vocabulary a controller is offered cannot drift from the vocabulary
+    # $state is published in. This assertion is what notices if that derivation breaks.
+    Test-Attribute -Topic "$node/lifecycle/`$format" -Expected 'ready,alert,sleeping'
+    Test-Attribute -Topic "$node/lifecycle/`$settable" -Expected 'true'
     Test-Attribute -Topic "$node/integer-value/`$unit" -Expected '#'
     Test-Attribute -Topic "$node/float-value/`$unit" -AnyValue
 
@@ -728,6 +920,7 @@ function Invoke-HomieConformanceCheck {
     }
 
     # ── a controller command is applied and reflected back ───────────────────
+    Start-ConformancePhase -Name '/set round-trip'
     Write-Host "  driving /set commands..." -ForegroundColor DarkGray
     $commands = @{
         'integer-value' = '42'
@@ -750,10 +943,6 @@ function Invoke-HomieConformanceCheck {
         'float-value' = '21.50'
     }
 
-    foreach ($property in $commands.Keys) {
-        Publish-HomieCommand -Port $Port -Topic "$node/$property/set" -Payload $commands[$property]
-    }
-
     # One snapshot per round, not one per property. Every reflection is checked
     # against the same snapshot, so five properties cost one snapshot instead of
     # five -- the snapshot has to be a fresh subscriber (retain flags are only set on
@@ -762,7 +951,33 @@ function Invoke-HomieConformanceCheck {
     $lastSeen = @{}
     $deadline = (Get-Date).AddSeconds($Settings.CommandTimeoutSeconds)
 
+    # The commands are published at the top of every round, not once before the loop.
+    #
+    # A /set is non-retained, as the convention requires of a controller, so one that
+    # reaches the broker while the device is not yet subscribed is dropped outright --
+    # there is nothing left in the store for the device to pick up when it does
+    # subscribe. Published once, that single lost message becomes the full
+    # CommandTimeoutSeconds of polling for an echo that can never arrive, and five
+    # conformance failures against a device that is working correctly.
+    #
+    # Measured, not hypothetical: 1 run in 8 on 2026-08-26, and it was the only run of
+    # the eight whose announce wait was satisfied by its first snapshot rather than its
+    # third -- i.e. the only one that reached this loop early. The /set phase then spent
+    # 33.4s over 10 snapshots and reported all five properties still holding their boot
+    # values.
+    #
+    # Retrying is the only fix available at this layer. MQTT gives a publisher no signal
+    # about who is subscribed, and $state=ready is the device's claim about itself, not
+    # about the broker's routing table -- so the host cannot wait for the condition it
+    # actually needs. On a healthy run this costs nothing: the first round succeeds and
+    # nothing is ever re-sent. Only still-pending properties are republished, and a
+    # repeated command is idempotent -- the device applies the same value again and
+    # publishes back the same reflection.
     while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        foreach ($property in $pending) {
+            Publish-HomieCommand -Port $Port -Topic "$node/$property/set" -Payload $commands[$property]
+        }
+
         $snapshot = Get-HomieRetainedSnapshot -Port $Port
         $stillPending = @()
 
@@ -794,23 +1009,113 @@ function Invoke-HomieConformanceCheck {
     }
 
     # ── the lifecycle states a device can be driven into ─────────────────────
-    Write-Host "  driving `$state through alert and sleeping..." -ForegroundColor DarkGray
-    # ready -> alert -> ready -> sleeping -> ready. Not ready -> alert -> sleeping:
-    # alert may only return to ready (or disconnect), so that would be asking the
-    # device for a transition the convention's own state machine forbids.
-    foreach ($state in 'alert', 'ready', 'sleeping', 'ready') {
-        Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $state
+    Start-ConformancePhase -Name 'lifecycle'
+    Write-Host "  driving `$state through alert, sleeping and a refused transition..." -ForegroundColor DarkGray
+    # ready -> alert -> ready -> sleeping -> ready, with the one transition the
+    # convention's own state machine forbids asked for in the middle. alert may only
+    # return to ready (or disconnect), so alert -> sleeping must be refused -- and a
+    # device that advertises it as done anyway is the defect the Refused step measures.
+    $lifecycleSteps = @(
+        @{ Command = 'alert';    Expect = 'alert';    Refused = $false }
+        @{ Command = 'sleeping'; Expect = 'alert';    Refused = $true  }
+        @{ Command = 'ready';    Expect = 'ready';    Refused = $false }
+        @{ Command = 'sleeping'; Expect = 'sleeping'; Refused = $false }
+        @{ Command = 'ready';    Expect = 'ready';    Refused = $false }
+    )
+
+    foreach ($step in $lifecycleSteps) {
+        if ($step.Refused) {
+            # Nothing to wait for here -- the assertion is that nothing changed -- so one
+            # capture window IS the measurement rather than a poll for it, and it carries
+            # both topics as well as the sequence on the property.
+            #
+            # HomieClient reflects a /set payload onto its property before the app ever
+            # sees it: right for an ordinary property, wrong for one whose value is a
+            # request that can be turned down. Uncorrected, the retained store ends up
+            # advertising matrix/lifecycle=sleeping beside $state=alert, and every
+            # controller that connects afterwards reads that contradiction out of the
+            # store rather than seeing it go by.
+            #
+            # The window is opened BEFORE the command and closed after, rather than
+            # taken afterwards, because this step needs the messages the device emits in
+            # response -- not just where things settled.
+            #
+            # Settling on 'alert' is not by itself evidence of a refusal. A /set is
+            # non-retained, so a command dropped because the device was not subscribed
+            # leaves $state and the property exactly as a refusal does, and this step
+            # cannot retry its way past that the way the polls around it now do: its
+            # whole assertion is that nothing changes, so there is no echo to wait on.
+            # Read only from a settled snapshot, a lost command passes as a refusal.
+            #
+            # What separates them is on the wire. HomieClient reflects the /set payload
+            # onto the property before the app sees it, and HomieClientCheck then
+            # publishes the device's real state over that reflection -- so a command that
+            # arrived and was refused puts 'sleeping' and then 'alert' on the property
+            # topic, in that order. A command that never arrived puts neither.
+            #
+            # That sequence is also the behaviour this test exists to guard: it is the
+            # correction itself, observed rather than inferred from where the store ended
+            # up.
+            $capture = Start-HomieCapture -Port $Port -WaitForConnectSeconds 5
+            Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $step.Command
+            $lines = Stop-HomieCapture -Capture $capture
+            $refused = ConvertTo-HomieSnapshot -Lines $lines
+
+            $stateAfter = if ($refused.Contains("$root/`$state")) { $refused["$root/`$state"].Payload } else { $null }
+            $lifecycleAfter = if ($refused.Contains("$node/lifecycle")) { $refused["$node/lifecycle"].Payload } else { $null }
+
+            if ($stateAfter -ne $step.Expect) {
+                $script:conformanceFailures += "forbidden $($step.Expect) -> $($step.Command) transition was applied (`$state is '$stateAfter')"
+            }
+
+            if ($lifecycleAfter -ne $step.Expect) {
+                $script:conformanceFailures += "refused '$($step.Command)' left $nodeId/lifecycle advertising '$lifecycleAfter' while `$state is '$stateAfter'"
+            }
+
+            # Payloads on the property topic, in arrival order, retained replay dropped:
+            # the replayed copy is the value from before this command and says nothing
+            # about whether it arrived.
+            $lifecyclePayloads = @()
+            foreach ($line in $lines) {
+                $match = [regex]::Match($line, '^(\S+)\s+([01])\s?(.*)$')
+                if ($match.Success -and $match.Groups[1].Value -eq "$node/lifecycle" -and $match.Groups[2].Value -eq '0') {
+                    $lifecyclePayloads += $match.Groups[3].Value
+                }
+            }
+
+            $reflected = [array]::IndexOf($lifecyclePayloads, $step.Command)
+            $corrected = [array]::IndexOf($lifecyclePayloads, $step.Expect)
+
+            if ($reflected -lt 0) {
+                $script:conformanceFailures += "refused '$($step.Command)' never reached $nodeId/lifecycle -- the command was lost, so nothing about the refusal was measured (saw: $($lifecyclePayloads -join ', '))"
+            }
+            elseif ($corrected -lt 0) {
+                $script:conformanceFailures += "device left the reflected '$($step.Command)' on $nodeId/lifecycle and never published '$($step.Expect)' over it"
+            }
+            elseif ($corrected -lt $reflected) {
+                $script:conformanceFailures += "$nodeId/lifecycle published '$($step.Expect)' before the reflected '$($step.Command)', so the correction did not overwrite it (saw: $($lifecyclePayloads -join ', '))"
+            }
+
+            continue
+        }
+
+        # No publish here: the wait republishes the command itself at the top of every
+        # round, so a command dropped because the device was not subscribed yet is
+        # retried instead of turning into a timeout. Same reasoning as the /set
+        # round-trip loop above.
+        #
         # -RequireRetained $false: this reads Ok/Seen only and discards the snapshot. The
         # device writes $state within milliseconds of the command, so insisting on a
         # replayed copy would spend a second full snapshot re-observing the same value,
         # four times per run.
-        $reached = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected $state -TimeoutSeconds $Settings.CommandTimeoutSeconds -RequireRetained $false
+        $reached = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected $step.Expect -TimeoutSeconds $Settings.CommandTimeoutSeconds -RequireRetained $false -RepublishTopic "$node/lifecycle/set" -RepublishPayload $step.Command
         if (-not $reached.Ok) {
-            $script:conformanceFailures += "device did not reach `$state='$state' on command (saw '$($reached.Seen)')"
+            $script:conformanceFailures += "device did not reach `$state='$($step.Expect)' on '$($step.Command)' (saw '$($reached.Seen)')"
         }
     }
 
     # ── a replaced broker gets the whole announcement again ──────────────────
+    Start-ConformancePhase -Name 're-announce'
     Write-Host "  replacing the broker to check the re-announce..." -ForegroundColor DarkGray
     try {
         Restart-SuiteBroker -Port $Port -SettleSeconds 5
@@ -841,7 +1146,7 @@ function Invoke-HomieConformanceCheck {
 
     return @{
         Outcome = 'PASS'
-        Detail  = "attributes, datatypes, retained flags, /set round-trip, alert/sleeping and re-announce all conform"
+        Detail  = "attributes, datatypes, retained flags, /set round-trip, alert/sleeping, a refused transition and re-announce all conform"
     }
 }
 
@@ -918,6 +1223,9 @@ try {
         Write-Host ('=' * 69)
 
         $testStarted = Get-Date
+        # Always defined, so the result object below can read it on every path -- including
+        # the one where the deploy itself is what threw.
+        $deploySeconds = 0
         $outcome = $null
         $detail = $null
 
@@ -930,6 +1238,12 @@ try {
             # terminating error. One used to sit here and could never run.
             & $deployScript -Project (Get-TestProjectPath -TestName $testName) -Configuration $Configuration
 
+            # Timed apart from the measurement that follows. Deploy-ToDevice.ps1 always
+            # /t:Rebuild's, so this is a full build plus a flash and swings by tens of
+            # seconds with nothing to do with the test -- folded into one number, it is
+            # indistinguishable from the test getting slower.
+            $deploySeconds = [int]((Get-Date) - $testStarted).TotalSeconds
+
             Write-Host ""
 
             # ── Host-decided ──────────────────────────────────────────────────
@@ -940,6 +1254,7 @@ try {
             $verdict = $null
             if ($settings.Kind -eq 'HomieConformance') {
                 $verdict = Invoke-HomieConformanceCheck -Settings $settings -Port $mqttPort
+                Write-ConformancePhaseBreakdown
             }
             elseif ($settings.Kind -eq 'BrokerOutage') {
                 $verdict = Invoke-BrokerOutageCheck -Settings $settings -Port $mqttPort
@@ -1030,11 +1345,12 @@ try {
         }
 
         $results += [pscustomobject]@{
-            Test    = $testName
-            Outcome = $outcome
-            Detail  = $detail
-            Log     = if (Test-Path $logFile) { $logFile } else { $null }
-            Seconds = [int]((Get-Date) - $testStarted).TotalSeconds
+            Test          = $testName
+            Outcome       = $outcome
+            Detail        = $detail
+            Log           = if (Test-Path $logFile) { $logFile } else { $null }
+            Seconds       = [int]((Get-Date) - $testStarted).TotalSeconds
+            DeploySeconds = $deploySeconds
         }
 
         $color = if ($outcome -eq 'PASS') { 'Green' } else { 'Red' }
@@ -1062,12 +1378,18 @@ Write-Host ('=' * 69)
 Write-Host "Integration test summary" -ForegroundColor Cyan
 Write-Host ('=' * 69)
 
+# Total, then how much of it was the deploy. A test that "got slower" is usually a build
+# that did, and the two used to be one number -- which is how a 14s swing on
+# HomieClientCheck came to be attributed to the check itself.
 foreach ($result in $results) {
     $color = if ($result.Outcome -eq 'PASS') { 'Green' } else { 'Red' }
-    Write-Host ("  {0,-20} {1,-12} {2,5}s  {3}" -f $result.Test, $result.Outcome, $result.Seconds, $result.Detail) -ForegroundColor $color
+    $timing = "{0}s ({1}s deploy)" -f $result.Seconds, $result.DeploySeconds
+    Write-Host ("  {0,-20} {1,-12} {2,-16} {3}" -f $result.Test, $result.Outcome, $timing, $result.Detail) -ForegroundColor $color
 }
 
-Write-Host ("  {0,-20} {1,-12} {2,5}s" -f 'TOTAL', '', (($results | Measure-Object -Property Seconds -Sum).Sum)) -ForegroundColor DarkGray
+$totalSeconds = ($results | Measure-Object -Property Seconds -Sum).Sum
+$totalDeploySeconds = ($results | Measure-Object -Property DeploySeconds -Sum).Sum
+Write-Host ("  {0,-20} {1,-12} {2,-16}" -f 'TOTAL', '', ("{0}s ({1}s deploy)" -f $totalSeconds, $totalDeploySeconds)) -ForegroundColor DarkGray
 
 $failed = @($results | Where-Object { $_.Outcome -ne 'PASS' })
 

@@ -16,8 +16,9 @@ Run `scripts\Run-IntegrationTests.ps1` — one call covers every project under
 - **`HomieConformance`** (HomieClientCheck) — the host measures a purpose-built device against
   the Homie v4 convention: mandatory attributes and their retained flags, one property of every
   datatype with its `$format`/`$unit`/`$settable`/`$retained`, a `/set` command applied and
-  reflected back, the `alert` and `sleeping` states driven through a control property, and a full
-  re-announce after the broker is replaced. It emits no `[ITEST]` marker by design — the evidence
+  reflected back, the `alert` and `sleeping` states driven through a control property, a refused
+  transition that must not be advertised as if it had happened, and a full re-announce after the
+  broker is replaced. It emits no `[ITEST]` marker by design — the evidence
   is what lands on the broker.
 
 Both host-decided kinds (`BrokerOutage`, `HomieConformance`) take the broker away and put a fresh
@@ -47,6 +48,14 @@ Reading the result:
 - **exit 0** — every test passed. The summary is the whole story; nothing further to look at.
 - **exit 1** — the summary names each non-passing test and prints its captured device log path.
   Start there.
+
+Reading the timing: each summary line is `<total>s (<deploy>s deploy)`. The deploy is a full
+`/t:Rebuild` plus a flash and swings by tens of seconds independently of the test, so a run that
+looks slower is usually a build that was — compare the *difference*, not the total.
+`HomieConformance` additionally prints a per-phase breakdown (announce, attributes, `/set`
+round-trip, lifecycle, re-announce) with the number of 3s retained-store snapshots each phase
+took. That count is decided at runtime by how many polls a step needs, so it is the figure that
+explains a conformance run's duration; nothing about it is derivable from reading the script.
 
 Outcomes other than PASS/FAIL:
 
