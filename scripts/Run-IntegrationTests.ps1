@@ -643,7 +643,16 @@ function Wait-ForRetainedValue {
         # device writes within milliseconds of a command. Nothing is lost by accepting the
         # live delivery there: the payload is the same, and $state's retained-ness is
         # already asserted once against the announce snapshot.
-        [bool]$RequireRetained = $true
+        [bool]$RequireRetained = $true,
+
+        # A controller command to (re)publish at the top of every poll round, for the
+        # reason set out at the /set round-trip loop: a /set is non-retained, so one that
+        # arrives while the device is not subscribed is dropped and no amount of further
+        # polling can recover it. Callers waiting on something the device produces by
+        # itself -- the announce, the re-announce -- pass neither of these and nothing is
+        # published.
+        [string]$RepublishTopic,
+        [string]$RepublishPayload
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -651,6 +660,10 @@ function Wait-ForRetainedValue {
     $snapshot = @{}
 
     while ((Get-Date) -lt $deadline) {
+        if ($RepublishTopic) {
+            Publish-HomieCommand -Port $Port -Topic $RepublishTopic -Payload $RepublishPayload
+        }
+
         $snapshot = Get-HomieRetainedSnapshot -Port $Port
         if ($snapshot.Contains($Topic)) {
             $seen = $snapshot[$Topic].Payload
@@ -863,10 +876,6 @@ function Invoke-HomieConformanceCheck {
         'float-value' = '21.50'
     }
 
-    foreach ($property in $commands.Keys) {
-        Publish-HomieCommand -Port $Port -Topic "$node/$property/set" -Payload $commands[$property]
-    }
-
     # One snapshot per round, not one per property. Every reflection is checked
     # against the same snapshot, so five properties cost one snapshot instead of
     # five -- the snapshot has to be a fresh subscriber (retain flags are only set on
@@ -875,7 +884,33 @@ function Invoke-HomieConformanceCheck {
     $lastSeen = @{}
     $deadline = (Get-Date).AddSeconds($Settings.CommandTimeoutSeconds)
 
+    # The commands are published at the top of every round, not once before the loop.
+    #
+    # A /set is non-retained, as the convention requires of a controller, so one that
+    # reaches the broker while the device is not yet subscribed is dropped outright --
+    # there is nothing left in the store for the device to pick up when it does
+    # subscribe. Published once, that single lost message becomes the full
+    # CommandTimeoutSeconds of polling for an echo that can never arrive, and five
+    # conformance failures against a device that is working correctly.
+    #
+    # Measured, not hypothetical: 1 run in 8 on 2026-08-26, and it was the only run of
+    # the eight whose announce wait was satisfied by its first snapshot rather than its
+    # third -- i.e. the only one that reached this loop early. The /set phase then spent
+    # 33.4s over 10 snapshots and reported all five properties still holding their boot
+    # values.
+    #
+    # Retrying is the only fix available at this layer. MQTT gives a publisher no signal
+    # about who is subscribed, and $state=ready is the device's claim about itself, not
+    # about the broker's routing table -- so the host cannot wait for the condition it
+    # actually needs. On a healthy run this costs nothing: the first round succeeds and
+    # nothing is ever re-sent. Only still-pending properties are republished, and a
+    # repeated command is idempotent -- the device applies the same value again and
+    # publishes back the same reflection.
     while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        foreach ($property in $pending) {
+            Publish-HomieCommand -Port $Port -Topic "$node/$property/set" -Payload $commands[$property]
+        }
+
         $snapshot = Get-HomieRetainedSnapshot -Port $Port
         $stillPending = @()
 
@@ -922,9 +957,8 @@ function Invoke-HomieConformanceCheck {
     )
 
     foreach ($step in $lifecycleSteps) {
-        Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $step.Command
-
         if ($step.Refused) {
+            Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $step.Command
             # Nothing to wait for here -- the assertion is that nothing changed -- so one
             # settled snapshot IS the measurement rather than a poll for it, and it carries
             # both topics.
@@ -935,6 +969,17 @@ function Invoke-HomieConformanceCheck {
             # advertising matrix/lifecycle=sleeping beside $state=alert, and every
             # controller that connects afterwards reads that contradiction out of the
             # store rather than seeing it go by.
+            #
+            # Known limit: this cannot tell a refusal apart from a command that never
+            # arrived. Both leave $state and the property on 'alert', so a dropped /set
+            # passes here rather than failing -- and unlike the polls around it, a single
+            # publish is all this step can do, because the assertion is that nothing
+            # changes and there is no echo to retry until. What keeps it honest for now
+            # is the step before it: reaching 'alert' proves the device was applying /set
+            # on this very topic seconds earlier. Proving arrival outright would mean
+            # asserting the live log shows the library's 'sleeping' reflection being
+            # overwritten by the device's 'alert', which is a different measurement than
+            # this snapshot makes.
             $refused = Get-HomieRetainedSnapshot -Port $Port
             $stateAfter = if ($refused.Contains("$root/`$state")) { $refused["$root/`$state"].Payload } else { $null }
             $lifecycleAfter = if ($refused.Contains("$node/lifecycle")) { $refused["$node/lifecycle"].Payload } else { $null }
@@ -950,11 +995,16 @@ function Invoke-HomieConformanceCheck {
             continue
         }
 
+        # No publish here: the wait republishes the command itself at the top of every
+        # round, so a command dropped because the device was not subscribed yet is
+        # retried instead of turning into a timeout. Same reasoning as the /set
+        # round-trip loop above.
+        #
         # -RequireRetained $false: this reads Ok/Seen only and discards the snapshot. The
         # device writes $state within milliseconds of the command, so insisting on a
         # replayed copy would spend a second full snapshot re-observing the same value,
         # four times per run.
-        $reached = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected $step.Expect -TimeoutSeconds $Settings.CommandTimeoutSeconds -RequireRetained $false
+        $reached = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected $step.Expect -TimeoutSeconds $Settings.CommandTimeoutSeconds -RequireRetained $false -RepublishTopic "$node/lifecycle/set" -RepublishPayload $step.Command
         if (-not $reached.Ok) {
             $script:conformanceFailures += "device did not reach `$state='$($step.Expect)' on '$($step.Command)' (saw '$($reached.Seen)')"
         }
