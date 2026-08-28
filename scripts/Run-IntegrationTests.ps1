@@ -527,29 +527,96 @@ function Get-HomieRetainedSnapshot {
         [string]$Port
     )
 
+    $capture = Start-HomieCapture -Port $Port
+    return ConvertTo-HomieSnapshot -Lines (Stop-HomieCapture -Capture $capture)
+}
+
+function Start-HomieCapture {
+    # Opens the fresh-subscriber window that Get-HomieRetainedSnapshot measures through,
+    # without closing it. Split out so a caller can publish *inside* the window: the
+    # refused-transition step has to observe messages the device emits in response to a
+    # command, and a window opened after the command would miss them.
+    #
+    # Callers that only want the settled result should use Get-HomieRetainedSnapshot,
+    # which is this plus Stop-HomieCapture plus ConvertTo-HomieSnapshot.
+    param(
+        [string]$Port,
+
+        # Block until the subscriber has actually connected, for a caller that publishes
+        # inside the window. Start-Process returns as soon as cmd.exe exists, well before
+        # mosquitto_sub has a session, so a publish issued immediately after this returns
+        # can reach the broker first and the response it triggers is then missed entirely
+        # -- which would read as "the command never arrived" and fail the refused step on
+        # a healthy device.
+        #
+        # A subscriber to homie/# gets the whole retained store the moment it subscribes,
+        # so the first byte in the output file is the connection being live. Callers that
+        # only want the settled result do not need this: their 3s sleep starts before the
+        # connection and is a window, not a measurement of anything published inside it.
+        [int]$WaitForConnectSeconds = 0
+    )
+
     $out = Get-SmartHomeDevEnvPath -Port $Port -Kind Snapshot
     Remove-Item -Path $out -Force -ErrorAction SilentlyContinue
 
     $sub = Get-MosquittoTool -Name 'mosquitto_sub.exe'
 
     # Arguments come from Common.ps1, not from a second copy of them here. The parser
-    # below depends on the exact '%t %r %p' layout, and that layout is chosen and
-    # explained in Get-SmartHomeSubscriberArguments -- spelling it out again meant a
-    # one-line change in the file that owns it would silently break this reader.
+    # depends on the exact '%t %r %p' layout, and that layout is chosen and explained in
+    # Get-SmartHomeSubscriberArguments -- spelling it out again meant a one-line change in
+    # the file that owns it would silently break this reader.
     # Quoting idiom matches Start-DevEnv.ps1's subscriber launch.
     $subscriberArgs = (Get-SmartHomeSubscriberArguments -Port $Port |
         ForEach-Object { if ($_ -match '[\s/#]') { '"{0}"' -f $_ } else { $_ } }) -join ' '
     $command = '/c ""{0}" {1} > "{2}" 2>&1"' -f $sub, $subscriberArgs, $out
     $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
 
-    Start-Sleep -Seconds $SnapshotSettleSeconds
-    Stop-SmartHomeProcessTree -ProcessId $process.Id
+    if ($WaitForConnectSeconds -gt 0) {
+        $connectDeadline = (Get-Date).AddSeconds($WaitForConnectSeconds)
+        while ((Get-Date) -lt $connectDeadline) {
+            $captured = Get-Item -Path $out -ErrorAction SilentlyContinue
+            if ($null -ne $captured -and $captured.Length -gt 0) {
+                break
+            }
 
-    # Counted, not estimated. Nearly the whole wall clock of a conformance run is spent
-    # in this function, and the poll loops that call it decide at runtime how many times
-    # they need to -- so the number of snapshots a run actually took is the one figure
-    # that explains its duration, and it cannot be read off the code.
+            Start-Sleep -Milliseconds 100
+        }
+    }
+
+    return @{ ProcessId = $process.Id; Path = $out }
+}
+
+function Stop-HomieCapture {
+    # Closes the window and returns every line it caught, in arrival order.
+    param(
+        [hashtable]$Capture,
+
+        # Time to leave the window open before closing it. Defaults to the same settle
+        # used by a plain snapshot, so a caller that publishes inside the window gets the
+        # same amount of time for the response as one that publishes before it.
+        [int]$SettleSeconds = $SnapshotSettleSeconds
+    )
+
+    # Counted here rather than where the lines are parsed: this is the function that
+    # spends the time, and one closed window is one snapshot however many ways its lines
+    # are later read. Nearly the whole wall clock of a conformance run is these windows,
+    # and the poll loops decide at runtime how many they need -- so the count is the one
+    # figure that explains a run's duration, and it cannot be read off the code.
     $script:snapshotsTaken++
+
+    Start-Sleep -Seconds $SettleSeconds
+    Stop-SmartHomeProcessTree -ProcessId $Capture.ProcessId
+
+    return @(Get-Content -Path $Capture.Path -ErrorAction SilentlyContinue)
+}
+
+function ConvertTo-HomieSnapshot {
+    # Collapses captured lines to one entry per topic. Kept apart from the capture so the
+    # same lines can be read twice: as a settled per-topic view, and as the ordered
+    # sequence that view deliberately throws away.
+    param(
+        [string[]]$Lines
+    )
 
     # Last message per topic wins -- except that a repeat of the SAME payload only adds
     # to what is known about it.
@@ -570,7 +637,7 @@ function Get-HomieRetainedSnapshot {
     # value it replaced, which is exactly the bug Wait-ForRetainedValue's flag check
     # exists to catch.
     $snapshot = @{}
-    foreach ($line in @(Get-Content -Path $out -ErrorAction SilentlyContinue)) {
+    foreach ($line in $Lines) {
         # "<topic> <0|1> <payload>", and the payload may itself contain spaces.
         $match = [regex]::Match($line, '^(\S+)\s+([01])\s?(.*)$')
         if (-not $match.Success) {
@@ -958,10 +1025,9 @@ function Invoke-HomieConformanceCheck {
 
     foreach ($step in $lifecycleSteps) {
         if ($step.Refused) {
-            Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $step.Command
             # Nothing to wait for here -- the assertion is that nothing changed -- so one
-            # settled snapshot IS the measurement rather than a poll for it, and it carries
-            # both topics.
+            # capture window IS the measurement rather than a poll for it, and it carries
+            # both topics as well as the sequence on the property.
             #
             # HomieClient reflects a /set payload onto its property before the app ever
             # sees it: right for an ordinary property, wrong for one whose value is a
@@ -970,17 +1036,31 @@ function Invoke-HomieConformanceCheck {
             # controller that connects afterwards reads that contradiction out of the
             # store rather than seeing it go by.
             #
-            # Known limit: this cannot tell a refusal apart from a command that never
-            # arrived. Both leave $state and the property on 'alert', so a dropped /set
-            # passes here rather than failing -- and unlike the polls around it, a single
-            # publish is all this step can do, because the assertion is that nothing
-            # changes and there is no echo to retry until. What keeps it honest for now
-            # is the step before it: reaching 'alert' proves the device was applying /set
-            # on this very topic seconds earlier. Proving arrival outright would mean
-            # asserting the live log shows the library's 'sleeping' reflection being
-            # overwritten by the device's 'alert', which is a different measurement than
-            # this snapshot makes.
-            $refused = Get-HomieRetainedSnapshot -Port $Port
+            # The window is opened BEFORE the command and closed after, rather than
+            # taken afterwards, because this step needs the messages the device emits in
+            # response -- not just where things settled.
+            #
+            # Settling on 'alert' is not by itself evidence of a refusal. A /set is
+            # non-retained, so a command dropped because the device was not subscribed
+            # leaves $state and the property exactly as a refusal does, and this step
+            # cannot retry its way past that the way the polls around it now do: its
+            # whole assertion is that nothing changes, so there is no echo to wait on.
+            # Read only from a settled snapshot, a lost command passes as a refusal.
+            #
+            # What separates them is on the wire. HomieClient reflects the /set payload
+            # onto the property before the app sees it, and HomieClientCheck then
+            # publishes the device's real state over that reflection -- so a command that
+            # arrived and was refused puts 'sleeping' and then 'alert' on the property
+            # topic, in that order. A command that never arrived puts neither.
+            #
+            # That sequence is also the behaviour this test exists to guard: it is the
+            # correction itself, observed rather than inferred from where the store ended
+            # up.
+            $capture = Start-HomieCapture -Port $Port -WaitForConnectSeconds 5
+            Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $step.Command
+            $lines = Stop-HomieCapture -Capture $capture
+            $refused = ConvertTo-HomieSnapshot -Lines $lines
+
             $stateAfter = if ($refused.Contains("$root/`$state")) { $refused["$root/`$state"].Payload } else { $null }
             $lifecycleAfter = if ($refused.Contains("$node/lifecycle")) { $refused["$node/lifecycle"].Payload } else { $null }
 
@@ -990,6 +1070,30 @@ function Invoke-HomieConformanceCheck {
 
             if ($lifecycleAfter -ne $step.Expect) {
                 $script:conformanceFailures += "refused '$($step.Command)' left $nodeId/lifecycle advertising '$lifecycleAfter' while `$state is '$stateAfter'"
+            }
+
+            # Payloads on the property topic, in arrival order, retained replay dropped:
+            # the replayed copy is the value from before this command and says nothing
+            # about whether it arrived.
+            $lifecyclePayloads = @()
+            foreach ($line in $lines) {
+                $match = [regex]::Match($line, '^(\S+)\s+([01])\s?(.*)$')
+                if ($match.Success -and $match.Groups[1].Value -eq "$node/lifecycle" -and $match.Groups[2].Value -eq '0') {
+                    $lifecyclePayloads += $match.Groups[3].Value
+                }
+            }
+
+            $reflected = [array]::IndexOf($lifecyclePayloads, $step.Command)
+            $corrected = [array]::IndexOf($lifecyclePayloads, $step.Expect)
+
+            if ($reflected -lt 0) {
+                $script:conformanceFailures += "refused '$($step.Command)' never reached $nodeId/lifecycle -- the command was lost, so nothing about the refusal was measured (saw: $($lifecyclePayloads -join ', '))"
+            }
+            elseif ($corrected -lt 0) {
+                $script:conformanceFailures += "device left the reflected '$($step.Command)' on $nodeId/lifecycle and never published '$($step.Expect)' over it"
+            }
+            elseif ($corrected -lt $reflected) {
+                $script:conformanceFailures += "$nodeId/lifecycle published '$($step.Expect)' before the reflected '$($step.Command)', so the correction did not overwrite it (saw: $($lifecyclePayloads -join ', '))"
             }
 
             continue
