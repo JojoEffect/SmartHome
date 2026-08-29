@@ -4,11 +4,19 @@ using nanoFramework.M2Mqtt;
 using nanoFramework.M2Mqtt.Messages;
 using System;
 using System.Collections;
+using System.Text;
 
 namespace SmartHome.UnitTests
 {
     internal class MockMqttClient : IReconnectingMqttClient
     {
+        // Every publish, in order, topic and payload. PublishCount cannot express an
+        // ordering claim, and "reflect the outcome, not the command" is entirely about
+        // order -- a device's correction has to land AFTER the library's optimistic
+        // reflection, not instead of it, because the library's publish is already out by
+        // the time the OnCommand handler runs.
+        private readonly ArrayList _publishes = new ArrayList();
+
         public int PublishCount { get; private set; } = 0;
         public int SubscriptionCount { get; private set; } = 0;
 
@@ -129,19 +137,19 @@ namespace SmartHome.UnitTests
 
         public ushort Publish(string topic, byte[] message, string contentType, ArrayList userProperties, MqttQoSLevel qosLevel, bool retain)
         {
-            PublishCount++;
+            Record(topic, message);
             return 0;
         }
 
         public ushort Publish(string topic, byte[] message, string contentType)
         {
-            PublishCount++;
+            Record(topic, message);
             return 0;
         }
 
         public ushort Publish(string topic, byte[] message)
         {
-            PublishCount++;
+            Record(topic, message);
             return 0;
         }
 
@@ -158,6 +166,51 @@ namespace SmartHome.UnitTests
                 SubscriptionCount++;
             }
             return 0;
+        }
+
+        /// <summary>
+        /// The payloads published to one topic, in the order they were published.
+        /// </summary>
+        public string[] PayloadsFor(string topic)
+        {
+            var matches = new ArrayList();
+
+            foreach (PublishedMessage published in _publishes)
+            {
+                if (published.Topic == topic)
+                {
+                    matches.Add(published.Payload);
+                }
+            }
+
+            var payloads = new string[matches.Count];
+            for (int i = 0; i < matches.Count; i++)
+            {
+                payloads[i] = (string)matches[i];
+            }
+
+            return payloads;
+        }
+
+        // Recorded from all three Publish overloads, so a test cannot miss a publish by
+        // which overload the code under test happened to take.
+        private void Record(string topic, byte[] message)
+        {
+            PublishCount++;
+            _publishes.Add(new PublishedMessage(topic, message));
+        }
+
+        private class PublishedMessage
+        {
+            internal PublishedMessage(string topic, byte[] message)
+            {
+                Topic = topic;
+                Payload = message == null ? string.Empty : Encoding.UTF8.GetString(message, 0, message.Length);
+            }
+
+            public string Topic { get; }
+
+            public string Payload { get; }
         }
 
         public ushort Unsubscribe(string[] topics)

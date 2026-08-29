@@ -1,7 +1,9 @@
 using SmartHome.Homie.V4;
 using SmartHome.Homie.V4.Enums;
 using SmartHome.Homie.V4.Builder;
+using SmartHome.Homie.V4.Extensions;
 using SmartHome.Homie.V4.Properties;
+using SmartHome.Text;
 using nanoFramework.Logging;
 using nanoFramework.Logging.Debug;
 using nanoFramework.M2Mqtt.Messages;
@@ -29,6 +31,9 @@ namespace SmartHome.UnitTests
 
         private const string _testPropertyIntensityTopicId = "intensity";
         private const string _testPropertyIntensityName = "Intensity";
+
+        private const string _testPropertyLifecycleTopicId = "lifecycle";
+        private const string _testPropertyLifecycleName = "Lifecycle control";
 
         [Setup]
         public void Setup()
@@ -254,6 +259,88 @@ namespace SmartHome.UnitTests
             Assert.AreEqual(1, commandCount);
             Assert.IsNotNull(commandedProperty);
             Assert.AreEqual(73.0, property.Value);
+        }
+
+        [TestMethod]
+        public void HomieClient_Reflects_The_Command_Before_The_Handler_Can_Correct_It()
+        {
+            // The rule every actuator has to follow, pinned where CI can run it.
+            //
+            // HomieClient publishes a /set payload onto its property BEFORE OnCommand
+            // runs, so a property whose value is a *request* -- one the device can turn
+            // down -- is reflected optimistically, and retained. Only the app knows
+            // whether the request was honoured, so only the app can correct it, and the
+            // correction has to land AFTER that reflection: the library's publish is
+            // already out by the time the handler is called, so a device that published
+            // its real value first would only have it overwritten.
+            //
+            // Deliberately the same shape as HomieClientCheck's 'lifecycle' property,
+            // which the conformance suite measures on the wire. This is the copy that
+            // needs no hardware, so an actuator has a worked example in CI -- see
+            // "reflect the outcome, not the command" in CLAUDE.md, and issue #33 for why
+            // the library does not take this over.
+
+            // Arrange -- a lifecycle property whose value mirrors $state
+            var mqttClient = new MockMqttClient();
+
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
+            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
+                        .AddEnumProperty(_testPropertyLifecycleTopicId, _testPropertyLifecycleName, State.Ready.GetString())
+                            .WithSettable(true)
+                            .WithFormat("ready,alert,sleeping")
+                        .BuildProperty(out EnumProperty lifecycle)
+                    .BuildNode()
+                .BuildDevice();
+
+            var homieClient = new HomieClient(device, mqttClient);
+            homieClient.Connect();
+
+            homieClient.OnCommand += (args) =>
+            {
+                // OnCommand is raised for every settable property, so a handler has to
+                // select the one it owns before correcting anything. Redundant on this
+                // one-property device and kept anyway: this test is cited as the worked
+                // example for #11 and #12, and copied without the guard it would publish
+                // $state onto whichever property a controller happened to write to.
+                if (args.Property.TopicId != _testPropertyLifecycleTopicId)
+                {
+                    return;
+                }
+
+                var payload = Encoding.UTF8.GetString(args.Payload, 0, args.Payload.Length);
+                if (payload == State.Sleeping.GetString())
+                {
+                    homieClient.Sleep();
+                }
+
+                // Applied or refused, this is what the device actually is.
+                lifecycle.Update(homieClient.State.GetString());
+            };
+
+            // alert may only return to ready or disconnect, so the command below is refused
+            Assert.IsTrue(homieClient.Alert());
+
+            var propertyTopic = lifecycle.GetTopic();
+            var before = mqttClient.PayloadsFor(propertyTopic).Length;
+
+            // Act -- a controller asks for the one transition the convention forbids
+            var commandTopic = $"{propertyTopic}{Constants.TopicSeparator}{Constants.SetPropertyTopicId}";
+            mqttClient.RaisePublishReceived(new MqttMsgPublishEventArgs(commandTopic, Encoding.UTF8.GetBytes(State.Sleeping.GetString()), false, MqttQoSLevel.AtLeastOnce, false));
+
+            // Assert -- the transition did not happen ...
+            Assert.AreEqual((int)State.Alert, (int)homieClient.State);
+
+            // ... and the property carries the reflection first, the correction over it.
+            // Both, in that order: the reflection proves the command was seen, the
+            // correction is what stops the retained store advertising 'sleeping' beside
+            // $state='alert'.
+            var payloads = mqttClient.PayloadsFor(propertyTopic);
+            Assert.AreEqual(before + 2, payloads.Length, $"expected the reflection and the correction over it, saw: {StringUtils.Join(", ", payloads)}");
+            Assert.AreEqual(State.Sleeping.GetString(), payloads[before], "the library did not reflect the command");
+            Assert.AreEqual(State.Alert.GetString(), payloads[before + 1], "the device did not publish its real state over the reflection");
+
+            // The last payload on a retained topic is what every later controller reads.
+            Assert.AreEqual(State.Alert.GetString(), lifecycle.Value);
         }
 
         [TestMethod]
