@@ -3,6 +3,7 @@ using SmartHome.Homie.V4.Enums;
 using SmartHome.Homie.V4.Builder;
 using SmartHome.Homie.V4.Extensions;
 using SmartHome.Homie.V4.Properties;
+using SmartHome.Text;
 using nanoFramework.Logging;
 using nanoFramework.Logging.Debug;
 using nanoFramework.M2Mqtt.Messages;
@@ -296,6 +297,16 @@ namespace SmartHome.UnitTests
 
             homieClient.OnCommand += (args) =>
             {
+                // OnCommand is raised for every settable property, so a handler has to
+                // select the one it owns before correcting anything. Redundant on this
+                // one-property device and kept anyway: this test is cited as the worked
+                // example for #11 and #12, and copied without the guard it would publish
+                // $state onto whichever property a controller happened to write to.
+                if (args.Property.TopicId != _testPropertyLifecycleTopicId)
+                {
+                    return;
+                }
+
                 var payload = Encoding.UTF8.GetString(args.Payload, 0, args.Payload.Length);
                 if (payload == State.Sleeping.GetString())
                 {
@@ -324,7 +335,7 @@ namespace SmartHome.UnitTests
             // correction is what stops the retained store advertising 'sleeping' beside
             // $state='alert'.
             var payloads = mqttClient.PayloadsFor(propertyTopic);
-            Assert.AreEqual(before + 2, payloads.Length, $"expected the reflection and the correction over it, saw: {Describe(payloads)}");
+            Assert.AreEqual(before + 2, payloads.Length, $"expected the reflection and the correction over it, saw: {StringUtils.Join(", ", payloads)}");
             Assert.AreEqual(State.Sleeping.GetString(), payloads[before], "the library did not reflect the command");
             Assert.AreEqual(State.Alert.GetString(), payloads[before + 1], "the device did not publish its real state over the reflection");
 
@@ -735,26 +746,6 @@ namespace SmartHome.UnitTests
 
             Assert.ThrowsException(typeof(ArgumentException),
                 () => new FloatProperty("temperature", "Temperature", decimals: 16));
-        }
-
-        // For HomieClient_Reflects_The_Command_Before_The_Handler_Can_Correct_It: a count
-        // on its own says a publish is missing but not which one, and the order of those
-        // payloads is the whole claim that test makes.
-        private static string Describe(string[] payloads)
-        {
-            var described = new StringBuilder();
-
-            for (var i = 0; i < payloads.Length; i++)
-            {
-                if (i > 0)
-                {
-                    described.Append(", ");
-                }
-
-                described.Append(payloads[i]);
-            }
-
-            return described.ToString();
         }
 
         private Device BuildSinglePropertyDevice()
