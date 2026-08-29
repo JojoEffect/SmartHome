@@ -29,9 +29,12 @@ namespace SmartHome.Devices.RainwaterCistern
 
         private const double MilliAmpsPerAmp = 1000.0;
 
-        // Named rather than inline at the call site, so Run-IntegrationTests.ps1's
-        // stale-constant pre-flight can find it: that check greps for exactly this
-        // shape, and an inline literal was invisible to it.
+        // Named rather than inline at the call site, so it carries the exact shape
+        // Run-IntegrationTests.ps1's stale-constant pre-flight greps for. That check
+        // does not read this file yet -- it opens RoomSensor's Program.cs and the
+        // integration tests', and this device is in neither set -- so the constant
+        // drifting from SMARTHOME_MQTT_BROKER is currently silent. Adding the path to
+        // the pre-flight is all it would take, once the device is worth running.
         private const string BrokerHost = "192.168.1.238";
 
         private static FloatProperty _waterDepthProperty;

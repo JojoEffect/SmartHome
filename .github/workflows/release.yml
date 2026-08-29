@@ -128,10 +128,17 @@ jobs:
           # as a working oven controller. Flashing one replaces whatever was on the board
           # with an app that idles.
           #
+          # RainwaterCistern is absent for a different reason: it is finished, but not
+          # commissioned. Every constant in its Calibration.cs is an assumption (#37), so
+          # it publishes depths scaled by a factor nobody has measured. Under a version
+          # tag that is worse than a stub rather than better -- a stub visibly does
+          # nothing, while this looks like a working level gauge. It joins the list when
+          # #37 closes.
+          #
           # Adding a device here is therefore a deliberate act, taken when it does
-          # something. The guard below makes the opposite drift loud: if a listed project
-          # stops producing an image, the release fails rather than quietly shipping less
-          # than it says.
+          # something trustworthy. The guard below makes the opposite drift loud: if a
+          # listed project stops producing an image, the release fails rather than
+          # quietly shipping less than it says.
           $shippable = @('SmartHome.Devices.RoomSensor')
 
           $images = @()
