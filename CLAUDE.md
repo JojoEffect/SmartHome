@@ -59,7 +59,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style | No | `smarthome-restore-packages` |
 | `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` | Raw serial capture of the device's native boot log only — nanoCLR silences this at `app_main()` and switches to binary WireProtocol, so this can't see managed output | Resets only | `smarthome-watch-serial` |
 | `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot] [-NoBuild] [-BuildOnly] [-Until <regex>] [-DumpConfig]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
-| `scripts\Set-AssemblyVersion.ps1 -Version <v> [-Check]` | Stamps a version into every `Properties\AssemblyInfo.cs` under `src` — found by glob, so adding a device needs no edit here. `.nfproj` has no generated assembly info, so this is the only thing that makes a release build carry its version. Normally invoked by the release workflow, not by hand | No | `smarthome-release` |
+| `scripts\Set-AssemblyVersion.ps1 -Version <v> [-Check]` | Stamps a version into every `AssemblyInfo.cs` under `src` — a plain recursive glob, not a fixed list and not restricted to `Properties\`, so adding a device needs no edit here and a stray one anywhere under `src` will also be picked up (and fails the run if it carries no version attribute). `.nfproj` has no generated assembly info, so this is the only thing that makes a release build carry its version. Normally invoked by the release workflow, not by hand | No | `smarthome-release` |
 | `scripts\Common.ps1` | Shared helpers (env loading, MSBuild/vstest/adapter discovery, repo-sync, dev-env state) — dot-source, don't duplicate its logic | No | — |
 
 `Start-DevEnv.ps1` is the session bootstrap: it absorbed the old `Start-AgentWorkspace.ps1`,
@@ -106,7 +106,9 @@ Required local tools:
 - [GitHub CLI](https://cli.github.com/) (`gh`), **authenticated** — `gh auth login`, then
   confirm with `gh auth status`. Not optional and not only for opening pull requests: the
   backlog *is* GitHub issues (see Open work below), so `gh issue list` is how you find out
-  what there is to do. Without it, that section of this file cannot be acted on at all.
+  what there is to do. A human can fall back to the issues page in a browser; an agent
+  session has no such fallback, and every workflow in this file that reaches GitHub goes
+  through `gh`.
 
 ## Repository layout
 
@@ -169,10 +171,11 @@ Two naming traps this layout exists to avoid, both hit for real:
 shared Homie client, layered on `ReconnectingMqttClient` (in `SmartHome.Mqtt`).
 
 `ReconnectingMqttClient`'s auto-reconnect handling was long marked WIP, "blocked on an ESP32
-nanoFramework target bug" — as of 2026-08-20 that is out of date at the MQTT level:
-`MqttReconnectCheck` proves on real hardware that a client keeps its heartbeat going across
-broker outages of 3s and 20s, reconnecting rather than restarting. That test exercises
-`SmartHome.Mqtt` alone -- it does not reference `SmartHome.Homie` at all.
+nanoFramework target bug" — as of 2026-08-20 that is out of date: `MqttReconnectCheck` proves on
+real hardware that a client keeps its heartbeat going across broker outages of 3s and 20s,
+reconnecting rather than restarting. That test exercises `SmartHome.Mqtt` alone -- it does not
+reference `SmartHome.Homie` at all, so it settles the transport and nothing above it. The Homie
+layer is the next paragraph.
 
 The Homie layer on top now re-announces too: `HandleConnectionOpen` takes the device back through
 `init` -> `ready`, republishing every attribute, because Homie state lives in the broker's
@@ -240,9 +243,9 @@ for the interface instead of racing it.
 - **`src/devices`** — real applications. Nothing here should exist only to prove a dependency
   works; that's what `integrationTests` is for.
 
-Within `src/integrationTests`, what differs between tests is how the verdict is reached. That
-is declared per entry by the `Kind` field in `$testCatalog` in `Run-IntegrationTests.ps1`, and
-there are three of them (not to be confused with the three *locations* above):
+Those tests differ in which dependency they exercise, as above, and separately in *who decides
+the verdict*. The latter is declared per entry by the `Kind` field in `$testCatalog` in
+`Run-IntegrationTests.ps1`, and there are three (not the same three as the locations above):
 
 - **`DeviceMarker`** — the device decides. The runner captures managed debug output and reads
   the test's own `[ITEST]` marker. WifiCheck, MqttCheck and Bmp280Check work this way.
