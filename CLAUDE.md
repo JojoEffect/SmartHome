@@ -52,7 +52,7 @@ have a script yet, that's a gap worth closing rather than working around.
 |---|---|---|---|
 | `scripts\Start-DevEnv.ps1 [-NoSync] [-Detached]` | Syncs the sibling repos (unless `-NoSync`), then starts local Mosquitto (explicit `0.0.0.0` listener — a bare `-p` binds localhost-only on Mosquitto 2.x and silently can't be reached from a real device) and subscribes to `homie/#`. `-Detached` backgrounds both and returns | No | `smarthome-dev-env` |
 | `scripts\Stop-DevEnv.ps1 [-KeepLog] [-IncludeOrphans]` | Stops whatever `Start-DevEnv.ps1` recorded for the configured port, verifying pid+name+start-time first so a recycled pid is never killed. No-op + exit 0 if nothing is running, so it's safe to call unconditionally. `-IncludeOrphans` also clears brokers/subscribers this repo started that no state file covers | No | `smarthome-dev-env` |
-| `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`) then flashes via `nanoff` | **Yes** | `smarthome-deploy` |
+| `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release] [-FullPad]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`) then flashes via `nanoff`, padding the image with 0xFF far enough to erase the previous one (see Deploy padding below). `-FullPad` after a Visual Studio deploy | **Yes** | `smarthome-deploy` |
 | `scripts\Run-Tests.ps1` | Builds `SmartHome.UnitTests` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** | `smarthome-test` |
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
 | `scripts\Sync-NanoFrameworkRepos.ps1 [-Force]` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
@@ -81,6 +81,30 @@ If a new recurring unit of work shows up that isn't covered by an existing scrip
 (follow the conventions above: `Common.ps1` helpers, `Set-StrictMode`, real exit codes, clear
 `Write-Error` remediation) and give it a matching skill — that's the standing expectation for
 this repo, not a one-time cleanup.
+
+### Deploy padding
+
+`nanoff` erases and writes only the image file's own byte length, so a smaller app flashed
+after a larger one leaves the larger one's tail unerased past the new image's end — and the
+CLR finds it. It walks the *whole* deployment partition looking for assembly headers and, on
+a header that doesn't check out, moves to the next candidate rather than stopping
+(`ContiguousBlockAssemblies` in `nf-interpreter`'s `src/CLR/Startup/CLRStartup.cpp`). No
+amount of trailing blank flash terminates that scan; only overwriting the stale bytes does.
+`Deploy-ToDevice.ps1` therefore pads every image with 0xFF, and the invariant it has to hold
+is exactly "cover the footprint of the previous image".
+
+It used to pad every image to a flat 400KB, which held that invariant by brute force. It now
+records the last flashed size per COM port (in `%TEMP%\smarthome-deploy-<port>.json`, written
+pessimistically before the flash and tightened after it) and pads to `max(this image, that
+record)` rounded up to a 4KB sector — same guarantee, roughly half the erase-and-verify
+footprint across a suite run. Anything the record can't vouch for — missing, corrupt, a
+different `-DeployAddress`, `-FullPad` — falls back to the flat 400KB, never to the bare
+image size.
+
+The record only describes what *this script* flashed. Visual Studio's F5 deploy and the
+nanoFramework test adapter both write the deployment partition themselves, and erase only
+their own footprint too. `Run-Tests.ps1` clears the record for that reason; Visual Studio
+can't, so pass `-FullPad` on the first deploy after one.
 
 ## First-time setup
 

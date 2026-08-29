@@ -28,6 +28,7 @@
     .\scripts\Deploy-ToDevice.ps1
     .\scripts\Deploy-ToDevice.ps1 -Verbose
     .\scripts\Deploy-ToDevice.ps1 -Project src\devices\IrrigationControl\IrrigationControl.nfproj
+    .\scripts\Deploy-ToDevice.ps1 -FullPad   # after a Visual Studio deploy: pad the worst case
 #>
 
 [CmdletBinding()]
@@ -51,20 +52,35 @@ param(
     # and read the "deploy" line's Offset column from the printed partition table.
     [string]$DeployAddress = '0x1E0000',
 
-    # Every deployed image gets padded with trailing 0xFF (erased-flash value)
-    # bytes up to this size before flashing. nanoff's erase+write only covers
-    # the image file's own byte length, not the full "deploy" partition -- so
-    # deploying a SMALLER app after a LARGER one leaves that previous app's
-    # trailing assembly bytes sitting unerased past the new image's end, and
-    # the CLR loads BOTH on boot (confirmed: saw WifiCheck's own small assembly
-    # list plus leftover Bmp280Check assemblies in the same resolution pass,
-    # failing to link because bytes past WifiCheck's real end were stale
-    # Bmp280Check data, not blank flash). Padding to a fixed size makes every
-    # deploy erase+write the same footprint regardless of app size. 400KB
-    # comfortably covers every project in this repo today; the partition
-    # itself is 0x1C0000 (~1.75MB), so there's plenty of headroom to raise
-    # this if a future project's image ever gets close to it.
-    [int]$PaddedImageSize = 409600
+    # Deployed images get padded with trailing 0xFF (erased-flash value) bytes
+    # before flashing. nanoff's erase+write only covers the image file's own byte
+    # length, not the full "deploy" partition -- so deploying a SMALLER app after a
+    # LARGER one leaves that previous app's trailing assembly bytes sitting unerased
+    # past the new image's end, and the CLR loads BOTH on boot (confirmed: saw
+    # WifiCheck's own small assembly list plus leftover Bmp280Check assemblies in
+    # the same resolution pass, failing to link because bytes past WifiCheck's real
+    # end were stale Bmp280Check data, not blank flash).
+    #
+    # How far to pad is decided per deploy, from the size the previous one recorded
+    # for this COM port -- see the "Deploy state" section of Common.ps1 for the
+    # invariant, and for why trailing blank flash does not terminate the CLR's scan
+    # on its own. THIS value is the fallback used when no trustworthy record exists:
+    # the flat size every deploy used to pay unconditionally. It has to stay large
+    # enough to cover any image that could already be on the device, so lower it only
+    # with the whole of src\devices and src\integrationTests in mind.
+    [int]$FallbackPadSize = 409600,
+
+    # Refuse to pad past the deploy partition; writing beyond it would run into
+    # whatever partition follows. Advisory, from the same boot-log partition table as
+    # -DeployAddress above (.\scripts\Watch-DeviceSerial.ps1, the "deploy" line's
+    # Size column) -- re-derive it there if a firmware update changes the layout.
+    [int]$DeployPartitionSize = 0x1C0000,
+
+    # Ignore any recorded size and pad to -FallbackPadSize. Use this after something
+    # OTHER than this script has flashed the device -- a Visual Studio F5 deploy, most
+    # likely -- since the record then describes an image that is no longer the one on
+    # the device. Run-Tests.ps1 clears the record itself; Visual Studio cannot.
+    [switch]$FullPad
 )
 
 Set-StrictMode -Version Latest
@@ -130,41 +146,110 @@ if (-not (Test-Path $deployImage)) {
 }
 
 $imageBytes = [System.IO.File]::ReadAllBytes($deployImage)
-if ($imageBytes.Length -gt $PaddedImageSize) {
-    Write-Error "Deploy image ($($imageBytes.Length) bytes) is larger than -PaddedImageSize ($PaddedImageSize bytes). Raise -PaddedImageSize."
+
+# ── Decide how far to pad ─────────────────────────────────────────────────────
+# Only the PREVIOUS image's footprint has to be covered, and Common.ps1's deploy
+# state records exactly that, per COM port. Every reason the record cannot be
+# trusted falls back to the flat -FallbackPadSize rather than to the bare image
+# size: this is the flashing path, and over-padding costs seconds where
+# under-padding costs a device booting somebody else's assemblies.
+$sectorSize = 4096   # ESP32 flash erase granularity; keeps the write sector-aligned.
+
+$staleBytes = $null
+$padReason  = $null
+
+if ($FullPad) {
+    $padReason = '-FullPad was passed'
+}
+else {
+    $deployState = Get-SmartHomeDeployState -ComPort $comPort
+    if ($null -eq $deployState) {
+        $padReason = "no usable deploy record for $comPort"
+    }
+    elseif ($deployState['DeployAddress'] -ne $DeployAddress) {
+        # A different address is a different region: what that record describes says
+        # nothing about what is sitting at this one.
+        $padReason = "the deploy record for $comPort covers $($deployState['DeployAddress']), not $DeployAddress"
+    }
+    else {
+        $staleBytes = $deployState['StaleBytes']
+    }
+}
+
+$padFloor  = if ($null -ne $staleBytes) { $staleBytes } else { $FallbackPadSize }
+$padTarget = [Math]::Max($imageBytes.Length, $padFloor)
+$paddedImageSize = [int][Math]::Ceiling($padTarget / [double]$sectorSize) * $sectorSize
+
+if ($paddedImageSize -gt $DeployPartitionSize) {
+    Write-Error @"
+Padded deploy image ($paddedImageSize bytes) does not fit the deploy partition ($DeployPartitionSize bytes).
+The image itself is $($imageBytes.Length) bytes. Either the app has outgrown the partition, or
+-DeployPartitionSize is stale -- re-read the "deploy" line of the partition table printed by
+.\scripts\Watch-DeviceSerial.ps1 and pass the real size.
+"@
     exit 1
 }
 
 $paddedImage = Join-Path $binDir ($projectName + '.padded.bin')
-$padded = New-Object byte[] $PaddedImageSize
+$padded = New-Object byte[] $paddedImageSize
 
 # Fill with 0xFF by doubling an already-filled prefix rather than looping over
-# ~320KB one byte at a time: the scalar loop measured 560ms per deploy, this is
-# ~10ms. ([Array]::Fill would be simpler but is .NET Core only, and this runs on
+# hundreds of KB one byte at a time: the scalar loop measured 560ms per deploy, this
+# is ~10ms. ([Array]::Fill would be simpler but is .NET Core only, and this runs on
 # Windows PowerShell 5.1.)
 $padded[0] = 0xFF
 $filled = 1
-while ($filled -lt $PaddedImageSize) {
-    $chunk = [Math]::Min($filled, $PaddedImageSize - $filled)
+while ($filled -lt $paddedImageSize) {
+    $chunk = [Math]::Min($filled, $paddedImageSize - $filled)
     [Array]::Copy($padded, 0, $padded, $filled, $chunk)
     $filled += $chunk
 }
 
 [Array]::Copy($imageBytes, $padded, $imageBytes.Length)
 [System.IO.File]::WriteAllBytes($paddedImage, $padded)
-Write-Host "  Padded deploy image: $($imageBytes.Length) -> $PaddedImageSize bytes (0xFF fill, clears any stale prior deployment)." -ForegroundColor DarkGray
+
+if ($null -ne $staleBytes) {
+    Write-Host "  Padded deploy image: $($imageBytes.Length) -> $paddedImageSize bytes (0xFF fill, covering the $staleBytes bytes the last deploy to $comPort left on the device)." -ForegroundColor DarkGray
+}
+else {
+    Write-Host "  Padded deploy image: $($imageBytes.Length) -> $paddedImageSize bytes (0xFF fill, full-size pad -- $padReason)." -ForegroundColor DarkGray
+}
+
+# Recorded before the flash, and pessimistically: if nanoff dies partway, or the shell
+# is killed, anything up to $paddedImageSize may have landed and the next deploy has to
+# cover all of it. Tightened below once nanoff reports success. Deliberately not
+# wrapped -- $ErrorActionPreference is 'Stop', so a record that cannot be written
+# aborts before flashing rather than flashing against a stale, smaller number.
+Save-SmartHomeDeployState -ComPort $comPort `
+                          -DeployAddress $DeployAddress `
+                          -StaleBytes $paddedImageSize `
+                          -Image $projectName
 
 nanoff --deploy --serialport $comPort --image "$paddedImage" --address $DeployAddress
 $nanoffExit = $LASTEXITCODE
 
-# nanoff has read the image by now, so the padded copy is 400KB of dead weight in
-# bin\Debug. Leaving it also puts a stale .padded.bin next to a freshly built .bin,
-# which is the same shape as the stale-deployment problem the padding exists to fix.
+# nanoff has read the image by now, so the padded copy is dead weight in bin\Debug.
+# Leaving it also puts a stale .padded.bin next to a freshly built .bin, which is the
+# same shape as the stale-deployment problem the padding exists to fix.
 Remove-Item -Path $paddedImage -Force -ErrorAction SilentlyContinue
 
 if ($nanoffExit -ne 0) {
     Write-Error "nanoff deploy failed (exit code $nanoffExit)."
     exit $nanoffExit
+}
+
+# The write completed, so everything from the image's end up to $paddedImageSize is
+# 0xFF now and the next deploy only has to cover the image itself.
+try {
+    Save-SmartHomeDeployState -ComPort $comPort `
+                              -DeployAddress $DeployAddress `
+                              -StaleBytes $imageBytes.Length `
+                              -Image $projectName
+}
+catch {
+    # The pessimistic record written before the flash is still there and still
+    # correct, just bigger than it needs to be. Not worth failing a deploy that worked.
+    Write-Warning "Could not tighten the deploy record for $comPort ($($_.Exception.Message)). The next deploy will pad to $paddedImageSize bytes."
 }
 
 Write-Host ""

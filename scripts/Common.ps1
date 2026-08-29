@@ -295,7 +295,10 @@ function Invoke-GitCloneOrUpdate {
 # rename that only touched Start-DevEnv.ps1 would silently turn the scan into a
 # permanent "nothing found" -- which reads as success.
 
-$SmartHomeDevEnvPrefix = 'smarthome'
+# Shared by every temp file this repo leaves behind, dev-environment or not (the
+# deploy-state section at the bottom of this file uses it too), so one glob finds
+# the lot.
+$SmartHomeTempFilePrefix = 'smarthome'
 $SmartHomeHomieTopic = 'homie/#'
 
 # The address host-side mosquitto clients dial. 127.0.0.1, not 'localhost'. Measured, not
@@ -339,7 +342,7 @@ function Get-SmartHomeDevEnvPath {
         'Snapshot'           { "homie-snapshot-$Port.log" }
     }
 
-    return (Join-Path ([System.IO.Path]::GetTempPath()) "$SmartHomeDevEnvPrefix-$suffix")
+    return (Join-Path ([System.IO.Path]::GetTempPath()) "$SmartHomeTempFilePrefix-$suffix")
 }
 
 function Get-SmartHomeSubscriberArguments {
@@ -671,4 +674,149 @@ function Stop-SmartHomeDevEnv {
     }
 
     return $stoppedSomething
+}
+
+# ── Deploy state ──────────────────────────────────────────────────────────────
+# Deploy-ToDevice.ps1 pads every image with 0xFF before flashing it, because nanoff
+# erases and writes only the image file's own byte length -- so a smaller app
+# deployed after a larger one leaves the larger one's tail sitting unerased past
+# the new image's end. That tail is not ignored: the CLR walks the WHOLE deployment
+# partition looking for assembly headers, and on a header that doesn't check out it
+# `continue`s to the next candidate rather than stopping (ContiguousBlockAssemblies
+# in nf-interpreter's src\CLR\Startup\CLRStartup.cpp, whose stream Length is the
+# full block range). So no amount of trailing blank flash terminates the scan --
+# the only thing that keeps stale assemblies out is overwriting them.
+#
+# The invariant is therefore exactly "cover the footprint of the previous image",
+# and the previous image's size is the one fact needed to pad to less than a flat
+# worst case. It is recorded here, keyed by COM port.
+#
+# Deliberately NOT another -Kind on Get-SmartHomeDevEnvPath: that function's -Port
+# is an MQTT port, and one parameter meaning two different kinds of port depending
+# on -Kind is exactly the ambiguity its callers should not have to hold. This
+# shares the temp directory and $SmartHomeTempFilePrefix, not the signature.
+#
+# StaleBytes is the contract: "the number of bytes from the deploy address that the
+# next flash must overwrite for no leftover assembly data to survive it". It is
+# written pessimistically -- the full padded length -- BEFORE a flash, so an
+# interrupted or failed write still leaves a record covering everything nanoff may
+# have put down, and tightened to the image's own length only once nanoff reports
+# success, at which point everything between the image's end and the padded length
+# is known to be 0xFF.
+#
+# Anything that flashes the device WITHOUT going through Deploy-ToDevice.ps1 --
+# Visual Studio's F5 deploy, the nanoFramework test adapter -- invalidates the
+# record, because it writes assemblies this script never saw. Such a path must call
+# Clear-SmartHomeDeployState; the next deploy then falls back to the flat
+# worst-case pad, which is what the script did unconditionally before any of this.
+$SmartHomeDeployStateVersion = 1
+
+function Get-SmartHomeDeployStatePath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ComPort
+    )
+
+    # 'COM3' needs no escaping, but the port comes from local.env.ps1 and something
+    # like \\.\COM10 would otherwise build a path pointing somewhere else entirely.
+    # '*' survives the scrub on purpose, so Clear-SmartHomeDeployState can build the
+    # all-ports glob from this one naming rule instead of restating it.
+    $safePort = ($ComPort -replace '[^A-Za-z0-9._*-]', '_')
+    return (Join-Path ([System.IO.Path]::GetTempPath()) "$SmartHomeTempFilePrefix-deploy-$safePort.json")
+}
+
+function Get-SmartHomeDeployState {
+    # Returns the record only when every field is present and sane; $null otherwise.
+    # Every rejection here costs one full-size deploy -- the behaviour this script
+    # had before the record existed -- so the failure direction is the safe one, and
+    # nothing about a bad record should ever reach the flashing decision.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ComPort
+    )
+
+    $stateFile = Get-SmartHomeDeployStatePath -ComPort $ComPort
+    if (-not (Test-Path $stateFile)) {
+        return $null
+    }
+
+    try {
+        $state = ConvertTo-SmartHomeHashtable -InputObject (Get-Content $stateFile -Raw | ConvertFrom-Json)
+    }
+    catch {
+        Write-Warning "Ignoring unreadable deploy-state file: $stateFile"
+        return $null
+    }
+
+    if ($null -eq $state -or -not ($state -is [System.Collections.IDictionary])) {
+        return $null
+    }
+
+    if ($state['Version'] -ne $SmartHomeDeployStateVersion) {
+        return $null
+    }
+
+    if ($state['ComPort'] -ne $ComPort) {
+        return $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace([string]$state['DeployAddress'])) {
+        return $null
+    }
+
+    # Parsed rather than type-checked: ConvertFrom-Json hands back Int32, Int64 or
+    # Double depending on the literal, and the caller does arithmetic with this.
+    $staleBytes = 0
+    if (-not [int]::TryParse([string]$state['StaleBytes'], [ref]$staleBytes) -or $staleBytes -lt 0) {
+        return $null
+    }
+    $state['StaleBytes'] = $staleBytes
+
+    return $state
+}
+
+function Save-SmartHomeDeployState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ComPort,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DeployAddress,
+
+        [Parameter(Mandatory = $true)]
+        [int]$StaleBytes,
+
+        # Purely for humans reading the file while working out what is on a device.
+        [string]$Image = ''
+    )
+
+    # Deliberately returns nothing, same as Save-SmartHomeDevEnvState: callers only
+    # care that the record landed, and a returned path would leak into their output.
+    @{
+        Version       = $SmartHomeDeployStateVersion
+        ComPort       = $ComPort
+        DeployAddress = $DeployAddress
+        StaleBytes    = $StaleBytes
+        Image         = $Image
+        UpdatedUtc    = (Get-Date).ToUniversalTime().ToString('o')
+    } | ConvertTo-Json -Depth 3 |
+        Set-Content -Path (Get-SmartHomeDeployStatePath -ComPort $ComPort) -Encoding utf8
+}
+
+function Clear-SmartHomeDeployState {
+    # Without -ComPort, clears every port's record. That is the right default for the
+    # callers that need it: the nanoFramework test adapter picks its own device when
+    # nano.runsettings leaves RealHardwarePort empty, so which port it flashed is not
+    # knowable here. Clearing one record too many costs one full-size deploy.
+    param(
+        [string]$ComPort
+    )
+
+    if ($ComPort) {
+        Remove-Item -Path (Get-SmartHomeDeployStatePath -ComPort $ComPort) -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    Get-ChildItem -Path (Get-SmartHomeDeployStatePath -ComPort '*') -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
 }
