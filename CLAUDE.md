@@ -400,6 +400,41 @@ Issues are labelled `type:` (bug/feature/task/spike), `area:` (homie/infra/senso
 `status:` (in-progress/blocked/review). Anything `status: blocked` names in its body exactly
 what it is waiting for, so it can be picked up cold.
 
+### File what you find
+
+**Anything found and verified that falls outside the change in hand gets a GitHub issue,
+before the session ends.** Not a note in a pull request body, not a line in a summary the
+user has to act on, not a TODO in the code — an issue, because the issue list is the backlog
+and everything else is a place findings go to be forgotten. This is standing behaviour for
+every session, not something to be asked for.
+
+Three things make it work, and skipping any one of them makes it worse than not doing it:
+
+- **Verified is the bar.** Reproduce it, or read the source that proves it, before filing.
+  A hunch filed as an issue costs the next session a full investigation to disprove and
+  teaches everyone to distrust the list. If investigation refutes the finding, that is a
+  result too — say so plainly and file nothing.
+- **Retract what you already said.** A finding reported somewhere before it was checked — a
+  pull request body, a review comment, a message to the user — has to be corrected in that
+  same place once it turns out to be wrong. A wrong claim left standing in a merged PR is
+  indistinguishable from a real one later.
+- **File it, don't fix it.** Widening the current change to cover what you tripped over is how
+  a reviewable diff becomes an unreviewable one. Write the issue so it can be picked up cold:
+  what is wrong, the evidence, the files, and what closing it would look like.
+
+Check `gh issue list --state open` first — a duplicate is worse than nothing. Label with
+`type:` and `area:` to match the rest of the list, and link the pull request or issue that
+turned the finding up.
+
+Worth filing: a defect confirmed by reproduction or by reading the source; a constant or
+assumption the code asserts without evidence; a residual gap in something just shipped, where
+the mitigation is "remember to do X"; work deliberately cut from a change to keep it
+reviewable.
+
+Not worth filing: style preferences; refactors with no stated payoff; anything already covered
+by an open issue or already documented in this file as intentional; and anything you have not
+actually checked.
+
 ## Development process
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) is the source of truth for how work moves: trunk-based
