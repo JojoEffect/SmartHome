@@ -274,35 +274,48 @@ function Start-DeviceDebugCapture {
         $powerShellExe, $watchScript, $TimeoutSeconds, $LogPath
     $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
 
-    return @{ ProcessId = $process.Id; Path = $LogPath }
+    # A record, not a bare pid. This launcher can legitimately be dead by the time the
+    # check returns -- a monitor that cannot reach the device gives up after 15s and
+    # takes its cmd.exe with it -- and minutes then pass before anything stops it, which
+    # is long enough for Windows to hand the pid to something else. That is the case
+    # New-SmartHomeProcessRecord carries a name and a start time for. -Tree because the
+    # real work is in the grandchild.
+    return @{
+        Record = New-SmartHomeProcessRecord -Label 'device debug monitor' -Process $process -Tree
+        Path   = $LogPath
+    }
 }
 
 function Stop-DeviceDebugCapture {
-    # Killed as a tree rather than asked to stop: the monitor listens for a fixed
-    # duration and has no way to be told the check is over. The COM port is released
-    # with the process, so the next test's deploy is not affected.
+    # Killed rather than asked to stop: the monitor listens for a fixed duration and has
+    # no way to be told the check is over. The COM port is released with the process, so
+    # the next test's deploy is not affected.
     param([hashtable]$Capture)
 
     if ($null -eq $Capture) {
         return
     }
 
-    # Only if it is still running. A monitor that could not attach exits on its own and
-    # takes its cmd.exe launcher with it, and taskkill then writes "process not found"
-    # to stderr -- which under this script's $ErrorActionPreference = 'Stop' is a
-    # terminating NativeCommandError, thrown out of the finally that calls this and
+    # Through the recorded-process helper, which stops the tree only when pid, name and
+    # start time all still match, and warns instead of killing when the pid has been
+    # recycled. It also covers the already-exited case: taskkill on a dead pid writes to
+    # stderr, and under this script's $ErrorActionPreference = 'Stop' that is a
+    # terminating NativeCommandError -- thrown out of the finally that calls this, and
     # replacing the verdict the check had already reached. Measured, not assumed:
     # Stop-SmartHomeProcessTree on a dead pid throws here.
-    if (Get-Process -Id $Capture.ProcessId -ErrorAction SilentlyContinue) {
-        Stop-SmartHomeProcessTree -ProcessId $Capture.ProcessId
-    }
+    Stop-SmartHomeRecordedProcess -Record $Capture.Record | Out-Null
 
-    # An attach failure must not change a verdict the broker already decided, so this
-    # warns rather than throwing -- but it says so, because an empty log is otherwise
-    # indistinguishable from a device that said nothing.
+    # A capture that recorded nothing must not change a verdict the broker already
+    # decided, so this warns rather than throwing -- but it says so, because an empty log
+    # is otherwise indistinguishable from a device that said nothing.
+    #
+    # It does not name an attach failure as the cause, because that is the one thing it
+    # cannot be: the child's stderr is redirected into this same file, so a monitor that
+    # found no device leaves its "No nanoFramework device found on ..." in here. Nothing
+    # at all on either stream means the child never got that far.
     $captured = Get-Item -LiteralPath $Capture.Path -ErrorAction SilentlyContinue
     if ($null -eq $captured -or $captured.Length -eq 0) {
-        Write-Warning ("No managed debug output was captured ({0}). The monitor could not attach; the verdict is unaffected, but there is no device-side evidence behind it." -f $Capture.Path)
+        Write-Warning ("No managed debug output was captured, and the monitor reported nothing either ({0}) -- so it never ran. Check that dotnet is on PATH. The verdict is unaffected, but there is no device-side evidence behind it." -f $Capture.Path)
     }
 }
 
@@ -1522,7 +1535,16 @@ finally {
         # here would replace whatever outcome the suite had already reached. Which also
         # means the archiving Stop-SuiteBroker does has to be repeated here, for the
         # generation that covers the end of the last test.
-        Save-BrokerEvidence -Port $mqttPort
+        # Kept apart from the teardown below so the two failures stay distinguishable,
+        # and both inside a catch: this is the finally, and a throw from either would
+        # escape it and take the summary and the exit code with it.
+        try {
+            Save-BrokerEvidence -Port $mqttPort
+        }
+        catch {
+            Write-Warning "Could not preserve the last broker logs: $($_.Exception.Message)"
+        }
+
         try {
             & $stopEnvScript
         }
