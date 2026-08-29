@@ -33,6 +33,10 @@ namespace SmartHome.Homie.V4.Properties
             OnUpdate?.Invoke(args);
         }
 
+        // Any payload is a valid Homie string, and $format carries no meaning for this
+        // datatype in Homie v4 -- so there is nothing declared for a payload to violate.
+        internal override string? Validate(string value) => null;
+
         internal override void SetInternal(string value) => Update(value);
     }
 }

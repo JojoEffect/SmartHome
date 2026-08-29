@@ -32,8 +32,20 @@ namespace SmartHome.Homie.V4.Properties
             OnUpdate?.Invoke(args);
         }
 
+        internal override string? Validate(string value)
+        {
+            if (!int.TryParse(value, out var parsed))
+            {
+                return "not an integer";
+            }
+
+            return ValidateRange(parsed);
+        }
+
         internal override void SetInternal(string value)
         {
+            // Validate() has already proven this parses; the guard is what keeps that
+            // structural rather than a comment.
             if (int.TryParse(value, out var parsed))
             {
                 Update(parsed);

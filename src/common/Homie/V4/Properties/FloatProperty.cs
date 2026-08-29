@@ -89,8 +89,30 @@ namespace SmartHome.Homie.V4.Properties
             return value;
         }
 
+        internal override string? Validate(string value)
+        {
+            if (!double.TryParse(value, out var parsed))
+            {
+                return "not a number";
+            }
+
+            // A Homie float payload is the literal representation of a number, and NaN
+            // and the infinities are not one -- see EnsurePublishable, which throws on
+            // them. Caught here rather than there: SetInternal runs on M2Mqtt's dispatch
+            // thread, so a controller must not be able to reach that throw with a
+            // payload.
+            if (double.IsNaN(parsed) || double.IsPositiveInfinity(parsed) || double.IsNegativeInfinity(parsed))
+            {
+                return "not a finite number";
+            }
+
+            return ValidateRange(parsed);
+        }
+
         internal override void SetInternal(string value)
         {
+            // Validate() has already proven this parses; the guard is what keeps that
+            // structural rather than a comment.
             if (double.TryParse(value, out var parsed))
             {
                 Update(parsed);

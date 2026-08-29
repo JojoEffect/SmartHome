@@ -191,8 +191,18 @@ device owns a connection rather than being one, and exposing `Publish`/`Subscrib
 let an app publish an attribute non-retained or `$state` out of order. The `Device` model (built
 with `HomieDeviceBuilder`) says what the device *is*; `IHomieClient` is what you *do* with it.
 
-Four things to know when writing an actuator (Irrigation, Oven):
+Five things to know when writing an actuator (Irrigation, Oven):
 
+- Don't re-check the payload against `$datatype` or `$format` -- the property already did.
+  Since 2026-08-29 `PropertyBase.Set` validates a `/set` before anything is applied: an enum
+  payload must be one of the `$format` values, an integer or float inside a declared
+  `min:max` range, a boolean exactly `true` or `false`, a colour a real `<r>,<g>,<b>` triple.
+  A rejected payload is logged and dropped -- the value does not move, nothing is published,
+  nothing lands in the retained store -- and `HomieClient` does **not** raise `OnCommand` for
+  it, so a handler only ever sees payloads its property can hold. That is narrower than it
+  sounds and does not replace the rule below: the library refuses what the *declaration*
+  forbids, and only the app can refuse what its *state* forbids (a legal enum value that is
+  an illegal transition, a valid setpoint a relay then fails to reach). Issue #39.
 - Act on `IHomieClient.OnCommand`, not on `property.OnUpdate`. The property event fires both
   when a controller sets a value and when the device updates its own, and cannot tell them
   apart; `OnCommand` fires only for a controller's `/set`.
@@ -265,7 +275,8 @@ the verdict*. The latter is declared per entry by the `Kind` field in `$testCata
   the test's own `[ITEST]` marker. WifiCheck, MqttCheck and Bmp280Check work this way.
 - **`HomieConformance`** — the host measures a purpose-built device against the Homie v4
   convention: mandatory attributes and their retained flags, one property of every datatype with
-  its `$format`/`$unit`/`$settable`/`$retained`, a `/set` command applied and reflected back, the
+  its `$format`/`$unit`/`$settable`/`$retained`, a `/set` command applied and reflected back, a
+  payload each datatype's own `$format` forbids that must be refused rather than applied, the
   `alert` and `sleeping` states driven through a control property, a refused transition that
   must not be advertised as if it had happened, and a full re-announce after the broker is
   replaced. `HomieClientCheck` is this kind. Retained-ness is read from a *fresh*
