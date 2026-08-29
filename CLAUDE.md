@@ -182,7 +182,7 @@ device owns a connection rather than being one, and exposing `Publish`/`Subscrib
 let an app publish an attribute non-retained or `$state` out of order. The `Device` model (built
 with `HomieDeviceBuilder`) says what the device *is*; `IHomieClient` is what you *do* with it.
 
-Three things to know when writing an actuator (Irrigation, Oven):
+Four things to know when writing an actuator (Irrigation, Oven):
 
 - Act on `IHomieClient.OnCommand`, not on `property.OnUpdate`. The property event fires both
   when a controller sets a value and when the device updates its own, and cannot tell them
@@ -195,8 +195,22 @@ Three things to know when writing an actuator (Irrigation, Oven):
   whose value is a *request* the device can turn down — an illegal `$state` transition, an out
   of range setpoint, a relay that failed to close. Publish the real value over it once the
   command has been applied or refused, or the retained store advertises a state the device is
-  not in, to every controller that connects afterwards. `HomieClientCheck` does this for its
-  `lifecycle` property and the conformance suite asserts it.
+  not in, to every controller that connects afterwards. **After** the reflection, never instead
+  of it: the library's publish is already out by the time the handler runs, so a device that
+  publishes its real value first only has it overwritten. `HomieClientCheck` does this for its
+  `lifecycle` property, the conformance suite asserts the order on the wire, and
+  `HomieClient_Reflects_The_Command_Before_The_Handler_Can_Correct_It` pins the same pattern in
+  the unit suite, where CI can run it. Issue #33 asked whether the library should take this over
+  by having `OnCommand` return accept/reject, and was closed as working-as-intended — the
+  reasoning is in that issue, and worth reading before proposing it again.
+- Don't block `OnCommand`. It runs on M2Mqtt's event-dispatch thread, and that one thread
+  delivers every incoming PUBLISH plus SUBACK, PUBACK, UNSUBACK and the connection-closed
+  signal (`MqttClient.DispatchEventThread` in the sibling `nanoFramework.m2mqtt` checkout). A
+  handler that waits on hardware stalls the client's whole event stream, this device's next
+  `/set` included. An outcome that takes time — a relay confirming, a setpoint validated
+  against a sensor read — belongs on the device's own thread: hand the work off, return, and
+  publish the real value onto the property when it lands. That is the same "reflect the
+  outcome" publish, just later.
 
 `HomieClient` owns its MQTT session and must: Homie v4 requires the connection to carry a last
 will setting `homie/[device-id]/$state` to `lost`, and a will can only be declared in CONNECT.
