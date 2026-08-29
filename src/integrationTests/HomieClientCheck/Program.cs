@@ -161,6 +161,12 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
             //
             // Actuators copying this device should do the same: reflect the outcome, not
             // the command.
+            //
+            // Unconditional, so an accepted command publishes the same payload twice --
+            // the library's reflection, then an identical correction. See #36: guarding
+            // on _lifecycle.Value would suppress the second publish, but Value is already
+            // updated even when the reflection's own publish threw, and the guard would
+            // then suppress the only publish the broker would have seen.
             _lifecycle.Update(_homieClient.State.GetString());
         }
 
@@ -173,11 +179,19 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
                     continue;
                 }
 
+                // Every arm named, and the default refuses rather than falling back to
+                // Ready(). LifecycleStates is also what BuildLifecycleFormat publishes
+                // as $format, so a state added there is immediately offered to
+                // controllers -- and a default that applied Ready() would answer such a
+                // command with the wrong transition and no sign that anything was
+                // missed. Refusing leaves the correction in HandleCommand to publish the
+                // state the device is actually in.
                 var applied = state switch
                 {
+                    State.Ready => _homieClient.Ready(),
                     State.Alert => _homieClient.Alert(),
                     State.Sleeping => _homieClient.Sleep(),
-                    _ => _homieClient.Ready(),
+                    _ => false,
                 };
 
                 Debug.WriteLine($"HomieClientCheck: '{payload}' -> {applied}");

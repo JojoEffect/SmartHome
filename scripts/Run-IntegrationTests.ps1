@@ -699,7 +699,26 @@ function Start-HomieCapture {
     )
 
     $out = Get-SmartHomeDevEnvPath -Port $Port -Kind Snapshot
-    Remove-Item -Path $out -Force -ErrorAction SilentlyContinue
+
+    # Removed, and *proved* removed. The previous capture is torn down with taskkill /F,
+    # which returns before Windows has released cmd.exe's handle on this file, so
+    # Remove-Item can fail with a sharing violation -- and -ErrorAction SilentlyContinue
+    # would swallow that. A surviving file is not merely untidy: the connect wait below
+    # takes "the file has bytes" as proof that THIS subscriber is live, and the previous
+    # capture's bytes satisfy it instantly, defeating the wait entirely.
+    $removeDeadline = (Get-Date).AddSeconds(5)
+    while (Test-Path -Path $out) {
+        Remove-Item -Path $out -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -Path $out)) {
+            break
+        }
+
+        if ((Get-Date) -ge $removeDeadline) {
+            throw "Could not clear the snapshot capture file '$out': a previous subscriber still holds it open."
+        }
+
+        Start-Sleep -Milliseconds 50
+    }
 
     $sub = Get-MosquittoTool -Name 'mosquitto_sub.exe'
 
@@ -747,9 +766,40 @@ function Stop-HomieCapture {
     $script:snapshotsTaken++
 
     Start-Sleep -Seconds $SettleSeconds
+    # See #36: taskkill /F does not wait for mosquitto_sub to flush. Its stdout is
+    # redirected to a file, so the CRT buffers fully (~4KB) rather than by line, and
+    # whatever is still in that buffer dies with the process. Only the refused-transition
+    # step depends on the TAIL of a window -- every other caller needs the bulk retained
+    # replay, which is far past the buffer boundary by the time the window closes.
     Stop-SmartHomeProcessTree -ProcessId $Capture.ProcessId
 
     return @(Get-Content -Path $Capture.Path -ErrorAction SilentlyContinue)
+}
+
+function ConvertFrom-HomieCaptureLine {
+    # The one reader of the '%t %r %p' line layout, for the same reason Start-HomieCapture
+    # takes the subscriber arguments from Common.ps1 rather than respelling them: two
+    # callers now read these lines -- the per-topic collapse below and the refused step's
+    # ordered read -- and a second copy of the regex is a place where a change to the
+    # format could be fixed in one reader and silently keep parsing in the other.
+    #
+    # Returns $null for a line that is not a message: mosquitto_sub's stderr shares the
+    # capture file.
+    param(
+        [string]$Line
+    )
+
+    # "<topic> <0|1> <payload>", and the payload may itself contain spaces.
+    $match = [regex]::Match($Line, '^(\S+)\s+([01])\s?(.*)$')
+    if (-not $match.Success) {
+        return $null
+    }
+
+    return @{
+        Topic    = $match.Groups[1].Value
+        Retained = $match.Groups[2].Value -eq '1'
+        Payload  = $match.Groups[3].Value
+    }
 }
 
 function ConvertTo-HomieSnapshot {
@@ -780,17 +830,20 @@ function ConvertTo-HomieSnapshot {
     # exists to catch.
     $snapshot = @{}
     foreach ($line in $Lines) {
-        # "<topic> <0|1> <payload>", and the payload may itself contain spaces.
-        $match = [regex]::Match($line, '^(\S+)\s+([01])\s?(.*)$')
-        if (-not $match.Success) {
+        $parsed = ConvertFrom-HomieCaptureLine -Line $line
+        if ($null -eq $parsed) {
             continue
         }
 
-        $topic = $match.Groups[1].Value
-        $retained = $match.Groups[2].Value -eq '1'
-        $payload = $match.Groups[3].Value
+        $topic = $parsed.Topic
+        $retained = $parsed.Retained
+        $payload = $parsed.Payload
 
-        if ($snapshot.Contains($topic) -and $snapshot[$topic].Payload -eq $payload) {
+        # -ceq, not -eq: PowerShell's -eq is case-insensitive, and "the SAME payload"
+        # has to mean byte-for-byte here. A live 'TRUE' merging with a replayed 'true'
+        # would inherit a retain flag it never earned, which is the very inheritance the
+        # replace-on-difference branch below exists to prevent.
+        if ($snapshot.Contains($topic) -and $snapshot[$topic].Payload -ceq $payload) {
             $snapshot[$topic].Retained = $snapshot[$topic].Retained -or $retained
             continue
         }
@@ -1217,20 +1270,45 @@ function Invoke-HomieConformanceCheck {
             # That sequence is also the behaviour this test exists to guard: it is the
             # correction itself, observed rather than inferred from where the store ended
             # up.
+            # try/finally, so the window is closed even if the publish throws. The
+            # capture file is one fixed path per port, shared by every snapshot in the
+            # run: an orphaned mosquitto_sub keeps appending homie/# traffic to it, and
+            # every later snapshot would then read a file that is no longer the record of
+            # one fresh subscriber -- silently wrong retain flags for the rest of the suite.
             $capture = Start-HomieCapture -Port $Port -WaitForConnectSeconds 5
-            Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $step.Command
-            $lines = Stop-HomieCapture -Capture $capture
+            try {
+                Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $step.Command
+            }
+            finally {
+                $lines = Stop-HomieCapture -Capture $capture
+            }
+
             $refused = ConvertTo-HomieSnapshot -Lines $lines
 
             $stateAfter = if ($refused.Contains("$root/`$state")) { $refused["$root/`$state"].Payload } else { $null }
+            # See #36: this settled read can be flipped by a QoS-1 retransmission. The
+            # per-topic collapse only merges on an equal payload, so a duplicate of the
+            # reflected 'sleeping' arriving after the correction replaces it -- wire order
+            # [sleeping, alert, sleeping-dup] leaves 'sleeping' here while the three wire
+            # assertions below all pass. Left as is deliberately: a broker re-processes a
+            # DUP PUBLISH, so the retained store really would hold the contradiction.
             $lifecycleAfter = if ($refused.Contains("$node/lifecycle")) { $refused["$node/lifecycle"].Payload } else { $null }
 
-            if ($stateAfter -ne $step.Expect) {
-                $script:conformanceFailures += "forbidden $($step.Expect) -> $($step.Command) transition was applied (`$state is '$stateAfter')"
+            # Absent, not merely wrong: neither topic being in the window means nothing
+            # was measured -- a subscriber that never came up, not a device that took the
+            # forbidden transition. Reported as such rather than as a device defect, the
+            # way the wire assertions below already do for a lost command.
+            if ($null -eq $stateAfter -or $null -eq $lifecycleAfter) {
+                $script:conformanceFailures += "refused '$($step.Command)': the capture window caught no `$state or $nodeId/lifecycle at all, so nothing about the refusal was measured"
             }
+            else {
+                if ($stateAfter -ne $step.Expect) {
+                    $script:conformanceFailures += "forbidden $($step.Expect) -> $($step.Command) transition was applied (`$state is '$stateAfter')"
+                }
 
-            if ($lifecycleAfter -ne $step.Expect) {
-                $script:conformanceFailures += "refused '$($step.Command)' left $nodeId/lifecycle advertising '$lifecycleAfter' while `$state is '$stateAfter'"
+                if ($lifecycleAfter -ne $step.Expect) {
+                    $script:conformanceFailures += "refused '$($step.Command)' left $nodeId/lifecycle advertising '$lifecycleAfter' while `$state is '$stateAfter'"
+                }
             }
 
             # Payloads on the property topic, in arrival order, retained replay dropped:
@@ -1238,22 +1316,37 @@ function Invoke-HomieConformanceCheck {
             # about whether it arrived.
             $lifecyclePayloads = @()
             foreach ($line in $lines) {
-                $match = [regex]::Match($line, '^(\S+)\s+([01])\s?(.*)$')
-                if ($match.Success -and $match.Groups[1].Value -eq "$node/lifecycle" -and $match.Groups[2].Value -eq '0') {
-                    $lifecyclePayloads += $match.Groups[3].Value
+                $parsed = ConvertFrom-HomieCaptureLine -Line $line
+                if ($null -ne $parsed -and $parsed.Topic -eq "$node/lifecycle" -and -not $parsed.Retained) {
+                    $lifecyclePayloads += $parsed.Payload
                 }
             }
 
+            # The correction is looked for AFTER the reflection, not anywhere in the
+            # window. The window is deliberately opened before the command, so it can
+            # also hold payloads that predate it: the preceding step republishes its own
+            # command every poll round, and M2Mqtt retransmits an unacknowledged QoS-1
+            # publish every MqttSettings.DelayOnRetry (1s), up to three times -- the same
+            # retransmission ConvertTo-HomieSnapshot's merge rule exists to absorb. A
+            # first-occurrence search for the expected value would find one of those and
+            # report a correct device as having published the correction too early.
             $reflected = [array]::IndexOf($lifecyclePayloads, $step.Command)
-            $corrected = [array]::IndexOf($lifecyclePayloads, $step.Expect)
+            $corrected = -1
+            if ($reflected -ge 0 -and ($reflected + 1) -lt $lifecyclePayloads.Length) {
+                $corrected = [array]::IndexOf($lifecyclePayloads, $step.Expect, $reflected + 1)
+            }
+
+            # Only to tell "never corrected at all" from "corrected, but before the
+            # reflection it was supposed to overwrite" -- two different device defects.
+            $correctedAnywhere = [array]::IndexOf($lifecyclePayloads, $step.Expect)
 
             if ($reflected -lt 0) {
                 $script:conformanceFailures += "refused '$($step.Command)' never reached $nodeId/lifecycle -- the command was lost, so nothing about the refusal was measured (saw: $($lifecyclePayloads -join ', '))"
             }
-            elseif ($corrected -lt 0) {
+            elseif ($corrected -lt 0 -and $correctedAnywhere -lt 0) {
                 $script:conformanceFailures += "device left the reflected '$($step.Command)' on $nodeId/lifecycle and never published '$($step.Expect)' over it"
             }
-            elseif ($corrected -lt $reflected) {
+            elseif ($corrected -lt 0) {
                 $script:conformanceFailures += "$nodeId/lifecycle published '$($step.Expect)' before the reflected '$($step.Command)', so the correction did not overwrite it (saw: $($lifecyclePayloads -join ', '))"
             }
 
@@ -1422,9 +1515,21 @@ try {
                 }
                 finally {
                     Stop-DeviceDebugCapture -Capture $debugCapture
-                }
 
-                Write-ConformancePhaseBreakdown
+                    # In the finally with it, because returning is not the check's only
+                    # way out: a missing mosquitto tool, a capture file that cannot be
+                    # cleared or a publish that fails all propagate under
+                    # $ErrorActionPreference = 'Stop' and land in the catch below as an
+                    # ERROR verdict. That is the run whose phase timings are worth
+                    # reading most, and outside the finally it was the one run that
+                    # printed none.
+                    #
+                    # After Stop-DeviceDebugCapture, not before: that call releases the
+                    # COM port the next deploy needs, and it is documented not to throw
+                    # -- it warns on a recycled or already-dead pid -- so ordering it
+                    # first does not cost the breakdown.
+                    Write-ConformancePhaseBreakdown
+                }
             }
             elseif ($settings.Kind -eq 'BrokerOutage') {
                 $verdict = Invoke-BrokerOutageCheck -Settings $settings -Port $mqttPort
