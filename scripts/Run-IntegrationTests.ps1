@@ -22,7 +22,9 @@
 
     On success this prints a one-line-per-test summary and exits 0 -- nothing else to
     look at. On failure it exits 1 and prints the captured device log path for the
-    failing test, which is where any real investigation starts.
+    failing test, which is where any real investigation starts. Alongside it in the same
+    directory are the broker's own log and the homie/# log for every broker generation
+    the run went through, kept because the dev environment deletes both at teardown.
 
     *** HARDWARE: this flashes and runs code on the physical device on the configured
     COM port, once per test. Treat it exactly like Deploy-ToDevice.ps1. ***
@@ -42,8 +44,9 @@
     tearing down someone else's broker is not theirs to do.
 
 .PARAMETER LogDirectory
-    Where to write the per-test device logs. Defaults to a timestamped folder under
-    the system temp directory; the path is printed at the end of the run.
+    Where to write the per-test device logs, and the preserved broker and homie/# logs
+    that go with them. Defaults to a timestamped folder under the system temp directory;
+    the path is printed at the end of the run.
 
 .EXAMPLE
     .\scripts\Run-IntegrationTests.ps1
@@ -181,6 +184,128 @@ function Get-TestProjectPath {
     return "src\integrationTests\$TestName\$TestName.nfproj"
 }
 
+# ── Evidence ──────────────────────────────────────────────────────────────────
+# What a failed run leaves behind to be read afterwards.
+#
+# Both broker-side logs are transient by design: Start-DevEnv.ps1 truncates them on
+# every start and Stop-DevEnv.ps1 deletes them on every stop, and the host-decided
+# checks cycle the broker mid-test. So by the time a verdict is being investigated the
+# wire evidence behind it is already gone -- which is why the HomieClientCheck run that
+# lost all five /set commands (issue #35) could not be chased any further than the
+# summary line. Each generation is copied into $LogDirectory before it is taken away.
+
+# Which test the next preserved generation belongs to, and how many have been kept.
+# Declared here rather than left to the first assignment because Set-StrictMode
+# -Version Latest makes reading an unset variable a terminating error, and the first
+# read happens in the pre-flight teardown, before any test has run.
+$script:evidenceLabel = 'suite'
+$script:evidenceGeneration = 0
+
+function Save-BrokerEvidence {
+    param([Parameter(Mandatory = $true)][string]$Port)
+
+    $script:evidenceGeneration++
+
+    # Numbered, not timestamped: the number is also the count of broker generations a
+    # run went through, which is the thing a reader wants to line up against the phase
+    # breakdown.
+    foreach ($log in @(
+        @{ Kind = 'BrokerLog';     Name = 'broker' }
+        @{ Kind = 'SubscriberLog'; Name = 'homie' }
+    )) {
+        $source = Get-SmartHomeDevEnvPath -Port $Port -Kind $log.Kind
+        if (-not (Test-Path -LiteralPath $source)) {
+            continue
+        }
+
+        $destination = Join-Path $LogDirectory ("{0}-{1:d2}-{2}.log" -f $script:evidenceLabel, $script:evidenceGeneration, $log.Name)
+        try {
+            # Both files are still open for writing by the processes producing them.
+            # Copy-Item reads them anyway -- measured against a live Mosquitto 2.0.22 log
+            # and the cmd.exe redirect behind the homie/# subscriber.
+            Copy-Item -LiteralPath $source -Destination $destination -ErrorAction Stop
+        }
+        catch {
+            # Preserving evidence must never become the reason a run fails, and this is
+            # called from a finally where a throw would replace the suite's own outcome.
+            Write-Warning ("Could not preserve {0}: {1}" -f $source, $_.Exception.Message)
+        }
+    }
+}
+
+function Start-DeviceDebugCapture {
+    # Managed debug output captured alongside a host-decided check, whose verdict comes
+    # from the broker rather than from the device.
+    #
+    # Only the device's own log can say whether it saw a command at all, and the
+    # conformance path never took one -- so a lost /set left the device side of issue #35
+    # entirely unobserved.
+    #
+    # -NoReboot, unlike the DeviceMarker captures further down. Those reboot because a
+    # missed boot is indistinguishable there from a device that never reported, and their
+    # verdict is read out of the log. Here a few missed lines cost only evidence, while a
+    # reboot would restart the announce the check is about to measure.
+    #
+    # Launched through cmd.exe with ShellExecute for the handle-inheritance reason
+    # documented in Start-DevEnv.ps1: -RedirectStandardOutput forces UseShellExecute=false
+    # and hands this script's own stdout to a child that outlives the call.
+    param(
+        [Parameter(Mandatory = $true)][string]$LogPath,
+
+        # A backstop, not a measurement. The capture is stopped when the check returns;
+        # this only bounds a monitor left behind by a runner that died.
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    Remove-Item -Path $LogPath -Force -ErrorAction SilentlyContinue
+
+    # The host this script is running under, so a pwsh session doesn't spawn a
+    # Windows PowerShell child (or the reverse) with a different view of the module path.
+    $powerShellExe = (Get-Process -Id $PID).Path
+    if (-not $powerShellExe) {
+        $powerShellExe = Join-Path $PSHOME 'powershell.exe'
+    }
+
+    # -ExecutionPolicy Bypass because a fresh process does not inherit the policy the
+    # caller was started under: a machine set to Restricted runs this suite as
+    # `powershell -ExecutionPolicy Bypass -File ...`, and the child would otherwise
+    # refuse to load a script the parent is already executing.
+    $command = '/c ""{0}" -NoProfile -ExecutionPolicy Bypass -File "{1}" -DurationSeconds {2} -NoBuild -NoReboot > "{3}" 2>&1"' -f `
+        $powerShellExe, $watchScript, $TimeoutSeconds, $LogPath
+    $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
+
+    return @{ ProcessId = $process.Id; Path = $LogPath }
+}
+
+function Stop-DeviceDebugCapture {
+    # Killed as a tree rather than asked to stop: the monitor listens for a fixed
+    # duration and has no way to be told the check is over. The COM port is released
+    # with the process, so the next test's deploy is not affected.
+    param([hashtable]$Capture)
+
+    if ($null -eq $Capture) {
+        return
+    }
+
+    # Only if it is still running. A monitor that could not attach exits on its own and
+    # takes its cmd.exe launcher with it, and taskkill then writes "process not found"
+    # to stderr -- which under this script's $ErrorActionPreference = 'Stop' is a
+    # terminating NativeCommandError, thrown out of the finally that calls this and
+    # replacing the verdict the check had already reached. Measured, not assumed:
+    # Stop-SmartHomeProcessTree on a dead pid throws here.
+    if (Get-Process -Id $Capture.ProcessId -ErrorAction SilentlyContinue) {
+        Stop-SmartHomeProcessTree -ProcessId $Capture.ProcessId
+    }
+
+    # An attach failure must not change a verdict the broker already decided, so this
+    # warns rather than throwing -- but it says so, because an empty log is otherwise
+    # indistinguishable from a device that said nothing.
+    $captured = Get-Item -LiteralPath $Capture.Path -ErrorAction SilentlyContinue
+    if ($null -eq $captured -or $captured.Length -eq 0) {
+        Write-Warning ("No managed debug output was captured ({0}). The monitor could not attach; the verdict is unaffected, but there is no device-side evidence behind it." -f $Capture.Path)
+    }
+}
+
 # ── Broker lifetime ───────────────────────────────────────────────────────────
 # The stop/start recipe the host-decided checks need, in one place instead of six.
 #
@@ -205,6 +330,10 @@ function Start-SuiteBroker {
 
 function Stop-SuiteBroker {
     param([Parameter(Mandatory = $true)][string]$Port)
+
+    # Before the stop, not after: Stop-DevEnv.ps1 deletes the broker and homie/# logs
+    # as part of tearing the environment down, and a restart truncates them again.
+    Save-BrokerEvidence -Port $Port
 
     try {
         & $stopEnvScript | Out-Null
@@ -805,6 +934,25 @@ function Write-ConformancePhaseBreakdown {
     }
 }
 
+function Get-ConformanceCaptureSeconds {
+    # A ceiling for the debug capture that runs alongside the check, derived from the
+    # check's own timeouts rather than guessed: the announce wait, the /set round trip,
+    # one per lifecycle step, and the re-announce wait, plus slack for the snapshot
+    # windows and the broker restart between them.
+    #
+    # Deliberately loose. A capture that ends early takes the device-side evidence with
+    # it exactly when the run was slow enough to be worth reading, and nothing waits out
+    # this window -- Stop-DeviceDebugCapture closes it as soon as the check returns.
+    param([hashtable]$Settings)
+
+    $lifecycleSteps = 5
+
+    return $Settings.SettleSeconds +
+           $Settings.RecoverySeconds +
+           (($lifecycleSteps + 1) * $Settings.CommandTimeoutSeconds) +
+           60
+}
+
 function Invoke-HomieConformanceCheck {
     # Measures a purpose-built device against the Homie v4 convention, from the
     # broker's side. Every assertion is collected rather than thrown, so one run
@@ -1217,6 +1365,7 @@ try {
     foreach ($testName in $Tests) {
         $settings = $testCatalog[$testName]
         $logFile = Join-Path $LogDirectory "$testName.log"
+        $script:evidenceLabel = $testName
 
         Write-Host ('=' * 69)
         Write-Host ("Integration test: {0}" -f $testName) -ForegroundColor Cyan
@@ -1253,7 +1402,15 @@ try {
             # the broker is restarted.
             $verdict = $null
             if ($settings.Kind -eq 'HomieConformance') {
-                $verdict = Invoke-HomieConformanceCheck -Settings $settings -Port $mqttPort
+                $debugCapture = Start-DeviceDebugCapture -LogPath $logFile `
+                                                         -TimeoutSeconds (Get-ConformanceCaptureSeconds -Settings $settings)
+                try {
+                    $verdict = Invoke-HomieConformanceCheck -Settings $settings -Port $mqttPort
+                }
+                finally {
+                    Stop-DeviceDebugCapture -Capture $debugCapture
+                }
+
                 Write-ConformancePhaseBreakdown
             }
             elseif ($settings.Kind -eq 'BrokerOutage') {
@@ -1362,7 +1519,10 @@ finally {
     if ($brokerStarted) {
         Write-Host ""
         # Raw call, deliberately not Stop-SuiteBroker: this is a finally, and a throw
-        # here would replace whatever outcome the suite had already reached.
+        # here would replace whatever outcome the suite had already reached. Which also
+        # means the archiving Stop-SuiteBroker does has to be repeated here, for the
+        # generation that covers the end of the last test.
+        Save-BrokerEvidence -Port $mqttPort
         try {
             & $stopEnvScript
         }
@@ -1394,7 +1554,8 @@ Write-Host ("  {0,-20} {1,-12} {2,-16}" -f 'TOTAL', '', ("{0}s ({1}s deploy)" -f
 $failed = @($results | Where-Object { $_.Outcome -ne 'PASS' })
 
 Write-Host ""
-Write-Host ("Device logs: {0}" -f $LogDirectory) -ForegroundColor DarkGray
+Write-Host ("Logs: {0}" -f $LogDirectory) -ForegroundColor DarkGray
+Write-Host "  <test>.log, plus <test>-NN-broker.log / -homie.log per broker generation" -ForegroundColor DarkGray
 
 if ($failed.Count -gt 0) {
     Write-Host ""
