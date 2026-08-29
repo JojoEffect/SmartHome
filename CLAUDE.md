@@ -103,6 +103,10 @@ Required local tools:
 - `nanoff` CLI: `dotnet tool install -g nanoff`
 - [Mosquitto](https://mosquitto.org/download/)
 - Git on PATH
+- [GitHub CLI](https://cli.github.com/) (`gh`), **authenticated** — `gh auth login`, then
+  confirm with `gh auth status`. Not optional and not only for opening pull requests: the
+  backlog *is* GitHub issues (see Open work below), so `gh issue list` is how you find out
+  what there is to do. Without it, that section of this file cannot be acted on at all.
 
 ## Repository layout
 
@@ -418,8 +422,8 @@ needs your own GitHub admin action (I can't do this for you):
 3. Add it as repo secret `CLAUDE_CODE_OAUTH_TOKEN`
 
 Locally, `/code-review` works today with no setup — reviews your branch's diff in-session,
-`--fix` applies findings, `--comment` posts them to a PR (needs `gh` CLI authenticated, which
-isn't installed on this machine yet).
+`--fix` applies findings, `--comment` posts them to a PR (that last one goes through `gh`,
+which First-time setup requires anyway).
 
 ## Subagents
 
