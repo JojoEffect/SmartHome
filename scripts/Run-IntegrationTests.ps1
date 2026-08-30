@@ -1222,12 +1222,20 @@ function Invoke-HomieConformanceCheck {
     # was dropped, and a boolean that was neither 'true' nor 'false' was turned into
     # 'false' -- fabricated, not refused.
     #
+    # That last one is why the boolean's valid payload is 'true' rather than the more
+    # obvious 'false'. A fabricating boolean never publishes 'on' back, it publishes
+    # 'false', so a case whose valid payload is also 'false' cannot tell the fabrication
+    # from the refusal -- both leave a single 'false' on the topic and the "was the
+    # forbidden payload applied" check below looks for 'on', which never appears. With
+    # 'true' as the valid payload the fabricated 'false' lands *before* the reflection,
+    # which is what the ordering check below measures.
+    #
     # string-value has no case here: every payload is a valid Homie string and $format
     # carries no meaning for that datatype, so there is nothing for a payload to violate.
     $outOfFormatCases = @(
         @{ Property = 'integer-value'; Bad = '101';    Good = '43';        Echo = '43'        }
         @{ Property = 'float-value';   Bad = 'warm';   Good = '22.5';      Echo = '22.50'     }
-        @{ Property = 'boolean-value'; Bad = 'on';     Good = 'false';     Echo = 'false'     }
+        @{ Property = 'boolean-value'; Bad = 'on';     Good = 'true';      Echo = 'true'      }
         @{ Property = 'enum-value';    Bad = 'purple'; Good = 'medium';    Echo = 'medium'    }
         @{ Property = 'color-value';   Bad = 'FF8000'; Good = '255,128,0'; Echo = '255,128,0' }
     )
@@ -1270,8 +1278,23 @@ function Invoke-HomieConformanceCheck {
             continue
         }
 
-        if ([array]::IndexOf($payloads, $case.Echo) -lt 0) {
+        $echoIndex = [array]::IndexOf($payloads, $case.Echo)
+
+        if ($echoIndex -lt 0) {
             $script:conformanceFailures += "neither the out-of-format '$($case.Bad)' nor the valid '$($case.Good)' reached $($case.Property), so the refusal was never measured (saw: $($payloads -join ', '))"
+            continue
+        }
+
+        # A forbidden payload does not have to come back verbatim to have been applied.
+        # BooleanProperty's old behaviour turned anything unrecognised into 'false' and
+        # published *that*, which the verbatim check above cannot see at all -- so the
+        # measurement is the stronger one: a refusal publishes nothing, therefore the
+        # valid payload's reflection must be the FIRST thing on the property topic inside
+        # the window. Anything ahead of it is the forbidden payload having moved the
+        # value, whatever it was rendered as.
+        if ($echoIndex -gt 0) {
+            $before = $payloads[0..($echoIndex - 1)] -join ', '
+            $script:conformanceFailures += "$($case.Property) published '$before' before the valid '$($case.Good)', so the out-of-format '$($case.Bad)' was applied rather than refused (saw: $($payloads -join ', '))"
         }
     }
 
