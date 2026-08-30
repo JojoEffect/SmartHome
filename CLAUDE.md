@@ -422,9 +422,20 @@ Three things make it work, and skipping any one of them makes it worse than not 
   a reviewable diff becomes an unreviewable one. Write the issue so it can be picked up cold:
   what is wrong, the evidence, the files, and what closing it would look like.
 
-Check `gh issue list --state open` first — a duplicate is worse than nothing. Label with
-`type:` and `area:` to match the rest of the list, and link the pull request or issue that
-turned the finding up.
+Check `gh issue list --state all` first — a duplicate is worse than nothing, and a closed issue
+counts as much as an open one: #33 was closed as working-as-intended and #16 as not-planned, so
+searching only the open list re-files decisions this repo has already made. Label to match the
+rest of the list, and link the pull request or issue that turned the finding up. The label names
+contain the space after the colon — `type: bug`, not `type:bug`, which `gh` rejects with
+`'type:bug' not found` and then creates nothing:
+
+```bash
+gh issue create --title "..." --body "..." --label "type: bug" --label "area: infra"
+```
+
+Then say which issues you filed. What must not live in a summary is the *finding* — the issue
+numbers themselves belong in the session's closing message, so the user can see what was opened
+in a public tracker without going to look for it.
 
 Worth filing: a defect confirmed by reproduction or by reading the source; a constant or
 assumption the code asserts without evidence; a residual gap in something just shipped, where
@@ -432,8 +443,11 @@ the mitigation is "remember to do X"; work deliberately cut from a change to kee
 reviewable.
 
 Not worth filing: style preferences; refactors with no stated payoff; anything already covered
-by an open issue or already documented in this file as intentional; and anything you have not
-actually checked.
+by an open issue, settled by a closed one, or already documented in this file as intentional;
+and anything you have not actually checked.
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) carries the same rule in short form — it is the source of
+truth for process, so change both or neither.
 
 ## Development process
 
