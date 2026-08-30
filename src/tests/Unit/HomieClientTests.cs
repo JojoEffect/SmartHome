@@ -56,13 +56,7 @@ namespace SmartHome.UnitTests
 
             var mqttClient = new MockMqttClient();
 
-            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
-            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
-                        .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, 0.0)
-                        .BuildProperty(out FloatProperty property)
-                    .BuildNode()
-                .BuildDevice();
-
+            var device = BuildSinglePropertyDevice(out FloatProperty property, settable: false);
 
             // Act
             var homieClient = new HomieClient(device, mqttClient);
@@ -87,13 +81,7 @@ namespace SmartHome.UnitTests
 
             var mqttClient = new MockMqttClient();
 
-            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
-            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
-                        .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, initialValue)
-                            .WithSettable(true)
-                        .BuildProperty(out FloatProperty property)
-                    .BuildNode()
-                .BuildDevice();
+            var device = BuildSinglePropertyDevice(out FloatProperty property, settable: true);
 
             // Assert
             Assert.AreEqual(initialValue, property.Value);
@@ -123,12 +111,7 @@ namespace SmartHome.UnitTests
             // Arrange
             var mqttClient = new MockMqttClient();
 
-            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
-            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
-                        .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, 0.0)
-                        .BuildProperty()
-                    .BuildNode()
-                .BuildDevice();
+            var device = BuildSinglePropertyDevice();
 
             var homieClient = new HomieClient(device, mqttClient);
 
@@ -153,12 +136,7 @@ namespace SmartHome.UnitTests
             var mqttClient = new MockMqttClient();
             mqttClient.Connect("someone-else");
 
-            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
-            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
-                        .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, 0.0)
-                        .BuildProperty()
-                    .BuildNode()
-                .BuildDevice();
+            var device = BuildSinglePropertyDevice();
 
             var homieClient = new HomieClient(device, mqttClient);
 
@@ -377,12 +355,7 @@ namespace SmartHome.UnitTests
             // Arrange
             var mqttClient = new MockMqttClient();
 
-            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
-            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
-                        .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, 0.0)
-                        .BuildProperty(out FloatProperty property)
-                    .BuildNode()
-                .BuildDevice();
+            var device = BuildSinglePropertyDevice(out FloatProperty property, settable: false);
 
             var homieClient = new HomieClient(device, mqttClient);
             homieClient.Connect();
