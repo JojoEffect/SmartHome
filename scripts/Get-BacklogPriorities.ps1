@@ -101,6 +101,14 @@
 .PARAMETER Limit
     Maximum issues to fetch. Default 200.
 
+.PARAMETER Handoff
+    Print the top N as pointers for spinning each one off into its own session: url, axes,
+    the full scoring trail, any override note, and a marker on the hardware-gated ones so
+    the confirm-before-device-scripts rule reaches the new session. Blocked and closed rows
+    are skipped however high they rank -- a blocked issue names what it is waiting for
+    rather than work that can start -- and the skipped ones are listed by name and reason.
+    In -Json the selection comes back as a Handoff array of issue numbers.
+
 .PARAMETER RankingOnly
     Skip the cluster listing and print the ranked table alone. For the second round,
     where the clusters have already been shown and discussed.
@@ -141,6 +149,9 @@ param(
     [string]$State = 'open',
 
     [int]$Limit = 200,
+
+    [ValidateRange(0, 20)]
+    [int]$Handoff = 0,
 
     [switch]$RankingOnly,
 
@@ -721,6 +732,23 @@ foreach ($record in $ranked) {
     Add-Member -InputObject $record -NotePropertyName 'Relative' -NotePropertyValue $relative -Force
 }
 
+# -------------------------------------------------------------------- handoff ----
+#
+# The top N as self-contained briefs, for spinning each one off into its own session. The
+# selection is not simply "the first N rows": a blocked issue names what it is waiting for
+# rather than work that can start, and a closed one is settled. Both are skipped, and the
+# count skipped is reported -- a handoff list that quietly dropped two entries would read
+# as "these are the top five" when it is not.
+
+$handoffSet = @()
+$handoffSkipped = @()
+if ($Handoff -gt 0) {
+    $handoffSkipped = @($ranked | Where-Object { $_.Blocked -or $_.State -ne 'OPEN' })
+    $handoffSet = @($ranked |
+        Where-Object { -not $_.Blocked -and $_.State -eq 'OPEN' } |
+        Select-Object -First $Handoff)
+}
+
 # -------------------------------------------------------------------- output ----
 
 if ($Json) {
@@ -733,6 +761,7 @@ if ($Json) {
             Overrides  = $Overrides
             Count      = $ranked.Count
         }
+        Handoff = @($handoffSet | ForEach-Object { $_.Number })
         Issues  = $ranked
     } | ConvertTo-Json -Depth 8
     exit 0
@@ -831,6 +860,42 @@ foreach ($record in $shown) {
 
 if ($Top -gt 0 -and $ranked.Count -gt $Top) {
     Write-Host ("  ... {0} more (drop -Top, or use -Json, for all)" -f ($ranked.Count - $Top)) -ForegroundColor DarkGray
+}
+
+if ($Handoff -gt 0) {
+    Write-Host ''
+    Write-Host "HANDOFF - top $(@($handoffSet).Count) to spin off" -ForegroundColor White
+    if (@($handoffSkipped).Count -gt 0) {
+        Write-Host ("  Skipped $(@($handoffSkipped).Count) row(s) that cannot be started, wherever they ranked: {0}" -f `
+            ((@($handoffSkipped) | ForEach-Object { "#$($_.Number) $(if ($_.Blocked) { 'blocked' } else { 'closed' })" }) -join ', ')) -ForegroundColor DarkGray
+    }
+
+    foreach ($record in $handoffSet) {
+        Write-Host ''
+        Write-Host ("  #{0} - {1}" -f $record.Number, $record.Title) -ForegroundColor Cyan
+        Write-Host ("    {0}" -f $record.Url) -ForegroundColor DarkGray
+        Write-Host ("    prio {0}  {1}  risk {2}  effort {3}  {4}" -f `
+                $record.Relative, $record.Where, $record.Risk, $record.Effort, $record.Track)
+        Write-Host ("    why: {0}" -f (@($record.Why) -join ' ; ')) -ForegroundColor DarkGray
+
+        if (@($record.Overridden).Count -gt 0) {
+            Write-Host ("    overridden: {0}" -f (@($record.Overridden) -join ', ')) -ForegroundColor DarkGray
+        }
+        if ($record.Note) {
+            Write-Host ("    note: {0}" -f $record.Note) -ForegroundColor DarkGray
+        }
+        if (@($record.Unblocks).Count -gt 0) {
+            Write-Host ("    unblocks: {0}" -f ((@($record.Unblocks) | ForEach-Object { "#$_" }) -join ', ')) -ForegroundColor DarkGray
+        }
+        if ($record.Where -eq 'Hardware') {
+            Write-Host '    HARDWARE: the handoff prompt must carry the confirm-before-device-scripts rule.' -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host ''
+    Write-Host '  These are pointers, not briefs. Read each body (gh issue view <n> --comments)' -ForegroundColor DarkGray
+    Write-Host '  before writing a handoff prompt - a spun-off session starts cold and cannot' -ForegroundColor DarkGray
+    Write-Host '  see this ranking or this conversation.' -ForegroundColor DarkGray
 }
 
 Write-Host ''

@@ -62,6 +62,46 @@ Then **read the bodies of the top three or four** before presenting the order. T
 classification is a keyword heuristic and the script says so itself; the top of the list is
 exactly where a wrong call is most expensive.
 
+## Round 4 — offer to spin the top few off
+
+Once the order is agreed, offer to spin the top issues off into their own sessions. Ask how
+many (3, 4 or 5 is the useful range) rather than picking a number — it is the user's backlog.
+
+```powershell
+.\scripts\Get-BacklogPriorities.ps1 -Hardware Available -TimeBudget Quick -Theme Trust -Overrides .\overrides.json -RankingOnly -Handoff 4
+```
+
+`-Handoff N` prints the selected issues with their url, axes, full scoring trail, any override
+note, and a marker on the hardware-gated ones. It **skips blocked and closed rows however high
+they rank** — a blocked issue names what it is waiting for, not work that can start — and lists
+what it skipped and why, so the selection is never quietly smaller than it claims.
+
+Then spawn one background task per issue. The prompts are the whole job here, and the rule that
+makes them work is that **a spun-off session starts cold**: it cannot see this ranking, the
+interview, the issue bodies you read, or anything else in this conversation. So each prompt must
+carry:
+
+- **The issue number and a `gh issue view <n> --comments` instruction.** Comments carry analysis
+  that the body does not — including anything this session posted.
+- **The substance, restated.** Not "see #54" — what is wrong, the evidence, the files, and what
+  closing it would look like. Written so someone who has never seen this backlog can start.
+- **Scope boundaries.** If the issue body contains a separable second question, say so
+  explicitly and say it is separable. Otherwise the new session widens the diff.
+- **Cross-links to related issues**, where they exist. #35, #36 and #54 all touch
+  `Stop-HomieCapture`; a session that does not know that will re-derive it or collide with
+  another. Say which may already be in progress.
+- **The hardware-confirm rule, verbatim, for every hardware-gated issue.** CLAUDE.md requires
+  confirming before `Deploy-ToDevice.ps1`, `Run-Tests.ps1` and `Run-IntegrationTests.ps1` even
+  when a task obviously calls for them. A fresh session has CLAUDE.md, but stating it in the
+  prompt removes the chance of it being read as pre-authorised. Add the reminder that the suite
+  leaves its last test flashed, so RoomSensor needs redeploying afterwards.
+- **The process rules**: branch per CLAUDE.md, Conventional Commit PR title, and file a GitHub
+  issue for anything found outside the change.
+- **`cwd` set to the main checkout**, not the current worktree — these are unrelated branches.
+
+Where a hypothesis rather than a fact is being handed over, mark it as one and say what would
+confirm or refute it. A spun-off session that treats a guess as a finding wastes its whole run.
+
 ## Correcting the heuristic
 
 When reading a body contradicts an axis, do not argue with it in prose — hand the correction
@@ -175,6 +215,7 @@ you find*) — an unfiled finding cannot be prioritised at all.
 | `-Top N` | Show the first N rows. Clusters and `-Json` always cover everything |
 | `-State open\|closed\|all` | Default `open`. `all` is for checking whether a finding is already filed |
 | `-Limit N` | Default 200. A run that hits the cap warns that the ranking is partial |
+| `-Handoff N` | Print the top N as spin-off pointers, skipping blocked and closed rows |
 | `-Json` | Full classification, every signal and both scores, instead of the report |
 
 `-State closed` or `all` scores closed issues exactly like open ones — they are flagged `C`,
