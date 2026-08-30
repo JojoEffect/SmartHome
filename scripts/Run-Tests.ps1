@@ -10,10 +10,15 @@
     4. Runs vstest.console against the built test assembly using
        src\tests\Unit\nano.runsettings.
 
-    nano.runsettings has <IsRealHardware>True</IsRealHardware> — this
-    deploys test code to and executes it on the physical device on the
-    configured COM port, same as Deploy-ToDevice.ps1. Treat it as a
-    hardware-touching action.
+    The default run settings file, nano.runsettings, has
+    <IsRealHardware>True</IsRealHardware> — this deploys test code to and
+    executes it on the physical device on the configured COM port, same as
+    Deploy-ToDevice.ps1. Treat it as a hardware-touching action.
+
+    -RunSettings nano.ci.runsettings sets IsRealHardware=False instead and runs
+    the same tests on the nanoclr virtual device, touching no COM port and
+    deploying nothing. The script reads that flag out of the resolved settings
+    file and reports which of the two it did, so a log can be told apart later.
 
 .NOTES
     Requires:
@@ -106,9 +111,51 @@ Visual Studio's "Restore NuGet Packages", then re-run this script.
     exit 1
 }
 
-# ── Run tests on hardware ─────────────────────────────────────────────────────
+# ── Run tests ─────────────────────────────────────────────────────────────────
+# Which target the run uses is declared by the settings file, so read it instead of
+# assuming the hardware default: -RunSettings nano.ci.runsettings sets IsRealHardware
+# False and executes on the nanoclr virtual device, with no COM port and no deploy.
+# CLAUDE.md singles this script out as one of three that talk to the physical ESP32,
+# and this line is the only thing in the output saying which of the two a given run
+# was -- a virtual run announcing "on hardware" misleads exactly the person trying to
+# reconcile what was and was not exercised on the device.
+#
+# SelectSingleNode rather than $xml.RunSettings.nanoFrameworkAdapter.IsRealHardware:
+# under Set-StrictMode a missing element is an error on property access, and a
+# caller-supplied settings file is allowed to omit it.
+#
+# Name it from the resolved path, not from $RunSettings: PowerShell variables are
+# case-insensitive, so the $runSettings assignment above has already overwritten the
+# parameter of that name with the full path.
+$runSettingsName = Split-Path $runSettings -Leaf
+[xml]$runSettingsXml = Get-Content -Path $runSettings -Raw
+$hardwareNode = $runSettingsXml.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/IsRealHardware')
+$portNode     = $runSettingsXml.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/RealHardwarePort')
+$hardwareFlag = if ($hardwareNode) { $hardwareNode.InnerText.Trim() } else { '' }
+$hardwarePort = if ($portNode) { $portNode.InnerText.Trim() } else { '' }
+
+if ($hardwareFlag -eq 'True') {
+    $target = 'real hardware'
+    $targetDetail = if ($hardwarePort) {
+        "COM port $hardwarePort from $runSettingsName"
+    } else {
+        # An empty RealHardwarePort means the adapter takes the first nanoDevice it
+        # finds, which is not necessarily SMARTHOME_COM_PORT. Don't name a port the
+        # run may not have used.
+        "first device found; $runSettingsName names no COM port"
+    }
+} elseif ($hardwareFlag -eq 'False') {
+    $target = 'the nanoclr virtual device'
+    $targetDetail = "no COM port, no deploy; from $runSettingsName"
+} else {
+    # Only reachable through a -RunSettings file declaring neither value, in which case
+    # the adapter picks and this script genuinely cannot say which target ran.
+    $target = 'an undeclared target'
+    $targetDetail = "$runSettingsName sets no IsRealHardware, so the adapter chooses"
+}
+
 Write-Host ""
-Write-Host "Running tests on hardware via vstest.console..." -ForegroundColor Cyan
+Write-Host "Running tests on $target ($targetDetail) via vstest.console..." -ForegroundColor Cyan
 Write-Host "  Adapter: $adapterDir"
 Write-Host "  Settings: $runSettings"
 
@@ -173,7 +220,7 @@ Results: $trxPath
 }
 
 Write-Host ""
-Write-Host "Tests passed." -ForegroundColor Green
+Write-Host "Tests passed on $target." -ForegroundColor Green
 
 # Explicit success code -- see the note in Sync-NanoFrameworkRepos.ps1.
 exit 0
