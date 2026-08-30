@@ -168,6 +168,12 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
             //
             // Actuators copying this device should do the same: reflect the outcome, not
             // the command.
+            //
+            // Unconditional, so an accepted command publishes the same payload twice --
+            // the library's reflection, then an identical correction. See #36: guarding
+            // on _lifecycle.Value would suppress the second publish, but Value is already
+            // updated even when the reflection's own publish threw, and the guard would
+            // then suppress the only publish the broker would have seen.
             _lifecycle.Update(_homieClient.State.GetString());
         }
 
@@ -180,11 +186,24 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
                     continue;
                 }
 
+                // Every arm named, and the default refuses rather than falling back to
+                // Ready(). LifecycleStates is also what BuildLifecycleFormat publishes
+                // as $format, so a state added there is immediately offered to
+                // controllers -- and a default that applied Ready() would answer such a
+                // command with the wrong transition and no sign that anything was
+                // missed. Refusing leaves the correction in HandleCommand to publish the
+                // state the device is actually in.
+                //
+                // The default logs through RefuseUnwiredState rather than returning false
+                // inline: a bare false is indistinguishable in the log from a transition
+                // the convention's own state machine refused, which is exactly the "no
+                // sign that anything was missed" this arm exists to remove.
                 var applied = state switch
                 {
+                    State.Ready => _homieClient.Ready(),
                     State.Alert => _homieClient.Alert(),
                     State.Sleeping => _homieClient.Sleep(),
-                    _ => _homieClient.Ready(),
+                    _ => RefuseUnwiredState(state),
                 };
 
                 Debug.WriteLine($"HomieClientCheck: '{payload}' -> {applied}");
@@ -195,6 +214,17 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
             // list, and a refused payload never reaches OnCommand. Kept as the thing that
             // would say so if that ever stopped being true.
             Debug.WriteLine($"HomieClientCheck: unknown lifecycle command '{payload}'.");
+        }
+
+        // A state that is in LifecycleStates -- and so in $format, and so offered to
+        // controllers -- but has no arm in HandleLifecycleCommand's switch. Says so
+        // rather than sharing the refused transition's log line, so the gap is visible in
+        // the captured debug output instead of looking like the device declining a
+        // command it understood.
+        private static bool RefuseUnwiredState(State state)
+        {
+            Debug.WriteLine($"HomieClientCheck: '{state.GetString()}' is offered in $format but has no transition wired -- refusing.");
+            return false;
         }
 
         // The runner cycles the broker while this device runs, so it can boot with no
