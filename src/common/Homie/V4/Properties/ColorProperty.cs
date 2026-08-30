@@ -90,8 +90,23 @@ namespace SmartHome.Homie.V4.Properties
             OnUpdate?.Invoke(args);
         }
 
+        internal override string? Validate(string value)
+        {
+            // Only rgb is implemented, whatever $format declares -- an hsv property would
+            // be measured against the wrong grammar here, which is a pre-existing gap in
+            // HomieColor rather than something this check introduces.
+            if (!HomieColor.TryParse(value, out _))
+            {
+                return "not an '<r>,<g>,<b>' triple with components in 0..255";
+            }
+
+            return null;
+        }
+
         internal override void SetInternal(string value)
         {
+            // Validate() has already proven this parses; the guard is what keeps that
+            // structural rather than a comment.
             if (HomieColor.TryParse(value, out var parsed))
             {
                 Update(parsed);
