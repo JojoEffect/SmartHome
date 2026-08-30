@@ -99,7 +99,10 @@ pessimistically before the flash and tightened after it) and pads to `max(this i
 record)` rounded up to a 4KB sector — same guarantee, roughly half the erase-and-verify
 footprint across a suite run. Anything the record can't vouch for — missing, corrupt, a
 different `-DeployAddress`, `-FullPad` — falls back to the flat 400KB, never to the bare
-image size.
+image size, and never below a larger footprint the record does vouch for at this address
+(`-FullPad` distrusts how *tight* the record is, not its floor). An image bigger than the
+400KB fallback deploys fine but warns, because the fallback stops being a worst case the
+moment one exists.
 
 The record only describes what *this script* flashed. Visual Studio's F5 deploy and the
 nanoFramework test adapter both write the deployment partition themselves, and erase only

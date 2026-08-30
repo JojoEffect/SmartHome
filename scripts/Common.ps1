@@ -812,11 +812,23 @@ function Clear-SmartHomeDeployState {
         [string]$ComPort
     )
 
+    # A clear that quietly did not happen is the one failure this whole mechanism has
+    # to avoid: it leaves a record SMALLER than what is actually on the device, and the
+    # next deploy pads to it. So a missing file is fine (nothing to clear) but a removal
+    # that fails is not swallowed -- callers run under $ErrorActionPreference = 'Stop'
+    # and should stop rather than flash against a record they were told was gone.
     if ($ComPort) {
-        Remove-Item -Path (Get-SmartHomeDeployStatePath -ComPort $ComPort) -Force -ErrorAction SilentlyContinue
+        $stateFile = Get-SmartHomeDeployStatePath -ComPort $ComPort
+        if (Test-Path -LiteralPath $stateFile) {
+            Remove-Item -LiteralPath $stateFile -Force
+        }
         return
     }
 
-    Get-ChildItem -Path (Get-SmartHomeDeployStatePath -ComPort '*') -ErrorAction SilentlyContinue |
-        Remove-Item -Force -ErrorAction SilentlyContinue
+    # -LiteralPath on the directory plus -Filter, not a wildcard -Path: Get-ChildItem
+    # reads [ and ] in a -Path as wildcard metacharacters, so a temp directory whose
+    # name contains either would match nothing at all and clear silently.
+    $pattern = Split-Path (Get-SmartHomeDeployStatePath -ComPort '*') -Leaf
+    Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Filter $pattern -File -ErrorAction SilentlyContinue |
+        Remove-Item -Force
 }
