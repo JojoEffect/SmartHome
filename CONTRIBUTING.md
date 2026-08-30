@@ -97,6 +97,12 @@ Labels: `type:` (bug, feature, task, spike), `area:` (homie, infra, sensor), `st
 `status: blocked` and says in the body exactly what it is waiting for, so it can be
 picked up cold.
 
+Anything found and *verified* outside the change in hand gets its own issue rather than a
+note in a pull request body — verified because a hunch costs the next reader an
+investigation to disprove, its own issue because widening the current change is how a
+reviewable diff stops being one. Check the closed issues too before filing: a duplicate of
+something already decided is worse than nothing. `CLAUDE.md` has the longer version.
+
 ## Releases
 
 Manual and on demand. Tag when a set of changes is worth calling a version:

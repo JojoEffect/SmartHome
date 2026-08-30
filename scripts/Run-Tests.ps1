@@ -83,6 +83,30 @@ if (-not (Test-Path $runSettings)) {
     exit 1
 }
 
+# ── Invalidate Deploy-ToDevice.ps1's padding record ───────────────────────────
+# On real hardware the nanoFramework test adapter puts the test assemblies on the
+# device itself, over the debugger's WireProtocol connection rather than through
+# Deploy-ToDevice.ps1 -- and it erases only its own footprint too
+# (DeploymentExecuteFull in nf-debugger's WireProtocol\Engine.cs erases exactly the
+# assemblies' combined length). Deploy-ToDevice.ps1 sizes its 0xFF padding from a
+# record of what IT last flashed, so after a hardware test run that record describes
+# an image that is no longer what is on the device. Drop it, and the next deploy pads
+# the full fallback size -- what the script did unconditionally before the record
+# existed. Costs one full-size deploy; the alternative is a device booting leftover
+# test assemblies.
+#
+# Read via SelectSingleNode rather than $xml.RunSettings.nanoFrameworkAdapter...:
+# Set-StrictMode makes a missing property on an XmlNode a terminating error, and
+# -RunSettings can point at any file.
+[xml]$runSettingsXml = Get-Content -Path $runSettings -Raw
+$isRealHardwareNode = $runSettingsXml.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/IsRealHardware')
+if ($isRealHardwareNode -and $isRealHardwareNode.InnerText.Trim() -eq 'True') {
+    # Every port, not just $env:SMARTHOME_COM_PORT: nano.runsettings leaves
+    # RealHardwarePort empty, so the adapter flashes whichever device it detects first.
+    Clear-SmartHomeDeployState
+    Write-Host "  Cleared the deploy padding record -- the test adapter flashes the device itself." -ForegroundColor DarkGray
+}
+
 # ── Locate vstest.console and the nanoFramework test adapter ─────────────────
 $vstest = Get-VsTestPath
 $vstestCmd = Get-Command $vstest -ErrorAction SilentlyContinue

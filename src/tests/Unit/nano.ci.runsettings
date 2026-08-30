@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  CI run settings: the same unit tests as a local run, executed on the nanoclr
-  *virtual device* instead of a physical board.
+  CI run settings: the same unit tests, executed on the nanoclr *virtual device*
+  instead of a physical board. (No count here: it was stale within three commits of
+  being written, and the run reports its own.)
 
   This is a second file rather than a switch inside nano.runsettings because the settings
   are declarative and a reviewer should be able to see, in one place, exactly what CI

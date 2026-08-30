@@ -20,8 +20,11 @@ Scripts you own (each has a matching `.claude/skills/smarthome-*` skill too):
 - Don't rewrite `Start-DevEnv.ps1`'s child launches to use `-RedirectStandardOutput`: that forces
   handle inheritance and makes piping the script's output hang forever. The ShellExecute +
   `log_dest file` + `cmd.exe` wrapper arrangement is deliberate and commented in the script.
-- `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug|Release] [-DeployAddress <hex>]`
-  — build + flash. `-DeployAddress` defaults to this device's current real `deploy` partition
+- `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug|Release] [-DeployAddress <hex>] [-FullPad]`
+  — build + flash. `-FullPad` pads the flat 400KB worst case instead of sizing the 0xFF pad
+  from the per-COM-port record of the last flash — use it on the first deploy after someone
+  has deployed from Visual Studio, which writes the deployment partition behind this script's
+  back. `-DeployAddress` defaults to this device's current real `deploy` partition
   offset (`0x1E0000`) — `nanoff`'s own hardcoded default (`0x1B0000`) landed inside the
   **factory** partition instead and silently produced a deploy the CLR could never load. If a
   deploy "succeeds" but the device never does anything afterward, verify with
