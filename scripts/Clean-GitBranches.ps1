@@ -282,6 +282,18 @@ function Test-CommitMerged {
     return ($result.ExitCode -eq 0)
 }
 
+function Test-WorktreeRegistered {
+    param([string]$Path)
+
+    $wanted = ConvertTo-ComparablePath $Path
+    foreach ($line in (Invoke-Git -Arguments @('worktree', 'list', '--porcelain')).Lines) {
+        if ($line -match '^worktree (.+)$' -and (ConvertTo-ComparablePath $Matches[1]) -eq $wanted) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function New-Entry {
     param(
         [string]$Name,
@@ -627,6 +639,7 @@ function Remove-BranchBatch {
 }
 
 $failed = 0
+$failedWorktreeBranches = @{}
 
 # Worktrees first. A branch pinned by a worktree cannot be deleted, so this pass is
 # what makes the branch pass below able to reach the ones the report listed as freed.
@@ -641,14 +654,39 @@ if ($Worktrees -and @($worktreeRemove).Count -gt 0) {
         if (-not $PSCmdlet.ShouldProcess($worktree.Path, 'Remove worktree')) { continue }
         $result = Invoke-Git -Arguments @('worktree', 'remove', $worktree.Path)
         foreach ($line in $result.Lines) { Write-Host "  $line" }
-        if ($result.ExitCode -ne 0) {
-            Write-Warning "Could not remove worktree $($worktree.Path) (exit $($result.ExitCode)). The branch it pins will be reported as still pinned."
-            $failed = 1
+
+        if ($result.ExitCode -eq 0) {
+            Write-Host "  Removed worktree $($worktree.Path)" -ForegroundColor DarkGray
+            continue
+        }
+
+        $failed = 1
+
+        # `git worktree remove` is not atomic: it unregisters the worktree and THEN
+        # deletes the directory. On Windows a file another process holds open -- an
+        # editor, a live agent session -- fails the delete after the record is already
+        # gone, which leaves an orphaned directory and a branch that is no longer
+        # pinned. Ask git which of the two happened instead of assuming the removal
+        # did nothing.
+        if (Test-WorktreeRegistered -Path $worktree.Path) {
+            Write-Warning "Could not remove worktree $($worktree.Path) (exit $($result.ExitCode)). It is still registered, so the branch it pins stays pinned and is not deleted below."
+            if ($worktree.Branch) { $failedWorktreeBranches[$worktree.Branch] = $true }
         }
         else {
-            Write-Host "  Removed worktree $($worktree.Path)" -ForegroundColor DarkGray
+            Write-Warning @"
+Worktree $($worktree.Path) was unregistered, but its directory could not be deleted (exit $($result.ExitCode)) -- something still holds a file open in it.
+Git no longer knows about it and nothing points at it. Delete it by hand once the holder releases it:
+    Remove-Item -Recurse -Force '$($worktree.Path)'
+"@
         }
     }
+}
+
+# A worktree that survived its removal still pins its branch, and git would refuse the
+# delete. Drop those from the batch so one failure produces one warning rather than two.
+if (@($failedWorktreeBranches.Keys).Count -gt 0) {
+    $localDeleteAncestry = @($localDeleteAncestry | Where-Object { -not $failedWorktreeBranches.ContainsKey($_.Name) })
+    $localDeleteSquash = @($localDeleteSquash | Where-Object { -not $failedWorktreeBranches.ContainsKey($_.Name) })
 }
 
 if ($Worktrees -and @($worktreePrune).Count -gt 0) {

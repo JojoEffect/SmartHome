@@ -82,6 +82,24 @@ removal is listed as a delete candidate with `freed by removing worktree <name>`
 pinned. Without `-Worktrees` the same branch is listed as kept and pinned, which is exactly
 what would happen.
 
+### `git worktree remove` is not atomic
+
+It unregisters the worktree and *then* deletes the directory. On Windows the second half
+fails whenever another process holds something in there — a file open in an editor, or just a
+shell whose current directory is inside it (a process's cwd locks the directory even when it
+is empty). The record is gone by then, so the branch is no longer pinned.
+
+The script asks git which of the two happened rather than assuming, and says so:
+
+- **Still registered** — the branch stays pinned, and it is dropped from the delete batch so
+  one failure produces one warning instead of two.
+- **Unregistered, directory left behind** — an orphan git no longer knows about. Nothing points
+  at it, and the branch delete proceeds correctly. The warning prints the exact
+  `Remove-Item -Recurse -Force '<path>'` to finish the job once the holder lets go.
+
+Either way the run exits 1. An orphan is invisible to a re-run — `git worktree list` no longer
+mentions it — so it has to be deleted from the warning, not by running the script again.
+
 ### A clean worktree can still be in use
 
 A worktree with nothing uncommitted may still belong to a live agent session that simply has no
