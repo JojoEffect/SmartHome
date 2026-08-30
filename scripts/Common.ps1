@@ -5,9 +5,13 @@ $ErrorActionPreference = 'Stop'
 # the global scope so they survive across the sub-scripts a suite run invokes in the
 # same process, and they are declared here because Set-StrictMode makes *reading* an
 # unset variable an error -- the memo check itself would throw on first use.
+# -WhatIf:$false because a script with SupportsShouldProcess dot-sources this file and
+# propagates $WhatIfPreference into it. Without the override, a -WhatIf run reports
+# "WhatIf: Set variable SmartHomeMSBuildPath" as though it were an action the user
+# asked about, and skips the assignment -- noise in front of the real preview.
 foreach ($memo in 'SmartHomeMSBuildPath', 'SmartHomeVsTestPath', 'SmartHomeSiblingRoot') {
     if (-not (Test-Path "variable:global:$memo")) {
-        Set-Variable -Name $memo -Scope Global -Value $null
+        Set-Variable -Name $memo -Scope Global -Value $null -WhatIf:$false
     }
 }
 
