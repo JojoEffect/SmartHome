@@ -70,10 +70,16 @@ param(
     # with the whole of src\devices and src\integrationTests in mind.
     [int]$FallbackPadSize = 409600,
 
-    # Refuse to pad past the deploy partition; writing beyond it would run into
-    # whatever partition follows. Advisory, from the same boot-log partition table as
-    # -DeployAddress above (.\scripts\Watch-DeviceSerial.ps1, the "deploy" line's
-    # Size column) -- re-derive it there if a firmware update changes the layout.
+    # Refuse to pad past the deploy partition; writing beyond it would run into the
+    # "config" partition that starts where this one ends, at 0x3C0000. Measured
+    # 2026-08-30 off the device the same way -DeployAddress above was -- the boot-log
+    # partition table from .\scripts\Watch-DeviceSerial.ps1, this time the "deploy"
+    # line's Length column rather than its Offset:
+    #   3 deploy    Unknown data   01 84 001e0000 001c0000
+    #   4 config    Unknown data   01 83 003c0000 00040000
+    # (4MB flash, nanoCLR 1.17.0.339, ESP-IDF v5.5.4). Until then the value had only
+    # ever been copied from a prose comment of unclear provenance -- issue #47.
+    # Re-derive it there if a firmware update changes the layout.
     [int]$DeployPartitionSize = 0x1C0000,
 
     # Ignore any recorded size and pad to -FallbackPadSize. Use this after something
