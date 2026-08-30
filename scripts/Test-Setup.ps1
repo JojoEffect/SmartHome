@@ -95,6 +95,14 @@ $configFiles = @(
     @{ Name = 'nanoFramework.local.env.ps1'; Values = @('SMARTHOME_NANOFW_BRANCH') }
 )
 
+# What the config files actually provided, as opposed to what happens to be in the
+# process environment. The checks below read this and never $env: directly: these
+# scripts dot-source local.env.ps1 into the caller's own process, so after any other
+# SmartHome script has run in the same shell the variables are still set even once the
+# file is gone -- and a preflight would then pass a mosquitto/COM-port check on behalf
+# of a config file it just reported as missing.
+$configValues = @{}
+
 foreach ($config in $configFiles) {
     $path = Join-Path $scriptsDir $config.Name
     $template = Join-Path $scriptsDir ($config.Name -replace '\.ps1$', '.template.ps1')
@@ -118,6 +126,8 @@ foreach ($config in $configFiles) {
 
     foreach ($name in $config.Values) {
         $value = [Environment]::GetEnvironmentVariable($name)
+        $configValues[$name] = $value
+
         if ([string]::IsNullOrWhiteSpace($value)) {
             Add-Result -Name $name -Status 'FAIL' -Detail 'not set' `
                        -Fix "Set it in $path -- compare against $template"
@@ -130,7 +140,7 @@ foreach ($config in $configFiles) {
 
 # ------------------------------------------------------------------- mosquitto --
 
-$mosquittoDir = [Environment]::GetEnvironmentVariable('SMARTHOME_MOSQUITTO_DIR')
+$mosquittoDir = $configValues['SMARTHOME_MOSQUITTO_DIR']
 if (-not [string]::IsNullOrWhiteSpace($mosquittoDir)) {
     $mosquitto = Join-Path $mosquittoDir 'mosquitto.exe'
     if (Test-Path $mosquitto) {
@@ -149,7 +159,7 @@ else {
 
 # -------------------------------------------------------------------- COM port --
 
-$comPort = [Environment]::GetEnvironmentVariable('SMARTHOME_COM_PORT')
+$comPort = $configValues['SMARTHOME_COM_PORT']
 if (-not [string]::IsNullOrWhiteSpace($comPort)) {
     # Enumerates names only -- the port is never opened, so this cannot disturb a
     # device or collide with a session that has it open.
@@ -229,12 +239,31 @@ foreach ($vsTool in @(
 $packagesDir = Join-Path $repoRoot 'packages'
 $missingPackages = New-Object System.Collections.Generic.List[string]
 
+# Worktrees live *inside* the main checkout (.claude\worktrees\<name>), each a full
+# copy with its own packages.config set and its own packages\ folder. Recursing into
+# them would report on other checkouts than the one being checked: from the main
+# checkout that is 155 packages.config instead of 14, and a worktree that has pinned a
+# different package version to chase a regression would produce a "not restored"
+# failure here for a package this checkout does not need.
+#
+# Anchored to $repoRoot rather than matched as a substring anywhere in the path: this
+# script usually runs *from* a worktree, whose own paths all contain
+# '\.claude\worktrees\', and a bare substring test would exclude every file it is
+# supposed to check.
+$worktreesDir = Join-Path $repoRoot '.claude\worktrees'
 $configs = @(Get-ChildItem -Path $repoRoot -Filter 'packages.config' -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' })
+    Where-Object {
+        $_.FullName -notmatch '\\(bin|obj)\\' -and
+        -not $_.FullName.StartsWith($worktreesDir, [StringComparison]::OrdinalIgnoreCase)
+    })
 
 foreach ($configFile in $configs) {
     [xml]$xml = Get-Content $configFile.FullName
-    foreach ($package in $xml.packages.package) {
+
+    # XPath rather than $xml.packages.package: under Set-StrictMode -Version Latest the
+    # property access throws on a packages.config with no <package> children, which
+    # would abort the whole preflight. SelectNodes just returns an empty list.
+    foreach ($package in $xml.SelectNodes('/packages/package')) {
         $name = "$($package.id).$($package.version)"
         if (-not (Test-Path (Join-Path $packagesDir $name)) -and -not $missingPackages.Contains($name)) {
             $missingPackages.Add($name)
@@ -320,6 +349,14 @@ Write-Host "$($results.Count) checked, $($failed.Count) failed, $($warned.Count)
 
 if ($failed.Count -gt 0) {
     Write-Host ""
+
+    # Non-terminating on purpose. $ErrorActionPreference is 'Stop' for the body of this
+    # script, which would make Write-Error throw -- the `exit 1` below would never run,
+    # and the exception would propagate into whatever called this script, so a caller
+    # could never reach its own next line to read $LASTEXITCODE. The contract of a
+    # preflight is its exit code, so the message goes to the error stream without
+    # terminating.
+    $ErrorActionPreference = 'Continue'
     Write-Error "Setup is incomplete: $($failed.Count) check(s) failed. See 'How to fix' above."
     exit 1
 }
