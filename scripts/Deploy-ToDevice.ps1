@@ -155,37 +155,78 @@ $imageBytes = [System.IO.File]::ReadAllBytes($deployImage)
 # under-padding costs a device booting somebody else's assemblies.
 $sectorSize = 4096   # ESP32 flash erase granularity; keeps the write sector-aligned.
 
+# Read even under -FullPad. That switch distrusts how TIGHT the record is -- something
+# else has flashed the device since -- but a record proving a bigger image was written
+# to this same address is still a lower bound, and honouring it is what keeps -FullPad
+# the pessimistic option it is documented to be.
+$deployState   = Get-SmartHomeDeployState -ComPort $comPort
+$recordedBytes = $null
+$recordReason  = $null
+
+if ($null -eq $deployState) {
+    $recordReason = "no usable deploy record for $comPort"
+}
+elseif ($deployState['DeployAddress'] -ne $DeployAddress) {
+    # A different address is a different region: what that record describes says
+    # nothing about what is sitting at this one -- not even as a floor.
+    $recordReason = "the deploy record for $comPort covers $($deployState['DeployAddress']), not $DeployAddress"
+}
+elseif ($deployState['StaleBytes'] -gt $DeployPartitionSize) {
+    # Parseable but impossible: nothing this script flashed can be larger than the
+    # partition. Rejecting it here keeps a corrupt record costing one full-size deploy
+    # -- the documented failure direction -- instead of tripping the partition check
+    # below and refusing every deploy to this port until the file is deleted by hand.
+    $recordReason = "the deploy record for $comPort claims $($deployState['StaleBytes']) bytes, larger than the deploy partition ($DeployPartitionSize)"
+}
+else {
+    $recordedBytes = $deployState['StaleBytes']
+}
+
 $staleBytes = $null
 $padReason  = $null
 
 if ($FullPad) {
     $padReason = '-FullPad was passed'
 }
+elseif ($null -eq $recordedBytes) {
+    $padReason = $recordReason
+}
 else {
-    $deployState = Get-SmartHomeDeployState -ComPort $comPort
-    if ($null -eq $deployState) {
-        $padReason = "no usable deploy record for $comPort"
-    }
-    elseif ($deployState['DeployAddress'] -ne $DeployAddress) {
-        # A different address is a different region: what that record describes says
-        # nothing about what is sitting at this one.
-        $padReason = "the deploy record for $comPort covers $($deployState['DeployAddress']), not $DeployAddress"
-    }
-    else {
-        $staleBytes = $deployState['StaleBytes']
-    }
+    $staleBytes = $recordedBytes
 }
 
-$padFloor  = if ($null -ne $staleBytes) { $staleBytes } else { $FallbackPadSize }
+# -FallbackPadSize is a worst case only while every image fits under it. An image that
+# does not is padded to itself, which is correct for THIS deploy but leaves the fallback
+# unable to cover it later -- after Run-Tests.ps1 clears the record, or under -FullPad.
+if ($imageBytes.Length -gt $FallbackPadSize) {
+    Write-Warning @"
+This image is $($imageBytes.Length) bytes, larger than -FallbackPadSize ($FallbackPadSize).
+It deploys correctly, but once anything drops the deploy record for $comPort (a hardware
+Run-Tests.ps1 run, a corrupt record) the fallback no longer covers this image, and the next
+deploy of a smaller app will leave its tail on the device. Raise -FallbackPadSize.
+"@
+}
+
+$padFloor = if ($null -ne $staleBytes) {
+    $staleBytes
+}
+elseif ($null -ne $recordedBytes) {
+    # Falling back, but with a trustworthy floor to fall back to.
+    [Math]::Max($FallbackPadSize, $recordedBytes)
+}
+else {
+    $FallbackPadSize
+}
+
 $padTarget = [Math]::Max($imageBytes.Length, $padFloor)
 $paddedImageSize = [int][Math]::Ceiling($padTarget / [double]$sectorSize) * $sectorSize
 
 if ($paddedImageSize -gt $DeployPartitionSize) {
     Write-Error @"
 Padded deploy image ($paddedImageSize bytes) does not fit the deploy partition ($DeployPartitionSize bytes).
-The image itself is $($imageBytes.Length) bytes. Either the app has outgrown the partition, or
--DeployPartitionSize is stale -- re-read the "deploy" line of the partition table printed by
-.\scripts\Watch-DeviceSerial.ps1 and pass the real size.
+The image itself is $($imageBytes.Length) bytes, padded up to a floor of $padFloor bytes. Either the
+app has outgrown the partition, or -DeployPartitionSize is stale -- re-read the "deploy" line of the
+partition table printed by .\scripts\Watch-DeviceSerial.ps1 and pass the real size.
 "@
     exit 1
 }
@@ -208,12 +249,19 @@ while ($filled -lt $paddedImageSize) {
 [Array]::Copy($imageBytes, $padded, $imageBytes.Length)
 [System.IO.File]::WriteAllBytes($paddedImage, $padded)
 
-if ($null -ne $staleBytes) {
-    Write-Host "  Padded deploy image: $($imageBytes.Length) -> $paddedImageSize bytes (0xFF fill, covering the $staleBytes bytes the last deploy to $comPort left on the device)." -ForegroundColor DarkGray
+# Names whichever input actually set the size: the pad floor only drives it while the
+# image is smaller than the floor, and a message crediting the floor for a size the
+# image chose misleads exactly the person reading this line to explain a pad.
+$padDriver = if ($imageBytes.Length -ge $padFloor) {
+    'the image itself is the larger of the two'
+}
+elseif ($null -ne $staleBytes) {
+    "covering the $staleBytes bytes the last deploy to $comPort left on the device"
 }
 else {
-    Write-Host "  Padded deploy image: $($imageBytes.Length) -> $paddedImageSize bytes (0xFF fill, full-size pad -- $padReason)." -ForegroundColor DarkGray
+    "full-size pad -- $padReason"
 }
+Write-Host "  Padded deploy image: $($imageBytes.Length) -> $paddedImageSize bytes (0xFF fill, $padDriver)." -ForegroundColor DarkGray
 
 # Recorded before the flash, and pessimistically: if nanoff dies partway, or the shell
 # is killed, anything up to $paddedImageSize may have landed and the next deploy has to
