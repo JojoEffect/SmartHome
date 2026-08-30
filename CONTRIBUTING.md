@@ -142,7 +142,11 @@ interesting part is why.
 
 ## Local setup
 
-See `CLAUDE.md`. In short: copy the two `local.env` templates, fill in your COM port and
-Mosquitto directory, and use the scripts in `scripts/` rather than raw `msbuild` /
-`nanoff` / `mosquitto_sub`. Both `local.env.ps1` files are git-ignored and must stay that
-way.
+See the "First-time setup" section of `CLAUDE.md`. In short: copy the two `local.env`
+templates, fill in your COM port and Mosquitto directory, and use the scripts in `scripts/`
+rather than raw `msbuild` / `nanoff` / `mosquitto_sub`. Both `local.env.ps1` files are
+git-ignored and must stay that way.
+
+That section also carries the parts that are easy to misdiagnose: how to check the setup
+before relying on it, what each missing prerequisite looks like when a script fails because
+of it, and why a fresh worktree starts with none of it.

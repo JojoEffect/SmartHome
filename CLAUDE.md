@@ -4,7 +4,7 @@
 convention (topic prefix `homie/`). Primary device today: **RoomSensor**.
 
 This file is the single source of truth for how to work in this repo — layout, scripts,
-companion repos, version policy. (It replaced `.github/copilot-instructions.md` and the root
+machine prerequisites, companion repos, version policy. (It replaced `.github/copilot-instructions.md` and the root
 `AGENTS.md`, which were near-duplicates of it; if you find a stale reference to either, fix the
 reference rather than recreating the file.)
 
@@ -57,6 +57,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
 | `scripts\Sync-NanoFrameworkRepos.ps1 [-Force]` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
 | `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style | No | `smarthome-restore-packages` |
+| `scripts\Test-Setup.ps1` | Reports everything the other scripts assume exists on this machine — both `local.env` files and their values, restored `packages\`, the test adapter, `gh` auth, MSBuild/vstest, Mosquitto, the COM port, the companion repos — all at once, rather than one abort at a time. Read-only; opens no port and touches no device | No | `smarthome-check-setup` |
 | `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` | Raw serial capture of the device's native boot log only — nanoCLR silences this at `app_main()` and switches to binary WireProtocol, so this can't see managed output | Resets only | `smarthome-watch-serial` |
 | `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot] [-NoBuild] [-BuildOnly] [-Until <regex>] [-DumpConfig]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
 | `scripts\Set-AssemblyVersion.ps1 -Version <v> [-Check]` | Stamps a version into every `AssemblyInfo.cs` under `src` — a plain recursive glob, not a fixed list and not restricted to `Properties\`, so adding a device needs no edit here and a stray one anywhere under `src` will also be picked up (and fails the run if it carries no version attribute). `.nfproj` has no generated assembly info, so this is the only thing that makes a release build carry its version. Normally invoked by the release workflow, not by hand | No | `smarthome-release` |
@@ -111,6 +112,14 @@ can't, so pass `-FullPad` on the first deploy after one.
 
 ## First-time setup
 
+Everything in this section lives **outside the repository** — on the machine the session is
+running on. None of it is version-controlled, none of it can be inferred from the source tree,
+and a session cannot install any of it for itself. So it is an assumption to check rather than
+a given, and checking is cheap: each item goes missing as something that reads like broken code
+or a broken build, which is what the failure table below exists to translate.
+
+### Machine-local config
+
 ```powershell
 Copy-Item scripts\local.env.template.ps1 scripts\local.env.ps1
 Copy-Item scripts\nanoFramework.local.env.template.ps1 scripts\nanoFramework.local.env.ps1
@@ -122,9 +131,11 @@ Then fill in:
   `SMARTHOME_MQTT_BROKER` / `SMARTHOME_MQTT_PORT`
 - `scripts\nanoFramework.local.env.ps1` — `SMARTHOME_NANOFW_BRANCH`
 
-Both `local.env.ps1` files are git-ignored — never commit them.
+Both `local.env.ps1` files are git-ignored — never commit them. Every script dot-sources them
+through `Import-SmartHomeLocalEnv` before doing anything else, so a missing or half-filled file
+stops the run at its first line, ahead of any build, flash or broker start.
 
-Required local tools:
+### Required local tools
 
 - [nanoFramework VS extension](https://marketplace.visualstudio.com/items?itemName=nanoframework.nanoFramework-VS2022-Extension)
 - `nanoff` CLI: `dotnet tool install -g nanoff`
@@ -136,6 +147,57 @@ Required local tools:
   what there is to do. A human can fall back to the issues page in a browser; an agent
   session has no such fallback, and every workflow in this file that reaches GitHub goes
   through `gh`.
+
+### Check it before relying on it
+
+```powershell
+.\scripts\Test-Setup.ps1
+```
+
+Checks every item in this section in one pass and reports them together — read-only, opens no
+COM port, touches no device, exit 0 unless something FAILs. Worth running before the first
+script call of a session rather than discovering the gap midway through a workflow, and always
+in a fresh worktree. Skill: `smarthome-check-setup`.
+
+It reports rather than aborts, on purpose: `Import-SmartHomeLocalEnv` exits on the first missing
+file, so a workflow that relies on it discovers one gap, stops, and hides the next.
+
+One trap if you check something by hand instead: in Windows PowerShell 5.1, do **not** pipe a
+native tool through `2>&1`. The redirect wraps the exe's ordinary stderr in a
+`NativeCommandError` and sets `$?` to false, so a perfectly healthy `nanoff --version` reports
+as a failure.
+
+### What a missing prerequisite looks like
+
+None of these are code problems, and each has been read as one. `Test-Setup.ps1` reports all of
+them by name; the table is for when you meet one without having run it:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| A script exits at once with `Missing: ...\scripts\local.env.ps1` | config file absent | copy the templates above, or the filled-in files from another checkout |
+| `Missing environment variable: SMARTHOME_...` | config file present but incomplete | fill the value in, comparing against the template |
+| A wall of `error CS0518` — predefined type `System.Object`/`System.Void` not defined — in every project | NuGet packages not restored: `packages\` is git-ignored (`.gitignore:200`) and comes with no clone | `scripts\Restore-Packages.ps1`. A plain `msbuild /t:Restore` is a no-op for this project style |
+| `gh` fails with an authentication error | `gh auth login` never run, or the token expired | `gh auth login`. The backlog is unreadable until then |
+
+MSBuild on this machine emits **German** diagnostics, so match on the error *code* (`CS0518`)
+rather than on English message text.
+
+### A fresh worktree starts with none of it
+
+`Get-SmartHomeScriptsDir` returns the calling script's own `$PSScriptRoot`, so a worktree under
+`.claude\worktrees\<name>` reads *its own* `scripts\local.env.ps1`, never the main checkout's.
+Both config files and `packages\` are git-ignored, so a new worktree has neither, and the first
+script call fails there even though the main checkout is fully set up. Seed it once, from the
+worktree root (`..\..\..` being `<name>` → `worktrees` → `.claude` → the repo root):
+
+```powershell
+Copy-Item ..\..\..\scripts\local.env.ps1 scripts\
+Copy-Item ..\..\..\scripts\nanoFramework.local.env.ps1 scripts\
+.\scripts\Restore-Packages.ps1
+```
+
+`Test-Setup.ps1` detects the worktree and prints that first `Copy-Item` with both paths already
+filled in, so running it first is quicker than reading this.
 
 ## Repository layout
 
