@@ -57,6 +57,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
 | `scripts\Sync-NanoFrameworkRepos.ps1 [-Force]` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
 | `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style | No | `smarthome-restore-packages` |
+| `scripts\Test-Setup.ps1` | Reports everything the other scripts assume exists on this machine — both `local.env` files and their values, restored `packages\`, the test adapter, `gh` auth, MSBuild/vstest, Mosquitto, the COM port, the companion repos — all at once, rather than one abort at a time. Read-only; opens no port and touches no device | No | `smarthome-check-setup` |
 | `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` | Raw serial capture of the device's native boot log only — nanoCLR silences this at `app_main()` and switches to binary WireProtocol, so this can't see managed output | Resets only | `smarthome-watch-serial` |
 | `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot] [-NoBuild] [-BuildOnly] [-Until <regex>] [-DumpConfig]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
 | `scripts\Set-AssemblyVersion.ps1 -Version <v> [-Check]` | Stamps a version into every `AssemblyInfo.cs` under `src` — a plain recursive glob, not a fixed list and not restricted to `Properties\`, so adding a device needs no edit here and a stray one anywhere under `src` will also be picked up (and fails the run if it carries no version attribute). `.nfproj` has no generated assembly info, so this is the only thing that makes a release build carry its version. Normally invoked by the release workflow, not by hand | No | `smarthome-release` |
@@ -122,22 +123,27 @@ stops the run at its first line, ahead of any build, flash or broker start.
 
 ### Check it before relying on it
 
-Read-only, touches no hardware, and worth doing before the first script call of a session
-rather than discovering the gap midway through a workflow:
-
 ```powershell
-Test-Path scripts\local.env.ps1, scripts\nanoFramework.local.env.ps1
-gh auth status
-nanoff --version
+.\scripts\Test-Setup.ps1
 ```
 
-One trap while running those: in Windows PowerShell 5.1, do **not** pipe a native tool through
-`2>&1`. The redirect wraps the exe's ordinary stderr in a `NativeCommandError` and sets `$?` to
-false, so a perfectly healthy `nanoff --version` reports as a failure.
+Checks every item in this section in one pass and reports them together — read-only, opens no
+COM port, touches no device, exit 0 unless something FAILs. Worth running before the first
+script call of a session rather than discovering the gap midway through a workflow, and always
+in a fresh worktree. Skill: `smarthome-check-setup`.
+
+It reports rather than aborts, on purpose: `Import-SmartHomeLocalEnv` exits on the first missing
+file, so a workflow that relies on it discovers one gap, stops, and hides the next.
+
+One trap if you check something by hand instead: in Windows PowerShell 5.1, do **not** pipe a
+native tool through `2>&1`. The redirect wraps the exe's ordinary stderr in a
+`NativeCommandError` and sets `$?` to false, so a perfectly healthy `nanoff --version` reports
+as a failure.
 
 ### What a missing prerequisite looks like
 
-None of these are code problems, and each has been read as one:
+None of these are code problems, and each has been read as one. `Test-Setup.ps1` reports all of
+them by name; the table is for when you meet one without having run it:
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -162,6 +168,9 @@ Copy-Item ..\..\..\scripts\local.env.ps1 scripts\
 Copy-Item ..\..\..\scripts\nanoFramework.local.env.ps1 scripts\
 .\scripts\Restore-Packages.ps1
 ```
+
+`Test-Setup.ps1` detects the worktree and prints that first `Copy-Item` with both paths already
+filled in, so running it first is quicker than reading this.
 
 ## Repository layout
 
