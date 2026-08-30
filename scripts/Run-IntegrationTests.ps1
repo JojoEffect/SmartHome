@@ -1336,18 +1336,26 @@ function Invoke-HomieConformanceCheck {
                 $corrected = [array]::IndexOf($lifecyclePayloads, $step.Expect, $reflected + 1)
             }
 
-            # Only to tell "never corrected at all" from "corrected, but before the
-            # reflection it was supposed to overwrite" -- two different device defects.
-            $correctedAnywhere = [array]::IndexOf($lifecyclePayloads, $step.Expect)
-
+            # One message for "no correction after the reflection", not two.
+            #
+            # Splitting it on whether $Expect appears anywhere in the window would name a
+            # second defect -- "corrected, but before the reflection it was supposed to
+            # overwrite" -- that the window cannot actually distinguish. It is the same
+            # unordered first-occurrence search the paragraph above rejects for $corrected:
+            # the preceding step drove the device to $Expect and its publishes (republished
+            # per poll round, retransmitted per DelayOnRetry) can still be arriving when
+            # this window opens. A device that simply never corrected would then be
+            # reported as having corrected too early, sending the next reader after a
+            # publish ordering bug that never happened.
+            #
+            # The observed sequence is in the message either way, so a genuinely early
+            # correction is still visible -- as evidence, not as a claim the runner cannot
+            # support.
             if ($reflected -lt 0) {
                 $script:conformanceFailures += "refused '$($step.Command)' never reached $nodeId/lifecycle -- the command was lost, so nothing about the refusal was measured (saw: $($lifecyclePayloads -join ', '))"
             }
-            elseif ($corrected -lt 0 -and $correctedAnywhere -lt 0) {
-                $script:conformanceFailures += "device left the reflected '$($step.Command)' on $nodeId/lifecycle and never published '$($step.Expect)' over it"
-            }
             elseif ($corrected -lt 0) {
-                $script:conformanceFailures += "$nodeId/lifecycle published '$($step.Expect)' before the reflected '$($step.Command)', so the correction did not overwrite it (saw: $($lifecyclePayloads -join ', '))"
+                $script:conformanceFailures += "device left the reflected '$($step.Command)' on $nodeId/lifecycle and never published '$($step.Expect)' over it (saw: $($lifecyclePayloads -join ', '))"
             }
 
             continue

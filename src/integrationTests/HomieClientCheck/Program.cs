@@ -186,12 +186,17 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
                 // command with the wrong transition and no sign that anything was
                 // missed. Refusing leaves the correction in HandleCommand to publish the
                 // state the device is actually in.
+                //
+                // The default logs through RefuseUnwiredState rather than returning false
+                // inline: a bare false is indistinguishable in the log from a transition
+                // the convention's own state machine refused, which is exactly the "no
+                // sign that anything was missed" this arm exists to remove.
                 var applied = state switch
                 {
                     State.Ready => _homieClient.Ready(),
                     State.Alert => _homieClient.Alert(),
                     State.Sleeping => _homieClient.Sleep(),
-                    _ => false,
+                    _ => RefuseUnwiredState(state),
                 };
 
                 Debug.WriteLine($"HomieClientCheck: '{payload}' -> {applied}");
@@ -199,6 +204,17 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
             }
 
             Debug.WriteLine($"HomieClientCheck: unknown lifecycle command '{payload}'.");
+        }
+
+        // A state that is in LifecycleStates -- and so in $format, and so offered to
+        // controllers -- but has no arm in HandleLifecycleCommand's switch. Says so
+        // rather than sharing the refused transition's log line, so the gap is visible in
+        // the captured debug output instead of looking like the device declining a
+        // command it understood.
+        private static bool RefuseUnwiredState(State state)
+        {
+            Debug.WriteLine($"HomieClientCheck: '{state.GetString()}' is offered in $format but has no transition wired -- refusing.");
+            return false;
         }
 
         // The runner cycles the broker while this device runs, so it can boot with no
