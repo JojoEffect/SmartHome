@@ -65,11 +65,30 @@
         { "35": { "Trust": true, "Effort": "S", "Note": "single Write-Host guard" },
           "26": { "Where": "Hardware", "Risk": "Friction" } }
 
-    Any axis key may be set: Trust, EvidenceDebt, Where, Track, Risk, Effort, Blocked,
-    Unblocks and DependsOn (arrays of issue numbers), Note. An overridden axis is reported
-    with confidence Override and its heuristic value is kept in the JSON for comparison.
-    Blocked is overridable too: an issue can be waiting on something real without anyone
-    having applied the label, and only the body says so.
+    Must be a JSON object keyed by issue number; an array wrapper is rejected rather than
+    silently ignored. Accepted axes and values:
+
+      Trust, EvidenceDebt, Blocked  JSON true / false, unquoted
+      Where                         Hardware | Desk | Either | Unknown
+      Track                         Capability | Velocity | Either | Unknown
+      Risk                          SilentWrong | LoudFailure | Friction | Cosmetic
+      Effort                        S | M | L
+      Unblocks, DependsOn           arrays of issue numbers
+      Note                          string
+
+    Validation is strict and reports every problem at once. A quoted "false" is truthy in
+    PowerShell, so coercing it would turn an attempt to clear a flag into the strongest
+    possible vote for it; an unknown axis or an out-of-list value would silently contribute
+    nothing at all. Both stop the run instead.
+
+    Unblocks is applied after the dependency graph is derived, so it REPLACES the derived
+    edges rather than adding to them -- that is how a false edge from the loose `once #N`
+    pattern gets removed. Blocked is overridable even though it comes from a label: an
+    issue can be waiting on something real without anyone having applied it, and only the
+    body says so.
+
+    An overridden axis is reported with confidence Override and its heuristic value is kept
+    in the JSON for comparison.
 
 .PARAMETER Top
     Show only the first N in the ranked table. The clusters and the JSON always cover
@@ -166,6 +185,12 @@ if ($ghExit -ne 0) {
 # ForEach-Object, not just @(): ConvertFrom-Json in Windows PowerShell returns a single
 # object rather than a one-element array when the payload has one element.
 $issues = @($raw | ConvertFrom-Json | ForEach-Object { $_ })
+
+# A cap that silently trims the backlog would make a partial ranking read as a complete
+# one -- the same "no silent caps" rule the rest of this repo holds its scripts to.
+if ($issues.Count -ge $Limit) {
+    Write-Warning "Fetched $($issues.Count) issues, which is the -Limit. There are probably more, and anything beyond the cap is missing from this ranking. Re-run with a larger -Limit."
+}
 
 if ($issues.Count -eq 0) {
     if ($Json) {
@@ -277,6 +302,23 @@ function Get-Confidence {
 
 # ----------------------------------------------------------------- overrides ----
 
+# What an override may say, and what a valid value looks like. An override is the caller's
+# judgment overruling the heuristic, so a malformed one must stop the run rather than be
+# skipped: a ranking that silently ignored half its corrections is exactly the kind of
+# quietly-wrong answer this script exists to surface.
+$overrideSchema = [ordered]@{
+    Trust        = 'Boolean'
+    EvidenceDebt = 'Boolean'
+    Blocked      = 'Boolean'
+    Where        = @('Hardware', 'Desk', 'Either', 'Unknown')
+    Track        = @('Capability', 'Velocity', 'Either', 'Unknown')
+    Risk         = @('SilentWrong', 'LoudFailure', 'Friction', 'Cosmetic')
+    Effort       = @('S', 'M', 'L')
+    Unblocks     = 'IntArray'
+    DependsOn    = 'IntArray'
+    Note         = 'String'
+}
+
 $overrideMap = @{}
 if ($Overrides) {
     if (-not (Test-Path -LiteralPath $Overrides)) {
@@ -284,14 +326,106 @@ if ($Overrides) {
         exit 1
     }
     try {
-        $overrideJson = Get-Content -LiteralPath $Overrides -Raw | ConvertFrom-Json
+        # -Encoding UTF8 is not optional. Windows PowerShell 5.1 decodes a BOM-less file as
+        # the system ANSI codepage, so a Note containing an em-dash -- which issue titles in
+        # this backlog do -- comes back as mojibake with no error anywhere.
+        $overrideRaw = Get-Content -LiteralPath $Overrides -Raw -Encoding UTF8
+        $overrideJson = $overrideRaw | ConvertFrom-Json
     }
     catch {
         Write-Error "Overrides file is not valid JSON: $Overrides -- $($_.Exception.Message)"
         exit 1
     }
+
+    # A JSON array or scalar parses cleanly and then exposes properties like Length and
+    # Count, none of which match an issue number -- so without this check every override is
+    # dropped while the report still announces the file as loaded.
+    if ($overrideJson -isnot [System.Management.Automation.PSCustomObject]) {
+        Write-Error "Overrides file must be a JSON object keyed by issue number, e.g. { `"35`": { `"Effort`": `"S`" } }. Found $($overrideJson.GetType().Name) in: $Overrides"
+        exit 1
+    }
+
+    # Collect every problem before failing, the way Test-Setup.ps1 does: aborting on the
+    # first one hides the rest and turns one edit into several round trips.
+    $overrideProblems = @()
+
     foreach ($property in $overrideJson.PSObject.Properties) {
-        $overrideMap[[string]$property.Name] = $property.Value
+        $issueKey = [string]$property.Name
+        $entry = $property.Value
+
+        if ($issueKey -notmatch '^\d+$') {
+            $overrideProblems += "key '$issueKey' is not an issue number"
+            continue
+        }
+        if ($null -eq $entry -or $entry -isnot [System.Management.Automation.PSCustomObject]) {
+            $overrideProblems += "#$issueKey must map to an object of axis corrections"
+            continue
+        }
+
+        $clean = @{}
+        foreach ($axisProperty in $entry.PSObject.Properties) {
+            $axis = [string]$axisProperty.Name
+            $value = $axisProperty.Value
+
+            $canonicalAxis = @($overrideSchema.Keys) | Where-Object { $_ -eq $axis } | Select-Object -First 1
+            if (-not $canonicalAxis) {
+                $overrideProblems += "#$issueKey has unknown axis '$axis' (expected: $(@($overrideSchema.Keys) -join ', '))"
+                continue
+            }
+
+            $expected = $overrideSchema[$canonicalAxis]
+
+            if ($expected -isnot [string]) {
+                # An allowed-value list. Normalise to the canonical spelling so the JSON
+                # reports what the scoring actually used, not the caller's casing.
+                # Checked before the switch, not inside it: `switch` enumerates a collection
+                # scrutinee, so switching on the list itself ran the branch once per allowed
+                # value and reported the same problem three or four times over.
+                $canonicalValue = @($expected) | Where-Object { $_ -eq [string]$value } | Select-Object -First 1
+                if (-not $canonicalValue) {
+                    $overrideProblems += "#$issueKey $canonicalAxis is '$value'; expected one of: $(@($expected) -join ', ')"
+                }
+                else { $clean[$canonicalAxis] = $canonicalValue }
+                continue
+            }
+
+            switch ($expected) {
+                'Boolean' {
+                    # Deliberately not [bool]$value: in PowerShell the *string* "false" is
+                    # truthy, so coercing would turn an attempt to clear a flag into the
+                    # strongest possible vote for it. Demand a real JSON boolean.
+                    if ($value -isnot [bool]) {
+                        $overrideProblems += "#$issueKey $canonicalAxis must be JSON true or false, not $(if ($null -eq $value) { 'null' } else { "'$value'" })"
+                    }
+                    else { $clean[$canonicalAxis] = $value }
+                }
+                'String' {
+                    if ($null -eq $value) { $overrideProblems += "#$issueKey $canonicalAxis must be a string" }
+                    else { $clean[$canonicalAxis] = [string]$value }
+                }
+                'IntArray' {
+                    $numbers = @()
+                    $bad = $false
+                    foreach ($item in @($value)) {
+                        $parsed = 0
+                        if (-not [int]::TryParse([string]$item, [ref]$parsed)) {
+                            $overrideProblems += "#$issueKey $canonicalAxis contains '$item', which is not an issue number"
+                            $bad = $true
+                            break
+                        }
+                        $numbers += $parsed
+                    }
+                    if (-not $bad) { $clean[$canonicalAxis] = @($numbers | Sort-Object -Unique) }
+                }
+            }
+        }
+
+        $overrideMap[$issueKey] = $clean
+    }
+
+    if ($overrideProblems.Count -gt 0) {
+        Write-Error ("Overrides file has $($overrideProblems.Count) problem(s): $Overrides`n  - " + ($overrideProblems -join "`n  - "))
+        exit 1
     }
 }
 
@@ -300,9 +434,36 @@ function Get-OverrideValue {
 
     if (-not $overrideMap.ContainsKey($Number)) { return $null }
     $entry = $overrideMap[$Number]
-    if ($null -eq $entry) { return $null }
-    if (-not ($entry.PSObject.Properties.Name -contains $Key)) { return $null }
-    return $entry.$Key
+    if ($null -eq $entry -or -not $entry.ContainsKey($Key)) { return $null }
+    return $entry[$Key]
+}
+
+function Set-OverriddenAxes {
+    # Applied in two passes around the dependency-edge computation: DependsOn has to land
+    # before the edges are derived from it, and Unblocks has to land after, or the edge pass
+    # would append a heuristic edge back onto a list the caller had deliberately emptied.
+    param(
+        [Parameter(Mandatory = $true)]$Records,
+        [Parameter(Mandatory = $true)][string[]]$Axes
+    )
+
+    foreach ($record in $Records) {
+        $key = [string]$record.Number
+        if (-not $overrideMap.ContainsKey($key)) { continue }
+
+        foreach ($axis in $Axes) {
+            $value = Get-OverrideValue -Number $key -Key $axis
+            if ($null -eq $value) { continue }
+
+            if ($axis -eq 'Note') { $record.Note = [string]$value; continue }
+
+            $record.$axis = $value
+            $record.Overridden = @(@($record.Overridden) + $axis | Sort-Object -Unique)
+            if ($record.Confidence.PSObject.Properties.Name -contains $axis) {
+                $record.Confidence.$axis = 'Override'
+            }
+        }
+    }
 }
 
 # ------------------------------------------------------------------ classify ----
@@ -428,31 +589,9 @@ foreach ($issue in $issues) {
 
 # ------------------------------------------------------------ apply overrides ----
 
-foreach ($record in $records) {
-    $key = [string]$record.Number
-    if (-not $overrideMap.ContainsKey($key)) { continue }
-
-    # Blocked is overridable even though it comes from a label: an issue can be waiting on
-    # something real without anyone having relabelled it, and the body is what says so.
-    foreach ($axis in @('Trust', 'EvidenceDebt', 'Where', 'Track', 'Risk', 'Effort', 'Blocked', 'Unblocks', 'DependsOn')) {
-        $value = Get-OverrideValue -Number $key -Key $axis
-        if ($null -eq $value) { continue }
-
-        if ($axis -eq 'Unblocks' -or $axis -eq 'DependsOn') {
-            $record.$axis = @($value | ForEach-Object { [int]$_ })
-        }
-        else {
-            $record.$axis = $value
-        }
-        $record.Overridden = @(@($record.Overridden) + $axis)
-        if ($record.Confidence.PSObject.Properties.Name -contains $axis) {
-            $record.Confidence.$axis = 'Override'
-        }
-    }
-
-    $note = Get-OverrideValue -Number $key -Key 'Note'
-    if ($null -ne $note) { $record.Note = [string]$note }
-}
+# Blocked is overridable even though it comes from a label: an issue can be waiting on
+# something real without anyone having relabelled it, and the body is what says so.
+Set-OverriddenAxes -Records $records -Axes @('Trust', 'EvidenceDebt', 'Where', 'Track', 'Risk', 'Effort', 'Blocked', 'DependsOn', 'Note')
 
 # ---------------------------------------------------------- dependency edges ----
 
@@ -467,6 +606,12 @@ foreach ($record in $records) {
         }
     }
 }
+
+# Unblocks last, so an explicit override *replaces* the derived edges rather than being
+# appended to. The `once #N` pattern is loose enough to invent an edge out of incidental
+# prose, and each edge is worth +12 -- the caller has to be able to take one away, not only
+# add one.
+Set-OverriddenAxes -Records $records -Axes @('Unblocks')
 
 # ------------------------------------------------------------------- scoring ----
 
@@ -499,20 +644,26 @@ foreach ($record in $records) {
         $score += $effortPoints[$record.Effort]
         $why += "effort $($record.Effort) $('{0:+#;-#;+0}' -f $effortPoints[$record.Effort])"
     }
+    else {
+        $why += "effort $($record.Effort) unrecognised, +0"
+    }
 
     if ($record.InProgress) { $score += 10; $why += 'already in progress +10' }
 
-    # Floor at 1 before anything multiplies it. A Cosmetic/L issue sums to -3, and every
-    # weighting below is a multiplier -- so x0.35 for "blocked" would *raise* a negative
-    # score toward zero and rank a blocked stub above an unblocked one. 1 is the bottom
-    # of the scale; below it the arithmetic stops meaning anything.
+    # Blocked belongs to the issue, not to the session, so it is part of the base score.
+    # Reporting it as session weighting made a run with no flags at all print "no session
+    # weighting applied" while blocked issues had already been scaled.
+    if ($record.Blocked) { $score *= 0.35; $why += 'blocked x0.35' }
+
+    # Floor at 1 before the session multipliers. A Cosmetic/L issue sums to -3, and every
+    # weighting below is a multiplier -- so a negative score would be *raised* toward zero
+    # by any damping factor and outrank work that scored honestly low. 1 is the bottom of
+    # the scale; below it the arithmetic stops meaning anything.
     if ($score -lt 1) { $score = 1.0; $why += 'floored to 1 (nothing scored positive)' }
 
     $record.BaseScore = [Math]::Round($score, 1)
 
     # ---- session weighting: multiplicative, so the base score stays readable ----
-
-    if ($record.Blocked) { $score *= 0.35; $why += 'blocked x0.35' }
 
     if ($record.Where -eq 'Hardware') {
         if ($Hardware -eq 'Unavailable') { $score *= 0.15; $why += 'hardware-gated, device unavailable x0.15' }
@@ -608,6 +759,10 @@ $weighted = ($Hardware -ne 'Unknown' -or $TimeBudget -ne 'HalfDay' -or $Theme -n
 
 Write-Host ''
 Write-Host "Backlog priorities - $($ranked.Count) $State issue(s)" -ForegroundColor Cyan
+if ($State -ne 'open') {
+    $closedCount = @($ranked | Where-Object { $_.State -ne 'OPEN' }).Count
+    Write-Host "$closedCount of these are closed and are scored like any other row - flagged C, but not excluded. -State $State is for checking what is already filed, not for choosing work." -ForegroundColor Yellow
+}
 if ($weighted) {
     Write-Host "Session weighting: Hardware=$Hardware  TimeBudget=$TimeBudget  Theme=$Theme" -ForegroundColor Cyan
 }
@@ -659,12 +814,16 @@ foreach ($record in $shown) {
     if ($record.EvidenceDebt) { $flags += 'E' }
     if (@($record.Unblocks).Count -gt 0) { $flags += 'U' }
     if ($record.Blocked) { $flags += 'B' }
+    # A closed issue scores exactly like an open one, so without a marker -State all
+    # interleaves settled work with actionable work and reads as a recommendation.
+    if ($record.State -ne 'OPEN') { $flags += 'C' }
     if ($flags) { $title = "[$flags] $title" }
 
     $color = 'Gray'
     if ($record.EvidenceDebt) { $color = 'Yellow' }
     if ($record.Trust) { $color = 'Red' }
     if ($record.Blocked) { $color = 'DarkGray' }
+    if ($record.State -ne 'OPEN') { $color = 'DarkGray' }
 
     Write-Host ('  {0,-4} #{1,-5} {2,-7} {3,-9} {4,-12} {5,-6} {6,-11} {7}' -f `
             $rank, $record.Number, $record.Relative, $record.Where, $record.Risk, $record.Effort, $record.Track, $title) -ForegroundColor $color
@@ -675,7 +834,9 @@ if ($Top -gt 0 -and $ranked.Count -gt $Top) {
 }
 
 Write-Host ''
-Write-Host '  Flags: T verification trust, E evidence debt, U unblocks another issue, B blocked' -ForegroundColor DarkGray
+$flagLegend = '  Flags: T verification trust, E evidence debt, U unblocks another issue, B blocked'
+if ($State -ne 'open') { $flagLegend += ', C closed' }
+Write-Host $flagLegend -ForegroundColor DarkGray
 Write-Host '  Prio is 0-100 against the top of this run, so the two rounds share one scale.' -ForegroundColor DarkGray
 if ($weighted) {
     Write-Host '  It is session-weighted; the raw and unweighted values are Score and BaseScore in -Json.' -ForegroundColor DarkGray

@@ -78,9 +78,31 @@ back so the ranking stays reproducible. Write a JSON file and re-run:
 .\scripts\Get-BacklogPriorities.ps1 -Overrides .\overrides.json -RankingOnly
 ```
 
-Any axis may be set: `Trust`, `EvidenceDebt`, `Where`, `Track`, `Risk`, `Effort`, `Unblocks`,
-`DependsOn`, `Note`. An overridden axis reports confidence `Override`, and the heuristic's own
+Any axis may be set. An overridden axis reports confidence `Override`, and the heuristic's own
 value stays in the JSON under `Heuristic` so the two can be compared.
+
+| Axis | Accepted values |
+|---|---|
+| `Trust`, `EvidenceDebt`, `Blocked` | JSON `true` / `false` — **unquoted** |
+| `Where` | `Hardware`, `Desk`, `Either`, `Unknown` |
+| `Track` | `Capability`, `Velocity`, `Either`, `Unknown` |
+| `Risk` | `SilentWrong`, `LoudFailure`, `Friction`, `Cosmetic` |
+| `Effort` | `S`, `M`, `L` |
+| `Unblocks`, `DependsOn` | array of issue numbers |
+| `Note` | string |
+
+The file must be a JSON **object keyed by issue number** — an array wrapper is rejected rather
+than silently ignored — and it is validated strictly: an unknown axis, a value outside the list,
+or a quoted `"false"` where a boolean belongs stops the run with every problem listed at once.
+That is deliberate. A quoted `"false"` is truthy in PowerShell, so coercing it would turn an
+attempt to *clear* a flag into the strongest possible vote *for* it, and a ranking that quietly
+dropped half its corrections is exactly the failure this script exists to catch.
+
+`Unblocks` is applied after the dependency graph is derived, so setting it **replaces** the
+edges rather than adding to them — that is how a false edge invented by the loose `once #N`
+pattern gets removed.
+
+Write the file as UTF-8. It is read as UTF-8 explicitly, so an em-dash in a `Note` survives.
 
 Put the file in the scratchpad directory, not in the repository — it describes one session's
 judgment, not a durable fact about the backlog.
@@ -152,10 +174,17 @@ you find*) — an unfiled finding cannot be prioritised at all.
 | `-RankingOnly` | Skip the clusters, print the table alone |
 | `-Top N` | Show the first N rows. Clusters and `-Json` always cover everything |
 | `-State open\|closed\|all` | Default `open`. `all` is for checking whether a finding is already filed |
+| `-Limit N` | Default 200. A run that hits the cap warns that the ranking is partial |
 | `-Json` | Full classification, every signal and both scores, instead of the report |
+
+`-State closed` or `all` scores closed issues exactly like open ones — they are flagged `C`,
+greyed, and counted in a warning line, but not excluded. Do not read a ranking from those runs:
+#33 and #39 rank in the top five there, and both are settled.
 
 ## Exit codes
 
 `0` — ranking produced (including "no issues found"). `1` — `gh` missing or unauthenticated, or
-an `-Overrides` file that is absent or not valid JSON. There is no partial answer: an empty
-ranking because `gh` failed would read exactly like an empty backlog.
+an `-Overrides` file that is absent, not valid JSON, not a JSON object, or contains a value the
+scoring does not understand. There is no partial answer: an empty ranking because `gh` failed
+would read exactly like an empty backlog, and a silently-ignored override file would read
+exactly like a heuristic that happened to agree with you.
