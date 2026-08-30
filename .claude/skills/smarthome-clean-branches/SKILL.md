@@ -57,10 +57,11 @@ what happens to it:
 
 | State | Handling |
 |---|---|
-| directory gone, admin record left | **prune** — `git worktree prune` clears the record |
+| directory gone, admin record left | **prune** — `git worktree prune` clears the record, and its branch is freed in the same run |
 | main worktree | keep — git refuses to remove it, and it is the repository |
 | the one the script is running in | keep — removing it deletes the running session's own directory |
 | locked (`git worktree lock`) | keep — an explicit do-not-touch marker; the reason is shown |
+| `git status` there failed | keep — cleanliness is unknown, and unknown is not clean |
 | uncommitted or untracked changes | **keep, always** — see below |
 | pins a protected branch, or one with an open pull request | keep |
 | clean, HEAD already in `origin/main` (detached or on a branch) | **remove** |
@@ -69,6 +70,11 @@ what happens to it:
 **A dirty worktree is never removed and there is no flag to override that.** Uncommitted work
 is the one thing neither the reflog nor the remote can give back; every other mistake this
 script could make is recoverable. Deal with those by hand.
+
+The check fails closed. A `git status` that could not run — a corrupt index, a hook or filter
+error, `safe.directory` refusing the path — is reported as *unknown*, not as clean, and the
+worktree is kept. "No changes found" and "could not look" must not reach the removal pass as
+the same answer.
 
 `git worktree remove` is called without `--force` for the same reason: the dirty check already
 excluded everything that would need it, so a refusal means the state changed underneath and is

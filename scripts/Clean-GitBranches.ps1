@@ -371,10 +371,22 @@ function Get-WorktreeEntries {
         $name = if ($isMain) { '<main worktree>' } else { Split-Path $path -Leaf }
         $pr = Get-PullRequest -BranchName $branch
         $dirty = 0
+        $dirtyUnknown = $false
 
-        if ($exists) {
+        # Only probe a worktree whose fate is not already decided. The main worktree of
+        # a bare repository has no work tree at all, so `git status` there prints a
+        # bare `fatal:` into the middle of the report for an entry that is kept anyway.
+        if ($exists -and -not $isMain -and $comparable -ne $current) {
             $status = Invoke-Git -Arguments @('status', '--porcelain') -WorkingDirectory $path
-            if ($status.ExitCode -eq 0) { $dirty = @($status.Lines).Count }
+            if ($status.ExitCode -eq 0) {
+                $dirty = @($status.Lines).Count
+            }
+            else {
+                # Fail closed. $dirty stays 0 on a failed probe, and 0 is the value that
+                # means "clean" and permits removal -- so trusting it would let a status
+                # this script could not run stand in for one that found nothing.
+                $dirtyUnknown = $true
+            }
         }
 
         $entries +=
@@ -394,6 +406,10 @@ function Get-WorktreeEntries {
             $why = if ($record.LockReason) { "locked: $($record.LockReason)" } else { 'locked' }
             New-Entry -Name $name -Side 'worktree' -Action 'keep' -Method 'locked' `
                 -Reason $why -Path $path -Branch $branch
+        }
+        elseif ($dirtyUnknown) {
+            New-Entry -Name $name -Side 'worktree' -Action 'keep' -Method 'dirty-unknown' `
+                -Reason 'git status failed here, so whether it is clean is unknown - kept' -Path $path -Branch $branch
         }
         elseif ($dirty -gt 0) {
             New-Entry -Name $name -Side 'worktree' -Action 'keep' -Method 'dirty' `
@@ -439,12 +455,20 @@ $worktreeKeep = @($worktreeEntries | Where-Object { $_.Action -eq 'keep' })
 # Branches pinned by a worktree that is STAYING. When -Worktrees is passed, the
 # branches of the worktrees about to be removed are not pinned any more, so they are
 # classified as the candidates they will be by the time the delete pass runs.
+#
+# A stale record pins its branch just as firmly as a live worktree -- `git branch -d`
+# refuses with "used by worktree at ..." while the record exists, even though the
+# directory is long gone -- and the prune pass runs in this same invocation, so those
+# branches are freed here too rather than waiting for a second run.
 $pinnedBranches = @{}
 $freedByWorktree = @{}
 foreach ($entry in $worktreeEntries) {
     if (-not $entry.Branch) { continue }
     if ($Worktrees -and $entry.Action -eq 'remove') {
-        $freedByWorktree[$entry.Branch] = $entry.Name
+        $freedByWorktree[$entry.Branch] = "removing worktree $($entry.Name)"
+    }
+    elseif ($Worktrees -and $entry.Action -eq 'prune') {
+        $freedByWorktree[$entry.Branch] = "pruning the stale record for worktree $($entry.Name)"
     }
     else {
         $pinnedBranches[$entry.Branch] = $entry
@@ -464,7 +488,7 @@ if ($Scope -ne 'Remote') {
         $track = if ($parts.Count -gt 2) { $parts[2] } else { '' }
         $gone = $track -match 'gone'
         $pr = Get-PullRequest -BranchName $name
-        $freed = if ($freedByWorktree.ContainsKey($name)) { "; freed by removing worktree $($freedByWorktree[$name])" } else { '' }
+        $freed = if ($freedByWorktree.ContainsKey($name)) { "; freed by $($freedByWorktree[$name])" } else { '' }
 
         if ($protectedNames.ContainsKey($name)) {
             $entries += New-Entry -Name $name -Side 'local' -Action 'keep' -Reason 'protected' -Method 'protected' -Upstream $upstream
@@ -651,7 +675,15 @@ if ($Worktrees -and @($worktreeRemove).Count -gt 0) {
         # commands below. No --force -- the dirty check already excluded everything
         # that would need it, so a refusal here means the state changed under us and
         # is worth surfacing rather than overriding.
-        if (-not $PSCmdlet.ShouldProcess($worktree.Path, 'Remove worktree')) { continue }
+        if (-not $PSCmdlet.ShouldProcess($worktree.Path, 'Remove worktree')) {
+            # Declined at a -Confirm prompt: the worktree stays and still pins its
+            # branch, which classification already moved into the delete batch. Put it
+            # back, or `git branch -d` fails on a choice the user made deliberately.
+            # Not under -WhatIf, where nothing is declined and the point of the run is
+            # to preview everything -Delete would do.
+            if (-not $WhatIfPreference -and $worktree.Branch) { $failedWorktreeBranches[$worktree.Branch] = $true }
+            continue
+        }
         $result = Invoke-Git -Arguments @('worktree', 'remove', $worktree.Path)
         foreach ($line in $result.Lines) { Write-Host "  $line" }
 
@@ -682,24 +714,34 @@ Git no longer knows about it and nothing points at it. Delete it by hand once th
     }
 }
 
-# A worktree that survived its removal still pins its branch, and git would refuse the
-# delete. Drop those from the batch so one failure produces one warning rather than two.
-if (@($failedWorktreeBranches.Keys).Count -gt 0) {
-    $localDeleteAncestry = @($localDeleteAncestry | Where-Object { -not $failedWorktreeBranches.ContainsKey($_.Name) })
-    $localDeleteSquash = @($localDeleteSquash | Where-Object { -not $failedWorktreeBranches.ContainsKey($_.Name) })
-}
-
 if ($Worktrees -and @($worktreePrune).Count -gt 0) {
-    if ($PSCmdlet.ShouldProcess(($worktreePrune | ForEach-Object { $_.Name }) -join ', ', 'Prune stale worktree records')) {
+    $pruneNames = @($worktreePrune | ForEach-Object { $_.Name })
+    if ($PSCmdlet.ShouldProcess(($pruneNames -join ', '), 'Prune stale worktree records')) {
         Write-Host ''
         Write-Host "Pruning stale worktree records ($(@($worktreePrune).Count))..." -ForegroundColor Yellow
         $result = Invoke-Git -Arguments @('worktree', 'prune', '--verbose')
         foreach ($line in $result.Lines) { Write-Host "  $line" }
         if ($result.ExitCode -ne 0) {
-            Write-Warning "git worktree prune exited with code $($result.ExitCode)."
+            Write-Warning "git worktree prune exited with code $($result.ExitCode). The branches those records pin stay pinned and are not deleted below."
             $failed = 1
+            foreach ($entry in $worktreePrune) {
+                if ($entry.Branch) { $failedWorktreeBranches[$entry.Branch] = $true }
+            }
         }
     }
+    elseif (-not $WhatIfPreference) {
+        foreach ($entry in $worktreePrune) {
+            if ($entry.Branch) { $failedWorktreeBranches[$entry.Branch] = $true }
+        }
+    }
+}
+
+# After both worktree passes, not between them: a worktree or stale record that
+# survived still pins its branch, and git would refuse the delete. Drop those from the
+# batch so one failure produces one warning rather than two.
+if (@($failedWorktreeBranches.Keys).Count -gt 0) {
+    $localDeleteAncestry = @($localDeleteAncestry | Where-Object { -not $failedWorktreeBranches.ContainsKey($_.Name) })
+    $localDeleteSquash = @($localDeleteSquash | Where-Object { -not $failedWorktreeBranches.ContainsKey($_.Name) })
 }
 
 $failed += Remove-BranchBatch -Names @($localDeleteAncestry | ForEach-Object { $_.Name }) `
