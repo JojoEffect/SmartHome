@@ -72,9 +72,18 @@ many (3, 4 or 5 is the useful range) rather than picking a number — it is the 
 ```
 
 `-Handoff N` prints the selected issues with their url, axes, full scoring trail, any override
-note, and a marker on the hardware-gated ones. It **skips blocked and closed rows however high
-they rank** — a blocked issue names what it is waiting for, not work that can start — and lists
-what it skipped and why, so the selection is never quietly smaller than it claims.
+note, and a marker on the hardware-gated ones. Three kinds of row are never handed out, however
+high they rank:
+
+- **blocked** — it names what it is waiting for, not work that can start
+- **closed** — settled
+- **`status: in-progress`** — a session already has it. Handing it out again is how two
+  sessions land on the same issue, and the +10 the scoring gives it would otherwise push it
+  *up* the handoff list
+
+Any that ranked above something selected are named with their reason, so the selection is never
+quietly different from the ranking. Rows that were never in contention are not listed — a skip
+line longer than the selection buries the cases that actually mattered.
 
 Then spawn one background task per issue. The prompts are the whole job here, and the rule that
 makes them work is that **a spun-off session starts cold**: it cannot see this ranking, the
@@ -215,7 +224,7 @@ you find*) — an unfiled finding cannot be prioritised at all.
 | `-Top N` | Show the first N rows. Clusters and `-Json` always cover everything |
 | `-State open\|closed\|all` | Default `open`. `all` is for checking whether a finding is already filed |
 | `-Limit N` | Default 200. A run that hits the cap warns that the ranking is partial |
-| `-Handoff N` | Print the top N as spin-off pointers, skipping blocked and closed rows |
+| `-Handoff N` | Print the top N as spin-off pointers, skipping blocked, closed and in-progress rows |
 | `-Json` | Full classification, every signal and both scores, instead of the report |
 
 `-State closed` or `all` scores closed issues exactly like open ones — they are flagged `C`,

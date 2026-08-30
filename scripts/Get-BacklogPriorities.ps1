@@ -104,10 +104,14 @@
 .PARAMETER Handoff
     Print the top N as pointers for spinning each one off into its own session: url, axes,
     the full scoring trail, any override note, and a marker on the hardware-gated ones so
-    the confirm-before-device-scripts rule reaches the new session. Blocked and closed rows
-    are skipped however high they rank -- a blocked issue names what it is waiting for
-    rather than work that can start -- and the skipped ones are listed by name and reason.
-    In -Json the selection comes back as a Handoff array of issue numbers.
+    the confirm-before-device-scripts rule reaches the new session.
+
+    Three kinds of row are never handed out, however high they rank: blocked (it names what
+    it is waiting for, not work that can start), closed (settled), and in-progress (a
+    session already has it, and handing it out again is how two sessions collide). Any that
+    ranked above something selected are listed by name and reason, so the selection is never
+    quietly different from the ranking. In -Json the same information comes back as Handoff
+    (issue numbers) and HandoffSkipped (number plus reason).
 
 .PARAMETER RankingOnly
     Skip the cluster listing and print the ranked table alone. For the second round,
@@ -352,7 +356,12 @@ if ($Overrides) {
     # Count, none of which match an issue number -- so without this check every override is
     # dropped while the report still announces the file as loaded.
     if ($overrideJson -isnot [System.Management.Automation.PSCustomObject]) {
-        Write-Error "Overrides file must be a JSON object keyed by issue number, e.g. { `"35`": { `"Effort`": `"S`" } }. Found $($overrideJson.GetType().Name) in: $Overrides"
+        # GetType() only when there is something to ask. A file containing literal `null`
+        # parses to $null, and calling GetType() on it threw out of the very guard meant to
+        # produce a clean exit 1 -- leaving $LASTEXITCODE at 0, so a caller checking the
+        # exit code read a crashed run as a successful one.
+        $found = if ($null -eq $overrideJson) { 'null' } else { $overrideJson.GetType().Name }
+        Write-Error "Overrides file must be a JSON object keyed by issue number, e.g. { `"35`": { `"Effort`": `"S`" } }. Found $found in: $Overrides"
         exit 1
     }
 
@@ -735,18 +744,35 @@ foreach ($record in $ranked) {
 # -------------------------------------------------------------------- handoff ----
 #
 # The top N as self-contained briefs, for spinning each one off into its own session. The
-# selection is not simply "the first N rows": a blocked issue names what it is waiting for
-# rather than work that can start, and a closed one is settled. Both are skipped, and the
-# count skipped is reported -- a handoff list that quietly dropped two entries would read
-# as "these are the top five" when it is not.
+# selection is not simply "the first N rows". Three kinds of row cannot be handed to a fresh
+# session: a blocked one names what it is waiting for rather than work that can start, a
+# closed one is settled, and an in-progress one already has a session on it -- handing that
+# out again is how two sessions end up on the same issue, which is the duplication this
+# selection exists to prevent. InProgress even scores +10, so without this it would be
+# offered *sooner* than it otherwise would.
+
+function Test-HandoffEligible {
+    param($Record)
+
+    return (-not $Record.Blocked) -and (-not $Record.InProgress) -and ($Record.State -eq 'OPEN')
+}
 
 $handoffSet = @()
 $handoffSkipped = @()
 if ($Handoff -gt 0) {
-    $handoffSkipped = @($ranked | Where-Object { $_.Blocked -or $_.State -ne 'OPEN' })
-    $handoffSet = @($ranked |
-        Where-Object { -not $_.Blocked -and $_.State -eq 'OPEN' } |
-        Select-Object -First $Handoff)
+    # Walk the ranking in order and record only the rows genuinely stepped over on the way
+    # to filling N. Collecting every ineligible row in the backlog instead made the skip
+    # line report issues ranked 12th through 16th as though they had been displaced from a
+    # top-3 list -- noise that buries the cases that really were passed over.
+    $taken = @()
+    $passedOver = @()
+    foreach ($record in $ranked) {
+        if ($taken.Count -ge $Handoff) { break }
+        if (Test-HandoffEligible -Record $record) { $taken += $record }
+        else { $passedOver += $record }
+    }
+    $handoffSet = @($taken)
+    $handoffSkipped = @($passedOver)
 }
 
 # -------------------------------------------------------------------- output ----
@@ -761,8 +787,13 @@ if ($Json) {
             Overrides  = $Overrides
             Count      = $ranked.Count
         }
-        Handoff = @($handoffSet | ForEach-Object { $_.Number })
-        Issues  = $ranked
+        # Both halves, not just the selection: a consumer that sees only Handoff cannot tell
+        # a clean top-N from one that stepped over blocked or in-progress rows to get there.
+        Handoff        = @($handoffSet | ForEach-Object { $_.Number })
+        HandoffSkipped = @($handoffSkipped | ForEach-Object {
+                [pscustomobject]@{ Number = $_.Number; Reason = if ($_.Blocked) { 'blocked' } elseif ($_.InProgress) { 'in progress' } else { 'closed' } }
+            })
+        Issues         = $ranked
     } | ConvertTo-Json -Depth 8
     exit 0
 }
@@ -866,8 +897,8 @@ if ($Handoff -gt 0) {
     Write-Host ''
     Write-Host "HANDOFF - top $(@($handoffSet).Count) to spin off" -ForegroundColor White
     if (@($handoffSkipped).Count -gt 0) {
-        Write-Host ("  Skipped $(@($handoffSkipped).Count) row(s) that cannot be started, wherever they ranked: {0}" -f `
-            ((@($handoffSkipped) | ForEach-Object { "#$($_.Number) $(if ($_.Blocked) { 'blocked' } else { 'closed' })" }) -join ', ')) -ForegroundColor DarkGray
+        Write-Host ("  Ranked above one of these but not startable, so stepped over: {0}" -f `
+            ((@($handoffSkipped) | ForEach-Object { "#$($_.Number) $(if ($_.Blocked) { 'blocked' } elseif ($_.InProgress) { 'in progress' } else { 'closed' })" }) -join ', ')) -ForegroundColor DarkGray
     }
 
     foreach ($record in $handoffSet) {
