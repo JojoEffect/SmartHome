@@ -38,8 +38,15 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
         // The names are taken from the State enum rather than spelled out here. They are
         // the convention's own vocabulary and StateExtensions.GetString() already owns
         // it; a private copy would drift from $state, which is precisely the value the
-        // host compares this property against. This array is the single source for both
-        // the $format string and the set of commands HandleLifecycleCommand accepts.
+        // host compares this property against.
+        //
+        // It is the single source for the $format string, and since issue #39 that is
+        // the only place the membership rule is stated: EnumProperty measures a /set
+        // against its own $format and HomieClient does not raise OnCommand for a payload
+        // it refused, so a name outside this array can no longer reach the handler below.
+        // The array is still needed -- something has to build $format, and the handler
+        // still has to map a name to the client call that applies it -- but that mapping
+        // is dispatch now, not a second copy of the check.
         private static readonly State[] LifecycleStates = { State.Ready, State.Alert, State.Sleeping };
 
         private static IHomieClient _homieClient;
@@ -203,6 +210,9 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
                 return;
             }
 
+            // Unreachable since #39 -- the property refuses a payload its $format does not
+            // list, and a refused payload never reaches OnCommand. Kept as the thing that
+            // would say so if that ever stopped being true.
             Debug.WriteLine($"HomieClientCheck: unknown lifecycle command '{payload}'.");
         }
 

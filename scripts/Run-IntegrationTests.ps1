@@ -857,6 +857,36 @@ function ConvertTo-HomieSnapshot {
     return $snapshot
 }
 
+function Get-HomieLivePayloads {
+    # The payloads published to one topic inside a capture window, in arrival order,
+    # with the retained replay dropped: the replayed copy is the value from before the
+    # window opened and says nothing about what happened inside it.
+    #
+    # ConvertTo-HomieSnapshot answers "where did this settle". This answers "what went
+    # past, in what order", which is the only thing that tells a command that was refused
+    # apart from one that was never delivered -- both leave the store exactly as it was.
+    param(
+        [string[]]$Lines,
+        [string]$Topic
+    )
+
+    $payloads = @()
+    foreach ($line in $Lines) {
+        # Through ConvertFrom-HomieCaptureLine rather than a second spelling of the
+        # "<topic> <0|1> <payload>" layout, for the reason stated there: the layout is
+        # chosen in Get-SmartHomeSubscriberArguments, and a copy of it here is a place
+        # where a change to the format could be fixed in one reader and silently keep
+        # parsing in the other.
+        $parsed = ConvertFrom-HomieCaptureLine -Line $line
+        if ($null -ne $parsed -and $parsed.Topic -eq $Topic -and -not $parsed.Retained) {
+            $payloads += $parsed.Payload
+        }
+    }
+
+    # Comma so a zero- or one-element result still arrives as an array.
+    return ,$payloads
+}
+
 function Publish-HomieCommand {
     param(
         [string]$Port,
@@ -1003,8 +1033,8 @@ function Write-ConformancePhaseBreakdown {
 function Get-ConformanceCaptureSeconds {
     # A ceiling for the debug capture that runs alongside the check, derived from the
     # check's own timeouts rather than guessed: the announce wait, the /set round trip,
-    # one per lifecycle step, and the re-announce wait, plus slack for the snapshot
-    # windows and the broker restart between them.
+    # the out-of-format round, one per lifecycle step, and the re-announce wait, plus
+    # slack for the snapshot windows and the broker restart between them.
     #
     # Deliberately loose. A capture that ends early takes the device-side evidence with
     # it exactly when the run was slow enough to be worth reading, and nothing waits out
@@ -1013,9 +1043,11 @@ function Get-ConformanceCaptureSeconds {
 
     $lifecycleSteps = 5
 
+    # +2 rather than +1: the /set round trip and the out-of-format phase each poll for up
+    # to CommandTimeoutSeconds on top of the lifecycle steps.
     return $Settings.SettleSeconds +
            $Settings.RecoverySeconds +
-           (($lifecycleSteps + 1) * $Settings.CommandTimeoutSeconds) +
+           (($lifecycleSteps + 2) * $Settings.CommandTimeoutSeconds) +
            60
 }
 
@@ -1222,6 +1254,105 @@ function Invoke-HomieConformanceCheck {
         $script:conformanceFailures += "/set on $property did not come back on the property topic (saw '$($lastSeen[$property])', expected '$wanted')"
     }
 
+    # ── payloads the properties' own $datatype/$format forbid ────────────────
+    Start-ConformancePhase -Name 'out-of-format /set'
+    Write-Host "  driving /set commands the datatypes forbid..." -ForegroundColor DarkGray
+    # The library refuses these before anything is applied: the value does not move and
+    # nothing is published, so nothing lands in the retained store and the controller's
+    # only feedback is a property that did not change (issue #39).
+    #
+    # Which is also precisely what a command that never arrived looks like. A /set is
+    # non-retained, so a lost one leaves no trace whatsoever -- the same reasoning the
+    # refused-transition step below sets out at length.
+    #
+    # So each forbidden payload is followed by a valid one on the same property, inside
+    # one capture window. The valid payload's reflection is the proof that the device was
+    # subscribed and receiving while the forbidden one went past: seeing it, and NOT
+    # seeing the forbidden payload before it, is a refusal. Seeing neither is a lost
+    # command, and is reported as exactly that rather than passing.
+    #
+    # One case per datatype, each the behaviour that type used to have: an integer
+    # outside a declared range and a float that does not parse were applied or dropped
+    # silently, an enum value $format does not list was accepted, an unparseable colour
+    # was dropped, and a boolean that was neither 'true' nor 'false' was turned into
+    # 'false' -- fabricated, not refused.
+    #
+    # That last one is why the boolean's valid payload is 'true' rather than the more
+    # obvious 'false'. A fabricating boolean never publishes 'on' back, it publishes
+    # 'false', so a case whose valid payload is also 'false' cannot tell the fabrication
+    # from the refusal -- both leave a single 'false' on the topic and the "was the
+    # forbidden payload applied" check below looks for 'on', which never appears. With
+    # 'true' as the valid payload the fabricated 'false' lands *before* the reflection,
+    # which is what the ordering check below measures.
+    #
+    # string-value has no case here: every payload is a valid Homie string and $format
+    # carries no meaning for that datatype, so there is nothing for a payload to violate.
+    $outOfFormatCases = @(
+        @{ Property = 'integer-value'; Bad = '101';    Good = '43';        Echo = '43'        }
+        @{ Property = 'float-value';   Bad = 'warm';   Good = '22.5';      Echo = '22.50'     }
+        @{ Property = 'boolean-value'; Bad = 'on';     Good = 'true';      Echo = 'true'      }
+        @{ Property = 'enum-value';    Bad = 'purple'; Good = 'medium';    Echo = 'medium'    }
+        @{ Property = 'color-value';   Bad = 'FF8000'; Good = '255,128,0'; Echo = '255,128,0' }
+    )
+
+    $pending = @($outOfFormatCases)
+    $seenPayloads = @{}
+    $deadline = (Get-Date).AddSeconds($Settings.CommandTimeoutSeconds)
+
+    while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        $capture = Start-HomieCapture -Port $Port -WaitForConnectSeconds 5
+
+        foreach ($case in $pending) {
+            Publish-HomieCommand -Port $Port -Topic "$node/$($case.Property)/set" -Payload $case.Bad
+            Publish-HomieCommand -Port $Port -Topic "$node/$($case.Property)/set" -Payload $case.Good
+        }
+
+        $lines = Stop-HomieCapture -Capture $capture
+        $stillPending = @()
+
+        foreach ($case in $pending) {
+            $payloads = Get-HomieLivePayloads -Lines $lines -Topic "$node/$($case.Property)"
+            $seenPayloads[$case.Property] = $payloads
+
+            # Retried only while NEITHER payload was seen, i.e. while nothing has been
+            # measured. A forbidden payload that did land is a real failure and must not
+            # be retried away.
+            if ([array]::IndexOf($payloads, $case.Echo) -lt 0 -and [array]::IndexOf($payloads, $case.Bad) -lt 0) {
+                $stillPending += $case
+            }
+        }
+
+        $pending = $stillPending
+    }
+
+    foreach ($case in $outOfFormatCases) {
+        $payloads = if ($seenPayloads.Contains($case.Property)) { $seenPayloads[$case.Property] } else { @() }
+
+        if ([array]::IndexOf($payloads, $case.Bad) -ge 0) {
+            $script:conformanceFailures += "out-of-format '$($case.Bad)' was applied to $($case.Property) and published back (saw: $($payloads -join ', '))"
+            continue
+        }
+
+        $echoIndex = [array]::IndexOf($payloads, $case.Echo)
+
+        if ($echoIndex -lt 0) {
+            $script:conformanceFailures += "neither the out-of-format '$($case.Bad)' nor the valid '$($case.Good)' reached $($case.Property), so the refusal was never measured (saw: $($payloads -join ', '))"
+            continue
+        }
+
+        # A forbidden payload does not have to come back verbatim to have been applied.
+        # BooleanProperty's old behaviour turned anything unrecognised into 'false' and
+        # published *that*, which the verbatim check above cannot see at all -- so the
+        # measurement is the stronger one: a refusal publishes nothing, therefore the
+        # valid payload's reflection must be the FIRST thing on the property topic inside
+        # the window. Anything ahead of it is the forbidden payload having moved the
+        # value, whatever it was rendered as.
+        if ($echoIndex -gt 0) {
+            $before = $payloads[0..($echoIndex - 1)] -join ', '
+            $script:conformanceFailures += "$($case.Property) published '$before' before the valid '$($case.Good)', so the out-of-format '$($case.Bad)' was applied rather than refused (saw: $($payloads -join ', '))"
+        }
+    }
+
     # ── the lifecycle states a device can be driven into ─────────────────────
     Start-ConformancePhase -Name 'lifecycle'
     Write-Host "  driving `$state through alert, sleeping and a refused transition..." -ForegroundColor DarkGray
@@ -1311,16 +1442,7 @@ function Invoke-HomieConformanceCheck {
                 }
             }
 
-            # Payloads on the property topic, in arrival order, retained replay dropped:
-            # the replayed copy is the value from before this command and says nothing
-            # about whether it arrived.
-            $lifecyclePayloads = @()
-            foreach ($line in $lines) {
-                $parsed = ConvertFrom-HomieCaptureLine -Line $line
-                if ($null -ne $parsed -and $parsed.Topic -eq "$node/lifecycle" -and -not $parsed.Retained) {
-                    $lifecyclePayloads += $parsed.Payload
-                }
-            }
+            $lifecyclePayloads = Get-HomieLivePayloads -Lines $lines -Topic "$node/lifecycle"
 
             # The correction is looked for AFTER the reflection, not anywhere in the
             # window. The window is deliberately opened before the command, so it can
@@ -1408,7 +1530,7 @@ function Invoke-HomieConformanceCheck {
 
     return @{
         Outcome = 'PASS'
-        Detail  = "attributes, datatypes, retained flags, /set round-trip, alert/sleeping, a refused transition and re-announce all conform"
+        Detail  = "attributes, datatypes, retained flags, /set round-trip, refused out-of-format payloads, alert/sleeping, a refused transition and re-announce all conform"
     }
 }
 

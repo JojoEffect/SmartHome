@@ -10,10 +10,15 @@
     4. Runs vstest.console against the built test assembly using
        src\tests\Unit\nano.runsettings.
 
-    nano.runsettings has <IsRealHardware>True</IsRealHardware> — this
-    deploys test code to and executes it on the physical device on the
-    configured COM port, same as Deploy-ToDevice.ps1. Treat it as a
-    hardware-touching action.
+    The default run settings file, nano.runsettings, has
+    <IsRealHardware>True</IsRealHardware> — this deploys test code to and
+    executes it on the physical device on the configured COM port, same as
+    Deploy-ToDevice.ps1. Treat it as a hardware-touching action.
+
+    -RunSettings nano.ci.runsettings sets IsRealHardware=False instead and runs
+    the same tests on the nanoclr virtual device, touching no COM port and
+    deploying nothing. The script reads that flag out of the resolved settings
+    file and reports which of the two it did, so a log can be told apart later.
 
 .NOTES
     Requires:
@@ -83,6 +88,30 @@ if (-not (Test-Path $runSettings)) {
     exit 1
 }
 
+# ── Invalidate Deploy-ToDevice.ps1's padding record ───────────────────────────
+# On real hardware the nanoFramework test adapter puts the test assemblies on the
+# device itself, over the debugger's WireProtocol connection rather than through
+# Deploy-ToDevice.ps1 -- and it erases only its own footprint too
+# (DeploymentExecuteFull in nf-debugger's WireProtocol\Engine.cs erases exactly the
+# assemblies' combined length). Deploy-ToDevice.ps1 sizes its 0xFF padding from a
+# record of what IT last flashed, so after a hardware test run that record describes
+# an image that is no longer what is on the device. Drop it, and the next deploy pads
+# the full fallback size -- what the script did unconditionally before the record
+# existed. Costs one full-size deploy; the alternative is a device booting leftover
+# test assemblies.
+#
+# Read via SelectSingleNode rather than $xml.RunSettings.nanoFrameworkAdapter...:
+# Set-StrictMode makes a missing property on an XmlNode a terminating error, and
+# -RunSettings can point at any file.
+[xml]$runSettingsXml = Get-Content -Path $runSettings -Raw
+$isRealHardwareNode = $runSettingsXml.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/IsRealHardware')
+if ($isRealHardwareNode -and $isRealHardwareNode.InnerText.Trim() -eq 'True') {
+    # Every port, not just $env:SMARTHOME_COM_PORT: nano.runsettings leaves
+    # RealHardwarePort empty, so the adapter flashes whichever device it detects first.
+    Clear-SmartHomeDeployState
+    Write-Host "  Cleared the deploy padding record -- the test adapter flashes the device itself." -ForegroundColor DarkGray
+}
+
 # ── Locate vstest.console and the nanoFramework test adapter ─────────────────
 $vstest = Get-VsTestPath
 $vstestCmd = Get-Command $vstest -ErrorAction SilentlyContinue
@@ -106,9 +135,51 @@ Visual Studio's "Restore NuGet Packages", then re-run this script.
     exit 1
 }
 
-# ── Run tests on hardware ─────────────────────────────────────────────────────
+# ── Run tests ─────────────────────────────────────────────────────────────────
+# Which target the run uses is declared by the settings file, so read it instead of
+# assuming the hardware default: -RunSettings nano.ci.runsettings sets IsRealHardware
+# False and executes on the nanoclr virtual device, with no COM port and no deploy.
+# CLAUDE.md singles this script out as one of three that talk to the physical ESP32,
+# and this line is the only thing in the output saying which of the two a given run
+# was -- a virtual run announcing "on hardware" misleads exactly the person trying to
+# reconcile what was and was not exercised on the device.
+#
+# SelectSingleNode rather than $xml.RunSettings.nanoFrameworkAdapter.IsRealHardware:
+# under Set-StrictMode a missing element is an error on property access, and a
+# caller-supplied settings file is allowed to omit it.
+#
+# Name it from the resolved path, not from $RunSettings: PowerShell variables are
+# case-insensitive, so the $runSettings assignment above has already overwritten the
+# parameter of that name with the full path.
+$runSettingsName = Split-Path $runSettings -Leaf
+[xml]$runSettingsXml = Get-Content -Path $runSettings -Raw
+$hardwareNode = $runSettingsXml.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/IsRealHardware')
+$portNode     = $runSettingsXml.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/RealHardwarePort')
+$hardwareFlag = if ($hardwareNode) { $hardwareNode.InnerText.Trim() } else { '' }
+$hardwarePort = if ($portNode) { $portNode.InnerText.Trim() } else { '' }
+
+if ($hardwareFlag -eq 'True') {
+    $target = 'real hardware'
+    $targetDetail = if ($hardwarePort) {
+        "COM port $hardwarePort from $runSettingsName"
+    } else {
+        # An empty RealHardwarePort means the adapter takes the first nanoDevice it
+        # finds, which is not necessarily SMARTHOME_COM_PORT. Don't name a port the
+        # run may not have used.
+        "first device found; $runSettingsName names no COM port"
+    }
+} elseif ($hardwareFlag -eq 'False') {
+    $target = 'the nanoclr virtual device'
+    $targetDetail = "no COM port, no deploy; from $runSettingsName"
+} else {
+    # Only reachable through a -RunSettings file declaring neither value, in which case
+    # the adapter picks and this script genuinely cannot say which target ran.
+    $target = 'an undeclared target'
+    $targetDetail = "$runSettingsName sets no IsRealHardware, so the adapter chooses"
+}
+
 Write-Host ""
-Write-Host "Running tests on hardware via vstest.console..." -ForegroundColor Cyan
+Write-Host "Running tests on $target ($targetDetail) via vstest.console..." -ForegroundColor Cyan
 Write-Host "  Adapter: $adapterDir"
 Write-Host "  Settings: $runSettings"
 
@@ -173,7 +244,7 @@ Results: $trxPath
 }
 
 Write-Host ""
-Write-Host "Tests passed." -ForegroundColor Green
+Write-Host "Tests passed on $target." -ForegroundColor Green
 
 # Explicit success code -- see the note in Sync-NanoFrameworkRepos.ps1.
 exit 0

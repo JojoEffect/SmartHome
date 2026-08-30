@@ -4,7 +4,7 @@
 convention (topic prefix `homie/`). Primary device today: **RoomSensor**.
 
 This file is the single source of truth for how to work in this repo — layout, scripts,
-companion repos, version policy. (It replaced `.github/copilot-instructions.md` and the root
+machine prerequisites, companion repos, version policy. (It replaced `.github/copilot-instructions.md` and the root
 `AGENTS.md`, which were near-duplicates of it; if you find a stale reference to either, fix the
 reference rather than recreating the file.)
 
@@ -52,11 +52,12 @@ have a script yet, that's a gap worth closing rather than working around.
 |---|---|---|---|
 | `scripts\Start-DevEnv.ps1 [-NoSync] [-Detached]` | Syncs the sibling repos (unless `-NoSync`), then starts local Mosquitto (explicit `0.0.0.0` listener — a bare `-p` binds localhost-only on Mosquitto 2.x and silently can't be reached from a real device) and subscribes to `homie/#`. `-Detached` backgrounds both and returns | No | `smarthome-dev-env` |
 | `scripts\Stop-DevEnv.ps1 [-KeepLog] [-IncludeOrphans]` | Stops whatever `Start-DevEnv.ps1` recorded for the configured port, verifying pid+name+start-time first so a recycled pid is never killed. No-op + exit 0 if nothing is running, so it's safe to call unconditionally. `-IncludeOrphans` also clears brokers/subscribers this repo started that no state file covers | No | `smarthome-dev-env` |
-| `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`) then flashes via `nanoff` | **Yes** | `smarthome-deploy` |
+| `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release] [-FullPad]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`) then flashes via `nanoff`, padding the image with 0xFF far enough to erase the previous one (see Deploy padding below). `-FullPad` after a Visual Studio deploy | **Yes** | `smarthome-deploy` |
 | `scripts\Run-Tests.ps1` | Builds `SmartHome.UnitTests` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** | `smarthome-test` |
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
 | `scripts\Sync-NanoFrameworkRepos.ps1 [-Force]` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
 | `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style | No | `smarthome-restore-packages` |
+| `scripts\Test-Setup.ps1` | Reports everything the other scripts assume exists on this machine — both `local.env` files and their values, restored `packages\`, the test adapter, `gh` auth, MSBuild/vstest, Mosquitto, the COM port, the companion repos — all at once, rather than one abort at a time. Read-only; opens no port and touches no device | No | `smarthome-check-setup` |
 | `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` | Raw serial capture of the device's native boot log only — nanoCLR silences this at `app_main()` and switches to binary WireProtocol, so this can't see managed output | Resets only | `smarthome-watch-serial` |
 | `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot] [-NoBuild] [-BuildOnly] [-Until <regex>] [-DumpConfig]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
 | `scripts\Set-AssemblyVersion.ps1 -Version <v> [-Check]` | Stamps a version into every `AssemblyInfo.cs` under `src` — a plain recursive glob, not a fixed list and not restricted to `Properties\`, so adding a device needs no edit here and a stray one anywhere under `src` will also be picked up (and fails the run if it carries no version attribute). `.nfproj` has no generated assembly info, so this is the only thing that makes a release build carry its version. Normally invoked by the release workflow, not by hand | No | `smarthome-release` |
@@ -82,7 +83,42 @@ If a new recurring unit of work shows up that isn't covered by an existing scrip
 `Write-Error` remediation) and give it a matching skill — that's the standing expectation for
 this repo, not a one-time cleanup.
 
+### Deploy padding
+
+`nanoff` erases and writes only the image file's own byte length, so a smaller app flashed
+after a larger one leaves the larger one's tail unerased past the new image's end — and the
+CLR finds it. It walks the *whole* deployment partition looking for assembly headers and, on
+a header that doesn't check out, moves to the next candidate rather than stopping
+(`ContiguousBlockAssemblies` in `nf-interpreter`'s `src/CLR/Startup/CLRStartup.cpp`). No
+amount of trailing blank flash terminates that scan; only overwriting the stale bytes does.
+`Deploy-ToDevice.ps1` therefore pads every image with 0xFF, and the invariant it has to hold
+is exactly "cover the footprint of the previous image".
+
+It used to pad every image to a flat 400KB, which held that invariant by brute force. It now
+records the last flashed size per COM port (in `%TEMP%\smarthome-deploy-<port>.json`, written
+pessimistically before the flash and tightened after it) and pads to `max(this image, that
+record)` rounded up to a 4KB sector — same guarantee, roughly half the erase-and-verify
+footprint across a suite run. Anything the record can't vouch for — missing, corrupt, a
+different `-DeployAddress`, `-FullPad` — falls back to the flat 400KB, never to the bare
+image size, and never below a larger footprint the record does vouch for at this address
+(`-FullPad` distrusts how *tight* the record is, not its floor). An image bigger than the
+400KB fallback deploys fine but warns, because the fallback stops being a worst case the
+moment one exists.
+
+The record only describes what *this script* flashed. Visual Studio's F5 deploy and the
+nanoFramework test adapter both write the deployment partition themselves, and erase only
+their own footprint too. `Run-Tests.ps1` clears the record for that reason; Visual Studio
+can't, so pass `-FullPad` on the first deploy after one.
+
 ## First-time setup
+
+Everything in this section lives **outside the repository** — on the machine the session is
+running on. None of it is version-controlled, none of it can be inferred from the source tree,
+and a session cannot install any of it for itself. So it is an assumption to check rather than
+a given, and checking is cheap: each item goes missing as something that reads like broken code
+or a broken build, which is what the failure table below exists to translate.
+
+### Machine-local config
 
 ```powershell
 Copy-Item scripts\local.env.template.ps1 scripts\local.env.ps1
@@ -95,9 +131,11 @@ Then fill in:
   `SMARTHOME_MQTT_BROKER` / `SMARTHOME_MQTT_PORT`
 - `scripts\nanoFramework.local.env.ps1` — `SMARTHOME_NANOFW_BRANCH`
 
-Both `local.env.ps1` files are git-ignored — never commit them.
+Both `local.env.ps1` files are git-ignored — never commit them. Every script dot-sources them
+through `Import-SmartHomeLocalEnv` before doing anything else, so a missing or half-filled file
+stops the run at its first line, ahead of any build, flash or broker start.
 
-Required local tools:
+### Required local tools
 
 - [nanoFramework VS extension](https://marketplace.visualstudio.com/items?itemName=nanoframework.nanoFramework-VS2022-Extension)
 - `nanoff` CLI: `dotnet tool install -g nanoff`
@@ -109,6 +147,57 @@ Required local tools:
   what there is to do. A human can fall back to the issues page in a browser; an agent
   session has no such fallback, and every workflow in this file that reaches GitHub goes
   through `gh`.
+
+### Check it before relying on it
+
+```powershell
+.\scripts\Test-Setup.ps1
+```
+
+Checks every item in this section in one pass and reports them together — read-only, opens no
+COM port, touches no device, exit 0 unless something FAILs. Worth running before the first
+script call of a session rather than discovering the gap midway through a workflow, and always
+in a fresh worktree. Skill: `smarthome-check-setup`.
+
+It reports rather than aborts, on purpose: `Import-SmartHomeLocalEnv` exits on the first missing
+file, so a workflow that relies on it discovers one gap, stops, and hides the next.
+
+One trap if you check something by hand instead: in Windows PowerShell 5.1, do **not** pipe a
+native tool through `2>&1`. The redirect wraps the exe's ordinary stderr in a
+`NativeCommandError` and sets `$?` to false, so a perfectly healthy `nanoff --version` reports
+as a failure.
+
+### What a missing prerequisite looks like
+
+None of these are code problems, and each has been read as one. `Test-Setup.ps1` reports all of
+them by name; the table is for when you meet one without having run it:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| A script exits at once with `Missing: ...\scripts\local.env.ps1` | config file absent | copy the templates above, or the filled-in files from another checkout |
+| `Missing environment variable: SMARTHOME_...` | config file present but incomplete | fill the value in, comparing against the template |
+| A wall of `error CS0518` — predefined type `System.Object`/`System.Void` not defined — in every project | NuGet packages not restored: `packages\` is git-ignored (`.gitignore:200`) and comes with no clone | `scripts\Restore-Packages.ps1`. A plain `msbuild /t:Restore` is a no-op for this project style |
+| `gh` fails with an authentication error | `gh auth login` never run, or the token expired | `gh auth login`. The backlog is unreadable until then |
+
+MSBuild on this machine emits **German** diagnostics, so match on the error *code* (`CS0518`)
+rather than on English message text.
+
+### A fresh worktree starts with none of it
+
+`Get-SmartHomeScriptsDir` returns the calling script's own `$PSScriptRoot`, so a worktree under
+`.claude\worktrees\<name>` reads *its own* `scripts\local.env.ps1`, never the main checkout's.
+Both config files and `packages\` are git-ignored, so a new worktree has neither, and the first
+script call fails there even though the main checkout is fully set up. Seed it once, from the
+worktree root (`..\..\..` being `<name>` → `worktrees` → `.claude` → the repo root):
+
+```powershell
+Copy-Item ..\..\..\scripts\local.env.ps1 scripts\
+Copy-Item ..\..\..\scripts\nanoFramework.local.env.ps1 scripts\
+.\scripts\Restore-Packages.ps1
+```
+
+`Test-Setup.ps1` detects the worktree and prints that first `Copy-Item` with both paths already
+filled in, so running it first is quicker than reading this.
 
 ## Repository layout
 
@@ -191,8 +280,18 @@ device owns a connection rather than being one, and exposing `Publish`/`Subscrib
 let an app publish an attribute non-retained or `$state` out of order. The `Device` model (built
 with `HomieDeviceBuilder`) says what the device *is*; `IHomieClient` is what you *do* with it.
 
-Four things to know when writing an actuator (Irrigation, Oven):
+Five things to know when writing an actuator (Irrigation, Oven):
 
+- Don't re-check the payload against `$datatype` or `$format` -- the property already did.
+  Since 2026-08-29 `PropertyBase.Set` validates a `/set` before anything is applied: an enum
+  payload must be one of the `$format` values, an integer or float inside a declared
+  `min:max` range, a boolean exactly `true` or `false`, a colour a real `<r>,<g>,<b>` triple.
+  A rejected payload is logged and dropped -- the value does not move, nothing is published,
+  nothing lands in the retained store -- and `HomieClient` does **not** raise `OnCommand` for
+  it, so a handler only ever sees payloads its property can hold. That is narrower than it
+  sounds and does not replace the rule below: the library refuses what the *declaration*
+  forbids, and only the app can refuse what its *state* forbids (a legal enum value that is
+  an illegal transition, a valid setpoint a relay then fails to reach). Issue #39.
 - Act on `IHomieClient.OnCommand`, not on `property.OnUpdate`. The property event fires both
   when a controller sets a value and when the device updates its own, and cannot tell them
   apart; `OnCommand` fires only for a controller's `/set`.
@@ -265,7 +364,8 @@ the verdict*. The latter is declared per entry by the `Kind` field in `$testCata
   the test's own `[ITEST]` marker. WifiCheck, MqttCheck and Bmp280Check work this way.
 - **`HomieConformance`** — the host measures a purpose-built device against the Homie v4
   convention: mandatory attributes and their retained flags, one property of every datatype with
-  its `$format`/`$unit`/`$settable`/`$retained`, a `/set` command applied and reflected back, the
+  its `$format`/`$unit`/`$settable`/`$retained`, a `/set` command applied and reflected back, a
+  payload each datatype's own `$format` forbids that must be refused rather than applied, the
   `alert` and `sleeping` states driven through a control property, a refused transition that
   must not be advertised as if it had happened, and a full re-announce after the broker is
   replaced. `HomieClientCheck` is this kind. Retained-ness is read from a *fresh*
@@ -399,6 +499,55 @@ gh issue list --state open
 Issues are labelled `type:` (bug/feature/task/spike), `area:` (homie/infra/sensor) and
 `status:` (in-progress/blocked/review). Anything `status: blocked` names in its body exactly
 what it is waiting for, so it can be picked up cold.
+
+### File what you find
+
+**Anything found and verified that falls outside the change in hand gets a GitHub issue,
+before the session ends.** Not a note in a pull request body, not a line in a summary the
+user has to act on, not a TODO in the code — an issue, because the issue list is the backlog
+and everything else is a place findings go to be forgotten. This is standing behaviour for
+every session, not something to be asked for.
+
+Three things make it work, and skipping any one of them makes it worse than not doing it:
+
+- **Verified is the bar.** Reproduce it, or read the source that proves it, before filing.
+  A hunch filed as an issue costs the next session a full investigation to disprove and
+  teaches everyone to distrust the list. If investigation refutes the finding, that is a
+  result too — say so plainly and file nothing.
+- **Retract what you already said.** A finding reported somewhere before it was checked — a
+  pull request body, a review comment, a message to the user — has to be corrected in that
+  same place once it turns out to be wrong. A wrong claim left standing in a merged PR is
+  indistinguishable from a real one later.
+- **File it, don't fix it.** Widening the current change to cover what you tripped over is how
+  a reviewable diff becomes an unreviewable one. Write the issue so it can be picked up cold:
+  what is wrong, the evidence, the files, and what closing it would look like.
+
+Check `gh issue list --state all` first — a duplicate is worse than nothing, and a closed issue
+counts as much as an open one: #33 was closed as working-as-intended and #16 as not-planned, so
+searching only the open list re-files decisions this repo has already made. Label to match the
+rest of the list, and link the pull request or issue that turned the finding up. The label names
+contain the space after the colon — `type: bug`, not `type:bug`, which `gh` rejects with
+`'type:bug' not found` and then creates nothing:
+
+```bash
+gh issue create --title "..." --body "..." --label "type: bug" --label "area: infra"
+```
+
+Then say which issues you filed. What must not live in a summary is the *finding* — the issue
+numbers themselves belong in the session's closing message, so the user can see what was opened
+in a public tracker without going to look for it.
+
+Worth filing: a defect confirmed by reproduction or by reading the source; a constant or
+assumption the code asserts without evidence; a residual gap in something just shipped, where
+the mitigation is "remember to do X"; work deliberately cut from a change to keep it
+reviewable.
+
+Not worth filing: style preferences; refactors with no stated payoff; anything already covered
+by an open issue, settled by a closed one, or already documented in this file as intentional;
+and anything you have not actually checked.
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) carries the same rule in short form — it is the source of
+truth for process, so change both or neither.
 
 ## Development process
 

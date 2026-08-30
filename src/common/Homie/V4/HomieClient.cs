@@ -371,17 +371,34 @@ namespace SmartHome.Homie.V4
             // Guarded separately: a command that failed to apply is still a command the
             // app should hear about, since handlers act on the payload rather than on the
             // property's resulting value.
+            //
+            // A payload the property *rejected* is the one exception, and it is a
+            // different thing from one that threw. Set() only throws once it is applying
+            // a payload it already accepted -- typically from the reflection publish on a
+            // flaky link -- so that command did reach the device and the app should hear
+            // about it. A rejected payload never reached anything: it violates the
+            // property's own declared $datatype or $format, the value did not move and
+            // nothing was published. Raising OnCommand for it would hand every actuator a
+            // payload the library has already refused, which is how each of them ends up
+            // re-checking the $format its property already declares (issue #39).
+            var accepted = true;
             try
             {
                 // Set() reflects the value back to the property topic via OnUpdate, which
                 // is what the spec asks for. OnCommand is raised separately so an app can
                 // tell a controller's command from its own update -- property.OnUpdate
                 // fires for both and cannot distinguish them.
-                property.Set(message);
+                accepted = property.Set(message);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Failed to apply the command on '{topic}'.");
+            }
+
+            if (!accepted)
+            {
+                // Set() has already logged what was wrong with the payload.
+                return;
             }
 
             try

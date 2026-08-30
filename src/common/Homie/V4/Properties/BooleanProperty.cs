@@ -39,10 +39,25 @@ namespace SmartHome.Homie.V4.Properties
         // Update() always had it right, which is what made the mismatch easy to miss.
         private static string Format(bool value) => value ? "true" : "false";
 
+        internal override string? Validate(string value)
+        {
+            // Exactly "true" or "false", which is all Homie v4 permits. This used to
+            // accept "1" and "True" as well and -- worse -- treat everything else as
+            // false, so a controller sending "on" or a typo got a device that published
+            // 'false' and acted on it. At the broker that is indistinguishable from a
+            // controller having deliberately asked for false.
+            if (value == "true" || value == "false")
+            {
+                return null;
+            }
+
+            return "not 'true' or 'false'";
+        }
+
         internal override void SetInternal(string value)
         {
-            bool parsed = value == "true" || value == "1" || value == "True";
-            Update(parsed);
+            // Validate() has already ruled out everything else.
+            Update(value == "true");
         }
     }
 }
