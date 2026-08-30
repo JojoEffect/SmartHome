@@ -4,7 +4,7 @@
 convention (topic prefix `homie/`). Primary device today: **RoomSensor**.
 
 This file is the single source of truth for how to work in this repo — layout, scripts,
-companion repos, version policy. (It replaced `.github/copilot-instructions.md` and the root
+machine prerequisites, companion repos, version policy. (It replaced `.github/copilot-instructions.md` and the root
 `AGENTS.md`, which were near-duplicates of it; if you find a stale reference to either, fix the
 reference rather than recreating the file.)
 
@@ -84,6 +84,14 @@ this repo, not a one-time cleanup.
 
 ## First-time setup
 
+Everything in this section lives **outside the repository** — on the machine the session is
+running on. None of it is version-controlled, none of it can be inferred from the source tree,
+and a session cannot install any of it for itself. So it is an assumption to check rather than
+a given, and checking is cheap: each item goes missing as something that reads like broken code
+or a broken build, which is what the failure table below exists to translate.
+
+### Machine-local config
+
 ```powershell
 Copy-Item scripts\local.env.template.ps1 scripts\local.env.ps1
 Copy-Item scripts\nanoFramework.local.env.template.ps1 scripts\nanoFramework.local.env.ps1
@@ -95,9 +103,11 @@ Then fill in:
   `SMARTHOME_MQTT_BROKER` / `SMARTHOME_MQTT_PORT`
 - `scripts\nanoFramework.local.env.ps1` — `SMARTHOME_NANOFW_BRANCH`
 
-Both `local.env.ps1` files are git-ignored — never commit them.
+Both `local.env.ps1` files are git-ignored — never commit them. Every script dot-sources them
+through `Import-SmartHomeLocalEnv` before doing anything else, so a missing or half-filled file
+stops the run at its first line, ahead of any build, flash or broker start.
 
-Required local tools:
+### Required local tools
 
 - [nanoFramework VS extension](https://marketplace.visualstudio.com/items?itemName=nanoframework.nanoFramework-VS2022-Extension)
 - `nanoff` CLI: `dotnet tool install -g nanoff`
@@ -109,6 +119,49 @@ Required local tools:
   what there is to do. A human can fall back to the issues page in a browser; an agent
   session has no such fallback, and every workflow in this file that reaches GitHub goes
   through `gh`.
+
+### Check it before relying on it
+
+Read-only, touches no hardware, and worth doing before the first script call of a session
+rather than discovering the gap midway through a workflow:
+
+```powershell
+Test-Path scripts\local.env.ps1, scripts\nanoFramework.local.env.ps1
+gh auth status
+nanoff --version
+```
+
+One trap while running those: in Windows PowerShell 5.1, do **not** pipe a native tool through
+`2>&1`. The redirect wraps the exe's ordinary stderr in a `NativeCommandError` and sets `$?` to
+false, so a perfectly healthy `nanoff --version` reports as a failure.
+
+### What a missing prerequisite looks like
+
+None of these are code problems, and each has been read as one:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| A script exits at once with `Missing: ...\scripts\local.env.ps1` | config file absent | copy the templates above, or the filled-in files from another checkout |
+| `Missing environment variable: SMARTHOME_...` | config file present but incomplete | fill the value in, comparing against the template |
+| A wall of `error CS0518` — predefined type `System.Object`/`System.Void` not defined — in every project | NuGet packages not restored: `packages\` is git-ignored (`.gitignore:200`) and comes with no clone | `scripts\Restore-Packages.ps1`. A plain `msbuild /t:Restore` is a no-op for this project style |
+| `gh` fails with an authentication error | `gh auth login` never run, or the token expired | `gh auth login`. The backlog is unreadable until then |
+
+MSBuild on this machine emits **German** diagnostics, so match on the error *code* (`CS0518`)
+rather than on English message text.
+
+### A fresh worktree starts with none of it
+
+`Get-SmartHomeScriptsDir` returns the calling script's own `$PSScriptRoot`, so a worktree under
+`.claude\worktrees\<name>` reads *its own* `scripts\local.env.ps1`, never the main checkout's.
+Both config files and `packages\` are git-ignored, so a new worktree has neither, and the first
+script call fails there even though the main checkout is fully set up. Seed it once, from the
+worktree root (`..\..\..` being `<name>` → `worktrees` → `.claude` → the repo root):
+
+```powershell
+Copy-Item ..\..\..\scripts\local.env.ps1 scripts\
+Copy-Item ..\..\..\scripts\nanoFramework.local.env.ps1 scripts\
+.\scripts\Restore-Packages.ps1
+```
 
 ## Repository layout
 
