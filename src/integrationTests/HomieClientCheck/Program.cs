@@ -169,11 +169,26 @@ namespace SmartHome.IntegrationTests.HomieClientCheck
             // Actuators copying this device should do the same: reflect the outcome, not
             // the command.
             //
-            // Unconditional, so an accepted command publishes the same payload twice --
-            // the library's reflection, then an identical correction. See #36: guarding
-            // on _lifecycle.Value would suppress the second publish, but Value is already
-            // updated even when the reflection's own publish threw, and the guard would
-            // then suppress the only publish the broker would have seen.
+            // Unconditional, and that is the decision rather than an oversight (#36 item
+            // 3, closed on this reasoning; the remaining half is #61).
+            //
+            // It costs a duplicate: an ACCEPTED command publishes the same payload twice,
+            // the library's reflection and then an identical correction. Every guard that
+            // would save that publish is content-based, and every content-based guard is
+            // wrong in the one case that matters. PropertyBase.Set applies the value
+            // before publishing it and EnumProperty.Update assigns Value before raising
+            // OnUpdate, so by the time this handler runs Value already holds the commanded
+            // value whether or not the reflection reached the broker -- and
+            // HomieClient.HandleIncomingMessage catches a throw from that publish and
+            // raises OnCommand anyway. So 'if (_lifecycle.Value != actual)' suppresses the
+            // correction precisely when the correction is the only publish the broker
+            // would ever have seen, and the store is left with no value at all. Comparing
+            // against the command payload instead fails the same way.
+            //
+            // A duplicate publish is cheap and self-correcting; a silently missing one is
+            // neither. #61 is what would make the guard safe -- the library telling the
+            // handler whether its reflection actually landed -- and until then
+            // unconditional is the side of the trade to be on.
             _lifecycle.Update(_homieClient.State.GetString());
         }
 

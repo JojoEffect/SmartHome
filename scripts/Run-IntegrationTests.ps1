@@ -623,8 +623,11 @@ function Get-MosquittoTool {
 # choose. Two attempts at shortening it both broke the conformance check, and the
 # measurements are worth keeping so nobody repeats them:
 #
-#   - Ending the wait after 250ms of quiet output: 7 failures. The output is buffered and
-#     lands in chunks, so "quiet" does not mean "finished".
+#   - Ending the wait after 250ms of quiet output: 7 failures. Retained replay and live
+#     traffic arrive with gaps in them, so "quiet" does not mean "finished". (This used
+#     to blame stdio buffering. It is not that -- see Stop-HomieCapture, where the
+#     buffering was measured and found not to exist. The 7 failures stand; the
+#     explanation for them was wrong.)
 #   - A flat 1s: 3 failures, 54 topics where a healthy run sees ~64.
 #   - mosquitto_sub -W 1, waiting for it to exit rather than killing it: complete, but
 #     6.3s -- slower than what it replaced.
@@ -766,11 +769,30 @@ function Stop-HomieCapture {
     $script:snapshotsTaken++
 
     Start-Sleep -Seconds $SettleSeconds
-    # See #36: taskkill /F does not wait for mosquitto_sub to flush. Its stdout is
-    # redirected to a file, so the CRT buffers fully (~4KB) rather than by line, and
-    # whatever is still in that buffer dies with the process. Only the refused-transition
-    # step depends on the TAIL of a window -- every other caller needs the bulk retained
-    # replay, which is far past the buffer boundary by the time the window closes.
+    # taskkill /F loses nothing here, and that is measured rather than assumed.
+    #
+    # #36 item 2 argued the opposite: stdout is redirected to a file, so the MSVC CRT
+    # buffers fully (~4KB) rather than by line, and a tail still sitting in that buffer
+    # would die with the process -- making the callers that read the END of a window
+    # (the refused-transition step, the out-of-format step) work only by accident of how
+    # much retained replay happened to precede it. That was a plausible mechanism and it
+    # is not what mosquitto_sub does.
+    #
+    # Measured on this machine against Mosquitto 2.0.22, no hardware involved:
+    #
+    #   - With the subscriber still RUNNING, the redirected file grows by exactly one
+    #     line per message (50, 100, 150 bytes for three publishes). A full buffer would
+    #     hold all three; there is nothing to lose because nothing is retained in it.
+    #   - taskkill /F immediately after the publish (0ms, 50ms, 250ms, 3s) keeps the tail
+    #     every time, in a file of 377 bytes -- a tenth of the supposed 4KB boundary.
+    #   - Repeated across retained-store sizes of 0, 5, 53 and 120 topics: the tail is
+    #     present at every size, including an EMPTY store, which is the case the buffer
+    #     theory says must fail.
+    #
+    # So mosquitto_sub flushes stdout per message and the window's tail is as reliable as
+    # its bulk. Do not reintroduce -W to "fix" this: it was measured at 15.2s for a 3s
+    # window here (and 6.3s for a 1s one, see $SnapshotSettleSeconds), which would cost
+    # minutes across a run to solve a problem that does not exist.
     Stop-SmartHomeProcessTree -ProcessId $Capture.ProcessId
 
     return @(Get-Content -Path $Capture.Path -ErrorAction SilentlyContinue)
@@ -1051,6 +1073,16 @@ function Get-ConformanceCaptureSeconds {
            60
 }
 
+function Add-ConformanceWarning {
+    # Both at once, on purpose: to the console while the run is happening, and to the
+    # list the verdict's detail is built from so it survives into the summary and the
+    # log. Either alone is a way to lose it.
+    param([Parameter(Mandatory = $true)][string]$Message)
+
+    $script:conformanceWarnings += $Message
+    Write-Warning $Message
+}
+
 function Invoke-HomieConformanceCheck {
     # Measures a purpose-built device against the Homie v4 convention, from the
     # broker's side. Every assertion is collected rather than thrown, so one run
@@ -1070,6 +1102,12 @@ function Invoke-HomieConformanceCheck {
     # reconcile, and an assertion added against the wrong one would have been collected
     # into a list the verdict never reads: a silently passing conformance test.
     $script:conformanceFailures = @()
+    # Things a run should report without failing on: observed, attributable to something
+    # other than the device, and therefore not a conformance verdict. Kept next to the
+    # failures rather than left to Write-Warning alone, because a warning only exists in
+    # the console -- it reaches neither the summary nor the run's log directory, which is
+    # the "left no evidence" gap #35 is about.
+    $script:conformanceWarnings = @()
     $script:conformancePhases = @()
     $script:currentPhase = $null
 
@@ -1416,29 +1454,72 @@ function Invoke-HomieConformanceCheck {
 
             $refused = ConvertTo-HomieSnapshot -Lines $lines
 
+            # What this step asserts is THE DEVICE'S BEHAVIOUR, read from the wire. It is
+            # deliberately not an assertion about the retained store's final contents, and
+            # #36 item 1 is the decision to make that explicit rather than leave the two
+            # claims tangled together.
+            #
+            # They came apart because a settled per-topic read can be flipped by a QoS-1
+            # retransmission. ConvertTo-HomieSnapshot only merges on an EQUAL payload, so a
+            # DUP of the reflected 'sleeping' arriving after the correction replaces it:
+            # wire order [sleeping, alert, sleeping-dup] settles on 'sleeping' while every
+            # ordered assertion passes. And the store really does end up holding it --
+            # MQTT 3.1.1 3.3.1.1 says a receiver "cannot assume that it has seen an earlier
+            # copy" of a DUP packet, and QoS 1 has no dedup, so the broker re-processes it.
+            #
+            # That is a true statement about the store and a false one about the device: it
+            # reflected and corrected exactly as required, and the retransmission is the
+            # transport's, not its. Worse, the runner cannot tell that sequence apart from a
+            # device that genuinely republished the refused value after correcting it -- the
+            # subscriber sees a broker-forwarded DUP as an ordinary message. Asserting on it
+            # therefore names a defect this window cannot distinguish, which is the same
+            # call 2af2b12 already made for the "corrected too early" branch.
+            #
+            # So the settled reads below are used for two things only: presence (was
+            # anything measured at all) and evidence in the messages. The verdicts come from
+            # the ordered reads.
             $stateAfter = if ($refused.Contains("$root/`$state")) { $refused["$root/`$state"].Payload } else { $null }
-            # See #36: this settled read can be flipped by a QoS-1 retransmission. The
-            # per-topic collapse only merges on an equal payload, so a duplicate of the
-            # reflected 'sleeping' arriving after the correction replaces it -- wire order
-            # [sleeping, alert, sleeping-dup] leaves 'sleeping' here while the three wire
-            # assertions below all pass. Left as is deliberately: a broker re-processes a
-            # DUP PUBLISH, so the retained store really would hold the contradiction.
             $lifecycleAfter = if ($refused.Contains("$node/lifecycle")) { $refused["$node/lifecycle"].Payload } else { $null }
 
             # Absent, not merely wrong: neither topic being in the window means nothing
             # was measured -- a subscriber that never came up, not a device that took the
             # forbidden transition. Reported as such rather than as a device defect, the
             # way the wire assertions below already do for a lost command.
+            #
+            # Presence is the one thing the collapse answers soundly whatever arrives: a
+            # duplicate can change WHICH payload a topic settles on, never whether the
+            # topic was seen.
             if ($null -eq $stateAfter -or $null -eq $lifecycleAfter) {
                 $script:conformanceFailures += "refused '$($step.Command)': the capture window caught no `$state or $nodeId/lifecycle at all, so nothing about the refusal was measured"
             }
             else {
-                if ($stateAfter -ne $step.Expect) {
-                    $script:conformanceFailures += "forbidden $($step.Expect) -> $($step.Command) transition was applied (`$state is '$stateAfter')"
-                }
+                # Published values, not the last value. A refusal publishes nothing on
+                # $state, so anything the device puts there live inside this window is a
+                # move it should not have made -- and reading the published payloads
+                # rather than where the topic settled is what makes that immune to the
+                # flip above.
+                #
+                # $step.Expect is the one payload tolerated, and only that one. It is the
+                # value $state already holds, and the preceding step republishes its
+                # command every poll round while M2Mqtt retransmits an unacknowledged
+                # QoS-1 publish for MaximumAttemptsRetry (3) x DelayOnRetry (1000ms), so
+                # a fresh copy of it can legitimately still be arriving. Nothing else can:
+                # every older $state value was published well outside that ~3s budget --
+                # the preceding step polls in 3s snapshots before it returns.
+                #
+                # Which is why this is NOT narrowed to $step.Command. Looking only for the
+                # commanded value would pass a device that answered the refused command by
+                # moving $state somewhere else entirely (a CanChangeState regression
+                # leaving it at 'init' or 'lost'), and that is a defect this step used to
+                # catch before it read the wire.
+                $statePayloads = Get-HomieLivePayloads -Lines $lines -Topic "$root/`$state"
+                $moved = @($statePayloads | Where-Object { $_ -ne $step.Expect })
 
-                if ($lifecycleAfter -ne $step.Expect) {
-                    $script:conformanceFailures += "refused '$($step.Command)' left $nodeId/lifecycle advertising '$lifecycleAfter' while `$state is '$stateAfter'"
+                if ([array]::IndexOf($moved, $step.Command) -ge 0) {
+                    $script:conformanceFailures += "forbidden $($step.Expect) -> $($step.Command) transition was applied (`$state went to '$($step.Command)'; saw: $($statePayloads -join ', '))"
+                }
+                elseif ($moved.Count -gt 0) {
+                    $script:conformanceFailures += "refused '$($step.Command)' moved `$state off '$($step.Expect)' to '$($moved -join "', '")' -- not the forbidden transition, but not a refusal either (saw: $($statePayloads -join ', '))"
                 }
             }
 
@@ -1478,6 +1559,34 @@ function Invoke-HomieConformanceCheck {
             }
             elseif ($corrected -lt 0) {
                 $script:conformanceFailures += "device left the reflected '$($step.Command)' on $nodeId/lifecycle and never published '$($step.Expect)' over it (saw: $($lifecyclePayloads -join ', '))"
+            }
+            elseif ($lifecycleAfter -eq $step.Command) {
+                # The device corrected, and the topic still settled back on the value it
+                # corrected AWAY from. That is the duplicate #36 item 1 describes: a DUP of
+                # the reflection re-processed by the broker after the correction. The store
+                # disagrees with the device, and the device is not what is wrong -- so it is
+                # reported and not counted.
+                #
+                # Not swallowed, because it is a real contradiction in the retained store
+                # while it lasts: a controller connecting before the next lifecycle publish
+                # reads the refused value beside a $state that never took it. It is
+                # transient (the next command overwrites it) and outside this device's
+                # control, but a run that hits it should say so rather than look clean --
+                # so it also goes into the verdict's detail below, where the summary and
+                # the run's log can carry it. A console-only warning is exactly the kind of
+                # evidence #35 was unable to go back and read.
+                Add-ConformanceWarning ("refused '{0}': {1}/lifecycle settled back on '{2}' beside `$state='{3}' even though the correction to '{4}' is on the wire -- a retransmitted duplicate re-processed by the broker, not a device defect (saw: {5})" -f $step.Command, $nodeId, $lifecycleAfter, $stateAfter, $step.Expect, ($lifecyclePayloads -join ', '))
+            }
+            elseif ($lifecycleAfter -ne $step.Expect) {
+                # Settled on something that is neither the corrected value nor the value it
+                # corrected away from. A retransmission can only ever repeat a payload the
+                # device already published, and everything it published before this window
+                # is outside M2Mqtt's ~3s retry budget (see the $state read above), so this
+                # is a genuine new publish onto the property after the correction -- the
+                # store left advertising a state the device is not in, which is the defect
+                # this step exists for. Counted, not demoted: the duplicate reasoning above
+                # does not reach it.
+                $script:conformanceFailures += "refused '$($step.Command)' left $nodeId/lifecycle advertising '$lifecycleAfter' after correcting to '$($step.Expect)', while `$state is '$stateAfter' (saw: $($lifecyclePayloads -join ', '))"
             }
 
             continue
@@ -1521,16 +1630,26 @@ function Invoke-HomieConformanceCheck {
         }
     }
 
+    # Appended to whichever verdict is returned, so a run that observed one carries it
+    # into the summary line and the log instead of only into scrollback. A PASS with a
+    # note is still a PASS: nothing here is a conformance failure.
+    $warningDetail = if ($script:conformanceWarnings.Count -gt 0) {
+        " [$($script:conformanceWarnings.Count) warning(s): " + ($script:conformanceWarnings -join '; ') + "]"
+    }
+    else {
+        ''
+    }
+
     if ($script:conformanceFailures.Count -gt 0) {
         return @{
             Outcome = 'FAIL'
-            Detail  = "$($script:conformanceFailures.Count) conformance failure(s): " + ($script:conformanceFailures -join '; ')
+            Detail  = "$($script:conformanceFailures.Count) conformance failure(s): " + ($script:conformanceFailures -join '; ') + $warningDetail
         }
     }
 
     return @{
         Outcome = 'PASS'
-        Detail  = "attributes, datatypes, retained flags, /set round-trip, refused out-of-format payloads, alert/sleeping, a refused transition and re-announce all conform"
+        Detail  = "attributes, datatypes, retained flags, /set round-trip, refused out-of-format payloads, alert/sleeping, a refused transition and re-announce all conform" + $warningDetail
     }
 }
 
