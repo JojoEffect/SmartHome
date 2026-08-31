@@ -27,7 +27,9 @@
     look at. On failure it exits 1 and prints the captured device log path for the
     failing test, which is where any real investigation starts. Alongside it in the same
     directory are the broker's own log and the homie/# log for every broker generation
-    the run went through, kept because the dev environment deletes both at teardown.
+    the run went through, kept because the dev environment deletes both at teardown, and
+    -- for the conformance check -- one file per snapshot window, which is the only place
+    the retain flags a verdict was reached on can still be read.
 
     *** HARDWARE: this flashes and runs code on the physical device on the configured
     COM port, once per test. Treat it exactly like Deploy-ToDevice.ps1. ***
@@ -47,9 +49,10 @@
     broker's lifetime, and tearing down someone else's broker is not theirs to do.
 
 .PARAMETER LogDirectory
-    Where to write the per-test device logs, and the preserved broker and homie/# logs
-    that go with them. Defaults to a timestamped folder under the system temp directory;
-    the path is printed at the end of the run.
+    Where to write the per-test device logs, the preserved broker and homie/# logs that
+    go with them, and the conformance check's snapshot captures. Defaults to a
+    timestamped folder under the system temp directory; the path is printed at the end
+    of the run.
 
 .EXAMPLE
     .\scripts\Run-IntegrationTests.ps1
@@ -256,6 +259,46 @@ function Save-BrokerEvidence {
             # called from a finally where a throw would replace the suite's own outcome.
             Write-Warning ("Could not preserve {0}: {1}" -f $source, $_.Exception.Message)
         }
+    }
+}
+
+function Save-SnapshotEvidence {
+    # The fresh-subscriber window a conformance verdict is actually computed from.
+    #
+    # Save-BrokerEvidence keeps the broker's own log and the long-running homie/# log,
+    # and neither can answer the question a lost /set raises: what the check *saw*. The
+    # long-running log carries no retain flags -- MQTT sets the flag only when replaying
+    # from the store to a new subscriber -- so "was this the retained store or a live
+    # echo" is readable in the snapshot capture and nowhere else. Start-HomieCapture
+    # deletes the previous capture at the start of every window, so a conformance run
+    # opened a dozen of them and kept none. That is the "left no evidence" half of issue
+    # #35: the run that lost all five /set commands left nothing behind to read.
+    # (Measured over ten hardware runs on 2026-08-31: 12 to 13 windows per run.)
+    #
+    # Named by the phase as well as the number so the files can be picked out without the
+    # console breakdown next to them -- a /set phase that cost three windows leaves three
+    # files saying so.
+    param([hashtable]$Capture)
+
+    # EVERYTHING is inside the try, not just the copy. This runs from a finally, where a
+    # throw replaces the exception already in flight -- Stop-SmartHomeProcessTree over an
+    # already-dead subscriber (#54), or the verdict the refused-transition step had
+    # reached. Under Set-StrictMode -Version Latest a phase object that has no Name, or a
+    # capture with no Path, is a terminating error, so naming the file has to be as
+    # guarded as writing it. Preserving evidence must never be the reason a run fails.
+    try {
+        $phase = if ($null -eq $script:currentPhase) { 'unphased' } else { $script:currentPhase.Name }
+        # Phase names are prose -- '/set round-trip', 'out-of-format /set' -- and two of
+        # them carry a path separator.
+        $slug = ($phase -replace '[^A-Za-z0-9]+', '-').Trim('-').ToLowerInvariant()
+
+        $destination = Join-Path $LogDirectory ("{0}-snapshot-{1:d3}-{2}.log" -f $script:evidenceLabel, $script:snapshotsTaken, $slug)
+        Copy-Item -LiteralPath $Capture.Path -Destination $destination -ErrorAction Stop
+    }
+    catch {
+        # $Capture.Path is deliberately not named here: reading it is one of the things
+        # that can have thrown.
+        Write-Warning ("Could not preserve a snapshot capture: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -682,6 +725,12 @@ $SnapshotSettleSeconds = 3
 # terminating error, which would arrive as an 'ERROR' verdict blamed on the device.
 $script:snapshotsTaken = 0
 
+# The conformance phase a snapshot belongs to, for the file Save-SnapshotEvidence names
+# after it. Set by Start-ConformancePhase, and declared here for the same StrictMode
+# reason as the counter above: Stop-HomieCapture reads it on every window, and only the
+# conformance check ever assigns it.
+$script:currentPhase = $null
+
 function Get-HomieRetainedSnapshot {
     # What a controller joining *now* would see: the broker's retained store.
     #
@@ -818,69 +867,80 @@ function Stop-HomieCapture {
     # figure that explains a run's duration, and it cannot be read off the code.
     $script:snapshotsTaken++
 
-    Start-Sleep -Seconds $SettleSeconds
-    # taskkill /F loses nothing here, and that is measured rather than assumed.
-    #
-    # #36 item 2 argued the opposite: stdout is redirected to a file, so the MSVC CRT
-    # buffers fully (~4KB) rather than by line, and a tail still sitting in that buffer
-    # would die with the process -- making the callers that read the END of a window
-    # (the refused-transition step, the out-of-format step) work only by accident of how
-    # much retained replay happened to precede it. That was a plausible mechanism and it
-    # is not what mosquitto_sub does.
-    #
-    # Measured on this machine against Mosquitto 2.0.22, no hardware involved:
-    #
-    #   - With the subscriber still RUNNING, the redirected file grows by exactly one
-    #     line per message (50, 100, 150 bytes for three publishes). A full buffer would
-    #     hold all three; there is nothing to lose because nothing is retained in it.
-    #   - taskkill /F immediately after the publish (0ms, 50ms, 250ms, 3s) keeps the tail
-    #     every time, in a file of 377 bytes -- a tenth of the supposed 4KB boundary.
-    #   - Repeated across retained-store sizes of 0, 5, 53 and 120 topics: the tail is
-    #     present at every size, including an EMPTY store, which is the case the buffer
-    #     theory says must fail.
-    #
-    # So mosquitto_sub flushes stdout per message and the window's tail is as reliable as
-    # its bulk. Do not reintroduce -W to "fix" this: it was measured at 15.2s for a 3s
-    # window here (and 6.3s for a 1s one, see $SnapshotSettleSeconds), which would cost
-    # minutes across a run to solve a problem that does not exist.
-    #
-    # Through the recorded-process helper rather than Stop-SmartHomeProcessTree, for the
-    # reason Stop-DeviceDebugCapture uses it: taskkill on a pid that has already exited
-    # writes to stderr, PowerShell 5.1 wraps that in a NativeCommandError, and under this
-    # script's $ErrorActionPreference = 'Stop' that is terminating -- thrown out of the
-    # finally the refused-transition step closes its window in, replacing the verdict that
-    # step had already reached. Per Start-HomieCapture the subscriber really is dead by
-    # then whenever the broker is unreachable, so this was the routine path, not the edge.
-    # The helper also declines to kill a pid Windows has since reissued.
-    #
-    # Its per-process progress lines go nowhere (stream 6 is Write-Host): one line per
-    # snapshot, dozens per conformance run, for a window that is not an event worth
-    # narrating. Warnings are stream 3 and still come through, which is what the recycled
-    # pid case reports on.
-    $wasAlive = Stop-SmartHomeRecordedProcess -Record $Capture.Record 6> $null
+    # The whole body is in a try whose finally preserves the capture file. The window is
+    # what a conformance verdict is computed from, and Start-HomieCapture deletes the
+    # previous one at the start of the next window -- so anything that throws in here
+    # loses not just the lines but the only record of what the subscriber saw. #54's
+    # throw was the case that made this urgent and is fixed below; the finally stays
+    # because the guarantee should not depend on which statement fails.
+    try {
+        Start-Sleep -Seconds $SettleSeconds
+        # taskkill /F loses nothing here, and that is measured rather than assumed.
+        #
+        # #36 item 2 argued the opposite: stdout is redirected to a file, so the MSVC CRT
+        # buffers fully (~4KB) rather than by line, and a tail still sitting in that buffer
+        # would die with the process -- making the callers that read the END of a window
+        # (the refused-transition step, the out-of-format step) work only by accident of how
+        # much retained replay happened to precede it. That was a plausible mechanism and it
+        # is not what mosquitto_sub does.
+        #
+        # Measured on this machine against Mosquitto 2.0.22, no hardware involved:
+        #
+        #   - With the subscriber still RUNNING, the redirected file grows by exactly one
+        #     line per message (50, 100, 150 bytes for three publishes). A full buffer would
+        #     hold all three; there is nothing to lose because nothing is retained in it.
+        #   - taskkill /F immediately after the publish (0ms, 50ms, 250ms, 3s) keeps the tail
+        #     every time, in a file of 377 bytes -- a tenth of the supposed 4KB boundary.
+        #   - Repeated across retained-store sizes of 0, 5, 53 and 120 topics: the tail is
+        #     present at every size, including an EMPTY store, which is the case the buffer
+        #     theory says must fail.
+        #
+        # So mosquitto_sub flushes stdout per message and the window's tail is as reliable as
+        # its bulk. Do not reintroduce -W to "fix" this: it was measured at 15.2s for a 3s
+        # window here (and 6.3s for a 1s one, see $SnapshotSettleSeconds), which would cost
+        # minutes across a run to solve a problem that does not exist.
+        #
+        # Through the recorded-process helper rather than Stop-SmartHomeProcessTree, for the
+        # reason Stop-DeviceDebugCapture uses it: taskkill on a pid that has already exited
+        # writes to stderr, PowerShell 5.1 wraps that in a NativeCommandError, and under this
+        # script's $ErrorActionPreference = 'Stop' that is terminating -- thrown out of the
+        # finally the refused-transition step closes its window in, replacing the verdict that
+        # step had already reached. Per Start-HomieCapture the subscriber really is dead by
+        # then whenever the broker is unreachable, so this was the routine path, not the edge.
+        # The helper also declines to kill a pid Windows has since reissued.
+        #
+        # Its per-process progress lines go nowhere (stream 6 is Write-Host): one line per
+        # snapshot, dozens per conformance run, for a window that is not an event worth
+        # narrating. Warnings are stream 3 and still come through, which is what the recycled
+        # pid case reports on.
+        $wasAlive = Stop-SmartHomeRecordedProcess -Record $Capture.Record 6> $null
 
-    $lines = @(Get-Content -Path $Capture.Path -ErrorAction SilentlyContinue)
+        $lines = @(Get-Content -Path $Capture.Path -ErrorAction SilentlyContinue)
 
-    # A subscriber that was already gone did not observe the whole window, so its capture
-    # is short for a host-side reason -- indistinguishable, in the lines alone, from a
-    # device that published nothing. Said here, where the difference is known, rather than
-    # left for a caller to misread as evidence about the device.
-    #
-    # mosquitto_sub's own reason is already in $lines: its stderr shares this file, so an
-    # unreachable broker leaves 'Error: ... Connection refused' among them. That is the
-    # detail #54 records as available but unread -- and the one the old throw discarded,
-    # because it happened before this Get-Content.
-    #
-    # A warning rather than a failure, for the same reason Stop-DeviceDebugCapture warns:
-    # this also runs inside that finally, so throwing here would recreate the masking the
-    # change above exists to remove.
-    if (-not $wasAlive) {
-        $reasons = @($lines | Where-Object { $_ -match '\S' -and $null -eq (ConvertFrom-HomieCaptureLine -Line $_) })
-        $detail = if ($reasons.Count -gt 0) { $reasons -join ' / ' } else { 'it recorded no reason' }
-        Write-Warning ("The snapshot subscriber exited before its {0}s window closed, so this capture is short for a host-side reason and says nothing about the device: {1} (capture file: {2})." -f $SettleSeconds, $detail, $Capture.Path)
+        # A subscriber that was already gone did not observe the whole window, so its capture
+        # is short for a host-side reason -- indistinguishable, in the lines alone, from a
+        # device that published nothing. Said here, where the difference is known, rather than
+        # left for a caller to misread as evidence about the device.
+        #
+        # mosquitto_sub's own reason is already in $lines: its stderr shares this file, so an
+        # unreachable broker leaves 'Error: ... Connection refused' among them. That is the
+        # detail #54 records as available but unread -- and the one the old throw discarded,
+        # because it happened before this Get-Content.
+        #
+        # A warning rather than a failure, for the same reason Stop-DeviceDebugCapture warns:
+        # this also runs inside that finally, so throwing here would recreate the masking the
+        # change above exists to remove.
+        if (-not $wasAlive) {
+            $reasons = @($lines | Where-Object { $_ -match '\S' -and $null -eq (ConvertFrom-HomieCaptureLine -Line $_) })
+            $detail = if ($reasons.Count -gt 0) { $reasons -join ' / ' } else { 'it recorded no reason' }
+            Write-Warning ("The snapshot subscriber exited before its {0}s window closed, so this capture is short for a host-side reason and says nothing about the device: {1} (capture file: {2})." -f $SettleSeconds, $detail, $Capture.Path)
+        }
+
+        return $lines
     }
-
-    return $lines
+    finally {
+        Save-SnapshotEvidence -Capture $Capture
+    }
 }
 
 function ConvertFrom-HomieCaptureLine {
@@ -1375,7 +1435,9 @@ function Measure-HomieConformance {
     # nothing is ever re-sent. Only still-pending properties are republished, and a
     # repeated command is idempotent -- the device applies the same value again and
     # publishes back the same reflection.
+    $rounds = 0
     while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        $rounds++
         foreach ($property in $pending) {
             Publish-HomieCommand -Port $Port -Topic "$node/$property/set" -Payload $commands[$property]
         }
@@ -1408,6 +1470,22 @@ function Measure-HomieConformance {
     foreach ($property in $pending) {
         $wanted = if ($expectedEcho.Contains($property)) { $expectedEcho[$property] } else { $commands[$property] }
         $script:conformanceFailures += "/set on $property did not come back on the property topic (saw '$($lastSeen[$property])', expected '$wanted')"
+    }
+
+    # A second round is the condition issue #35 is about -- and since the retry above
+    # makes the run PASS through it, nothing else would say so. The phase breakdown shows
+    # it as extra snapshots, but only to a reader who already knows to look; this names
+    # it, next to the preserved snapshot captures that can be read to find out what the
+    # round actually saw.
+    #
+    # Worded as what was measured, not as what it usually means. An extra round proves
+    # only that a window held no echo: a lost command is the common cause and the one #35
+    # confirmed on hardware, but a reflection that lands after the 3s window closes, or a
+    # QoS-1 retransmission on M2Mqtt's 1s DelayOnRetry, produces the same count against a
+    # device that received the command and applied it. This line is the documented tell
+    # for #35, so it must not assert the cause the captures are there to establish.
+    if ($rounds -gt 1) {
+        Write-Warning ("The /set round trip needed {0} rounds: a command produced no echo within its snapshot window and was re-sent (issue #35). The snapshot captures for this phase are in {1}." -f $rounds, $LogDirectory)
     }
 
     # ── payloads the properties' own $datatype/$format forbid ────────────────
