@@ -57,7 +57,9 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
 | `scripts\Sync-NanoFrameworkRepos.ps1 [-Force]` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
 | `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style | No | `smarthome-restore-packages` |
+| `scripts\Initialize-Worktree.ps1 [-NoRestore] [-MainWorktree <path>]` | Seeds a fresh linked worktree with the three git-ignored things `git worktree add` never brings: both `local.env` files, copied from the main working tree, and a restored `packages\`. Idempotent — never overwrites a config file the worktree already has, and no-ops with exit 0 in the main checkout, so it is safe to call unconditionally | No | `smarthome-init-worktree` |
 | `scripts\Clean-GitBranches.ps1 [-Worktrees] [-Delete] [-Scope Local\|Remote\|Both] [-Protect <names>]` | Classifies every worktree and every local and remote branch against `origin/main` and, with `-Delete`, removes the merged ones in one batch. Report-only without it. Keeps the base branch, anything with an open pull request, anything unmerged, and — unless `-Worktrees` frees them — the branches worktrees pin. A dirty worktree is never removed, and there is deliberately no flag that overrides that | No | `smarthome-clean-branches` |
+| `scripts\Get-BacklogPriorities.ps1 [-Hardware ...] [-TimeBudget ...] [-Theme ...] [-Overrides <path>] [-Handoff <n>] [-RankingOnly] [-Top <n>] [-Json]` | Classifies every open issue on seven axes the labels don't cover — verification trust, evidence debt, hardware-gated vs desk, capability vs velocity, risk, effort, what it unblocks — then clusters and ranks them. Run plain first; the interview in the skill turns the answers into the weighting flags for a second run. Classification is a keyword heuristic that reports its own confidence and blind spots, and `-Overrides` is how a read of the actual bodies corrects it | No | `smarthome-prioritize` |
 | `scripts\Test-Setup.ps1` | Reports everything the other scripts assume exists on this machine — both `local.env` files and their values, restored `packages\`, the test adapter, `gh` auth, MSBuild/vstest, Mosquitto, the COM port, the companion repos — all at once, rather than one abort at a time. Read-only; opens no port and touches no device | No | `smarthome-check-setup` |
 | `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` | Raw serial capture of the device's native boot log only — nanoCLR silences this at `app_main()` and switches to binary WireProtocol, so this can't see managed output | Resets only | `smarthome-watch-serial` |
 | `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot] [-NoBuild] [-BuildOnly] [-Until <regex>] [-DumpConfig]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
@@ -175,9 +177,9 @@ them by name; the table is for when you meet one without having run it:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| A script exits at once with `Missing: ...\scripts\local.env.ps1` | config file absent | copy the templates above, or the filled-in files from another checkout |
+| A script exits at once with `Missing: ...\scripts\local.env.ps1` | config file absent | in a worktree, `scripts\Initialize-Worktree.ps1`; otherwise copy the templates above, or the filled-in files from another checkout |
 | `Missing environment variable: SMARTHOME_...` | config file present but incomplete | fill the value in, comparing against the template |
-| A wall of `error CS0518` — predefined type `System.Object`/`System.Void` not defined — in every project | NuGet packages not restored: `packages\` is git-ignored (`.gitignore:200`) and comes with no clone | `scripts\Restore-Packages.ps1`. A plain `msbuild /t:Restore` is a no-op for this project style |
+| A wall of `error CS0518` — predefined type `System.Object`/`System.Void` not defined — in every project | NuGet packages not restored: `packages\` is git-ignored (`.gitignore:200`) and comes with no clone | `scripts\Restore-Packages.ps1` (or `scripts\Initialize-Worktree.ps1`, which also seeds the config files). A plain `msbuild /t:Restore` is a no-op for this project style |
 | `gh` fails with an authentication error | `gh auth login` never run, or the token expired | `gh auth login`. The backlog is unreadable until then |
 
 MSBuild on this machine emits **German** diagnostics, so match on the error *code* (`CS0518`)
@@ -189,16 +191,35 @@ rather than on English message text.
 `.claude\worktrees\<name>` reads *its own* `scripts\local.env.ps1`, never the main checkout's.
 Both config files and `packages\` are git-ignored, so a new worktree has neither, and the first
 script call fails there even though the main checkout is fully set up. Seed it once, from the
-worktree root (`..\..\..` being `<name>` → `worktrees` → `.claude` → the repo root):
+worktree root:
 
 ```powershell
-Copy-Item ..\..\..\scripts\local.env.ps1 scripts\
-Copy-Item ..\..\..\scripts\nanoFramework.local.env.ps1 scripts\
-.\scripts\Restore-Packages.ps1
+.\scripts\Initialize-Worktree.ps1
 ```
 
-`Test-Setup.ps1` detects the worktree and prints that first `Copy-Item` with both paths already
-filled in, so running it first is quicker than reading this.
+That copies both config files from the main working tree and restores `packages\` — about 1.6s
+on a fresh worktree. **Run it as the first command of any session in a worktree**, rather than
+waiting for a script to abort or a build to emit CS0518 everywhere. It is idempotent, never
+overwrites a config file the worktree already has, and no-ops with exit 0 in the main checkout,
+so calling it unconditionally is fine. `-NoRestore` does the config half only (~0.03s).
+
+It finds the main checkout via `git rev-parse --git-common-dir` — the main repository's `.git`,
+shared by every linked worktree, whose parent is the main working tree. Not by a relative hop:
+`..\..\..` is only correct for a worktree exactly three levels down. `Common.ps1` exposes that
+as `Get-SmartHomeMainWorktreeRoot`, with `Test-SmartHomeLinkedWorktree` for the yes/no question;
+`Get-SiblingRoot` and `Test-Setup.ps1` both read it rather than re-deriving it.
+
+`Test-Setup.ps1` detects the worktree and names this script as the fix for every row it would
+repair, so running it first is quicker than reading this.
+
+**A committed `SessionStart` hook already runs it**, so in practice a worktree seeds itself before
+the first prompt. [`.claude/settings.json`](.claude/settings.json) holds it — matcher `startup`,
+exec form (`powershell.exe` plus an argument list, no shell, so nothing depends on whether Git
+Bash is on PATH), script path via `${CLAUDE_PROJECT_DIR}`. It is the only thing in that file. The
+hook is a convenience, not the mechanism: it is the same script with no switches, so running it by
+hand stays correct, and a session that starts before the hook lands (or with hooks disabled) is
+one command away from the same state. Its stdout is injected into the session's context, which is
+the reason the script's normal-path output is a handful of lines rather than a log.
 
 ## Repository layout
 
@@ -358,20 +379,39 @@ for the interface instead of racing it.
   works; that's what `integrationTests` is for.
 
 Those tests differ in which dependency they exercise, as above, and separately in *who decides
-the verdict*. The latter is declared per entry by the `Kind` field in `$testCatalog` in
-`Run-IntegrationTests.ps1`, and there are three (not the same three as the locations above):
+the verdict*. The latter is declared per entry in `$testCatalog` in `Run-IntegrationTests.ps1`,
+by two capability fields rather than by a kind name: `Verdict` names the function that returns
+the outcome, and `OwnsBroker` says that function stops and starts the broker itself — which is
+what `-NoBroker` refuses. An entry that names no `Verdict` is device-decided. The run loop reads
+both generically (one invoke by name, one shared epilogue), so a fourth kind of check is a new
+function plus its catalog entry, with no branch or guard elsewhere to keep in step. The three
+that exist are still worth naming (not the same three as the locations above):
 
 - **`DeviceMarker`** — the device decides. The runner captures managed debug output and reads
-  the test's own `[ITEST]` marker. WifiCheck, MqttCheck and Bmp280Check work this way.
+  the test's own `[ITEST]` marker. WifiCheck, MqttCheck and Bmp280Check work this way, and
+  their entries name no `Verdict`.
 - **`HomieConformance`** — the host measures a purpose-built device against the Homie v4
   convention: mandatory attributes and their retained flags, one property of every datatype with
   its `$format`/`$unit`/`$settable`/`$retained`, a `/set` command applied and reflected back, a
   payload each datatype's own `$format` forbids that must be refused rather than applied, the
   `alert` and `sleeping` states driven through a control property, a refused transition that
   must not be advertised as if it had happened, and a full re-announce after the broker is
-  replaced. `HomieClientCheck` is this kind. Retained-ness is read from a *fresh*
-  subscriber (`mosquitto_sub -F '%t %r %p'`), because MQTT only sets the retain flag when
-  replaying from the store — a live retained publish arrives with the flag clear.
+  replaced. `HomieClientCheck` is this kind (`Verdict = 'Invoke-HomieConformanceCheck'`).
+  Retained-ness is read from a *fresh* subscriber (`mosquitto_sub -F '%t %r %p'`), because MQTT
+  only sets the retain flag when replaying from the store — a live retained publish arrives with
+  the flag clear.
+
+  The refused transition is asserted **on the wire, about the device**, not on where the
+  retained store settled — issue #36 closed on that distinction. A settled per-topic read
+  can be flipped by a QoS-1 retransmission the broker re-processes ([MQTT 3.1.1
+  §3.3.1.1](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html#_Toc398718038):
+  a receiver "cannot assume that it has seen an earlier copy" of a DUP packet), which is a
+  true statement about the store and a false one about a device that reflected and corrected
+  exactly as required — and the runner cannot tell it apart from a device that genuinely
+  republished the refused value. So the verdict comes from the ordered payloads (the
+  reflection, then the correction over it, and `$state` never carrying the forbidden value),
+  and a store that disagrees with them is reported as a warning carrying the observed
+  sequence. Same call as `2af2b12`: don't name a defect the window cannot distinguish.
 - **`BrokerOutage`** — the host decides. The device publishes a heartbeat and subscribes to an
   echo topic; the runner takes the broker away, brings a fresh one up, and asserts heartbeats
   reappear on `homie/#` with a *higher* counter than before the outage. A lower counter means the
@@ -380,10 +420,10 @@ the verdict*. The latter is declared per entry by the `Kind` field in `$testCata
   only prove the *connection* returned. Publishing resumes the moment the socket is up, so a
   reconnect that replayed no subscriptions (a live client subscribed to nothing, which is what a
   throw out of `ResubscribeCachedTopics` used to leave behind) is indistinguishable from a
-  healthy one until something is sent *to* the device. `MqttReconnectCheck` is this kind, and it
-  deliberately emits no `[ITEST]` marker — a device claiming it reconnected would be a second,
-  weaker verdict competing with the evidence at the broker. See the `smarthome-mqtt-reconnect`
-  skill.
+  healthy one until something is sent *to* the device. `MqttReconnectCheck` is this kind
+  (`Verdict = 'Invoke-BrokerOutageCheck'`), and it deliberately emits no `[ITEST]` marker — a
+  device claiming it reconnected would be a second, weaker verdict competing with the evidence at
+  the broker. See the `smarthome-mqtt-reconnect` skill.
 
 DeviceMarker tests report by writing a marker line to managed debug output:
 
@@ -396,7 +436,12 @@ DeviceMarker tests report by writing a marker line to managed debug output:
 these, and `Run-IntegrationTests.ps1` parses them. A device app never exits with a status code —
 these markers *are* the exit code. Emit one as soon as the outcome is known, before any idle
 loop. Adding a new integration test means: new project under `src\integrationTests`, emit the
-marker, add it to `$testCatalog` in `Run-IntegrationTests.ps1`.
+marker, add it to `$testCatalog` in `Run-IntegrationTests.ps1`. A host-decided test emits no
+marker and instead adds a verdict function, names it in its entry's `Verdict`, and lists that
+function's required settings under the same name in `$requiredCatalogKeys` — which doubles as the
+list of names an entry may point at. That the name resolves to a function that actually exists is
+a separate `Get-Command` check in the pre-flight, which is where it has to be: the functions are
+defined further down the script than the catalog validation runs.
 
 `Bmp280Check` links `IntegrationTest.cs` as a shared source file instead of referencing
 `TestSupport` as a project. That kept the WiFi/networking assemblies out of a deliberately
@@ -500,6 +545,14 @@ gh issue list --state open
 Issues are labelled `type:` (bug/feature/task/spike), `area:` (homie/infra/sensor) and
 `status:` (in-progress/blocked/review). Anything `status: blocked` names in its body exactly
 what it is waiting for, so it can be picked up cold.
+
+Those labels classify but do not rank — they cannot choose between eleven `type: task` issues.
+When the question is *what to work on next* rather than *what exists*, use
+`scripts\Get-BacklogPriorities.ps1` (skill: `smarthome-prioritize`), which scores the backlog
+on the axes the labels leave out and then re-weights for whether the device is reachable, how
+much time there is, and which cluster to work in. `-Handoff <n>` closes the loop by printing
+the top few as spin-off pointers — blocked and closed rows skipped, hardware-gated ones marked
+so the confirm-before-device-scripts rule reaches the session that picks them up.
 
 ### File what you find
 

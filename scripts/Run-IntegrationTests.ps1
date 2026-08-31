@@ -4,18 +4,21 @@
 
 .DESCRIPTION
     One entry point for every project under src\integrationTests. Every test is
-    deployed to the ESP32 first; how its verdict is reached depends on its kind:
+    deployed to the ESP32 first; how its verdict is reached is declared by its entry
+    in $testCatalog below:
 
-      DeviceMarker  the device decides. The runner reboots it, captures managed
-                    debug output, and reads the "[ITEST] <name> PASS/FAIL" marker
-                    the test emits (see
-                    src\integrationTests\TestSupport\IntegrationTest.cs).
+      device-decided  the entry names no Verdict function. The runner reboots the
+                      device, captures managed debug output, and reads the
+                      "[ITEST] <name> PASS/FAIL" marker the test emits (see
+                      src\integrationTests\TestSupport\IntegrationTest.cs).
 
-      BrokerOutage  the host decides. The device just publishes a heartbeat; the
-                    runner takes the broker away, brings it back, and asserts that
-                    heartbeats reappear on homie/#. A device claiming it
-                    reconnected is weaker evidence than a message actually
-                    arriving at the recreated broker.
+      host-decided    the entry names a Verdict function, which reaches the verdict
+                      from the broker's side. MqttReconnectCheck's takes the broker
+                      away and asserts heartbeats reappear on homie/#;
+                      HomieClientCheck's measures a purpose-built device against the
+                      Homie v4 convention. A device claiming it reconnected, or
+                      conformed, is weaker evidence than what actually reached the
+                      broker.
 
     A local Mosquitto broker is started detached for the run and stopped again at
     the end, even if the suite fails.
@@ -41,9 +44,9 @@
 
 .PARAMETER NoBroker
     Don't start/stop Mosquitto. Use when a broker is already running (started by
-    Start-DevEnv.ps1, or a service), or when running only non-MQTT tests. BrokerOutage
-    tests cannot run under this switch -- they need to own the broker's lifetime, and
-    tearing down someone else's broker is not theirs to do.
+    Start-DevEnv.ps1, or a service), or when running only non-MQTT tests. A test whose
+    catalog entry says OwnsBroker cannot run under this switch -- it needs to own the
+    broker's lifetime, and tearing down someone else's broker is not theirs to do.
 
 .PARAMETER LogDirectory
     Where to write the per-test device logs, the preserved broker and homie/# logs that
@@ -82,16 +85,25 @@ $mqttPort = Get-OptionalEnvValue -Name 'SMARTHOME_MQTT_PORT' -DefaultValue '1883
 # from its name (src\integrationTests\<Name>\<Name>.nfproj). Adding a test is one
 # line here plus the project itself.
 #
+# An entry declares capabilities, not a kind. Verdict names the function that decides
+# the outcome, and OwnsBroker says that function stops and starts the broker itself.
+# Both are read generically -- the run loop invokes Verdict by name, and -NoBroker
+# consults OwnsBroker -- so a new kind of check is a new function plus its entry here,
+# with no list of kinds anywhere else to keep in step. An entry that names no Verdict
+# is device-decided: the runner reads the test's own [ITEST] marker instead. (The three
+# kinds are still described by name in CLAUDE.md; they are no longer a field.)
+#
 # CaptureSeconds is a window -- "long enough that a healthy device has already
-# reported", not how long the test takes. Every DeviceMarker test emits its marker
+# reported", not how long the test takes. Every device-decided test emits its marker
 # as soon as the outcome is known and then idles. WifiCheck gets the longest window
 # because NetworkHelper's own connect timeout is 60s.
 $testCatalog = [ordered]@{
-    'WifiCheck'   = @{ Kind = 'DeviceMarker'; CaptureSeconds = 75 }
-    'MqttCheck'   = @{ Kind = 'DeviceMarker'; CaptureSeconds = 90 }
-    'Bmp280Check' = @{ Kind = 'DeviceMarker'; CaptureSeconds = 45 }
+    'WifiCheck'   = @{ OwnsBroker = $false; CaptureSeconds = 75 }
+    'MqttCheck'   = @{ OwnsBroker = $false; CaptureSeconds = 90 }
+    'Bmp280Check' = @{ OwnsBroker = $false; CaptureSeconds = 45 }
     'HomieClientCheck' = @{
-        Kind = 'HomieConformance'
+        OwnsBroker = $true
+        Verdict    = 'Invoke-HomieConformanceCheck'
         # The device this check deploys is built for the convention, not for a room:
         # one property of every datatype, settable and not, retained and not. These
         # must match src\integrationTests\HomieClientCheck\Program.cs.
@@ -102,7 +114,8 @@ $testCatalog = [ordered]@{
         RecoverySeconds = 90
     }
     'MqttReconnectCheck' = @{
-        Kind = 'BrokerOutage'
+        OwnsBroker = $true
+        Verdict    = 'Invoke-BrokerOutageCheck'
         # Topic the device publishes its heartbeat on. Must match HeartbeatTopic in
         # that project's Program.cs -- the pre-flight below checks that it does.
         HeartbeatTopic = 'homie/mqtt-reconnect-check/heartbeat'
@@ -143,29 +156,42 @@ if ($unknown.Count -gt 0) {
 # Switching those reads to $settings['Foo'] would be worse, not better: that returns
 # $null, so a forgotten CaptureSeconds would silently become a zero-length window.
 # Adding a test is advertised above as "one line here", so that line gets checked.
+#
+# Keyed by the Verdict function an entry names, which makes this table the list of
+# verdict functions the run loop may invoke: a name that is not in it is a one-line
+# error here, not a "term is not recognized" ERROR verdict 90s into the run.
+# $deviceDecidedKeys covers an entry that names no Verdict at all.
+$deviceDecidedKeys = @('CaptureSeconds')
 $requiredCatalogKeys = @{
-    'DeviceMarker'     = @('CaptureSeconds')
-    'HomieConformance' = @('DeviceId', 'NodeId', 'SettleSeconds', 'CommandTimeoutSeconds', 'RecoverySeconds')
-    'BrokerOutage'     = @('HeartbeatTopic', 'SettleSeconds', 'OutageSeconds', 'RecoverySeconds', 'EchoCommandTopic', 'EchoTopic', 'CommandTimeoutSeconds')
+    'Invoke-HomieConformanceCheck' = @('DeviceId', 'NodeId', 'SettleSeconds', 'CommandTimeoutSeconds', 'RecoverySeconds')
+    'Invoke-BrokerOutageCheck'     = @('HeartbeatTopic', 'SettleSeconds', 'OutageSeconds', 'RecoverySeconds', 'EchoCommandTopic', 'EchoTopic', 'CommandTimeoutSeconds')
 }
-$knownKinds = (@($requiredCatalogKeys.Keys) | Sort-Object) -join ', '
+$knownVerdicts = (@($requiredCatalogKeys.Keys) | Sort-Object) -join ', '
 
 foreach ($catalogTestName in $Tests) {
     $catalogEntry = $testCatalog[$catalogTestName]
 
-    if (-not $catalogEntry.Contains('Kind')) {
-        Write-Error ("Catalog entry '{0}' declares no Kind. Known kinds: {1}." -f $catalogTestName, $knownKinds)
+    # Required of every entry, device-decided ones included, because it is read as
+    # $settings.OwnsBroker on every path -- and because leaving it out would default to
+    # whichever answer is quietly wrong for the next check that owns the broker.
+    if (-not $catalogEntry.Contains('OwnsBroker')) {
+        Write-Error ("Catalog entry '{0}' declares no OwnsBroker. Say `$true if its verdict function stops and starts the broker itself, `$false otherwise." -f $catalogTestName)
         exit 1
     }
 
-    if (-not $requiredCatalogKeys.Contains($catalogEntry.Kind)) {
-        Write-Error ("Catalog entry '{0}' has unknown Kind '{1}'. Known kinds: {2}." -f $catalogTestName, $catalogEntry.Kind, $knownKinds)
-        exit 1
+    $requiredKeys = $deviceDecidedKeys
+    if ($catalogEntry.Contains('Verdict')) {
+        if (-not $requiredCatalogKeys.Contains($catalogEntry.Verdict)) {
+            Write-Error ("Catalog entry '{0}' names an unknown Verdict function '{1}'. Known: {2}." -f $catalogTestName, $catalogEntry.Verdict, $knownVerdicts)
+            exit 1
+        }
+
+        $requiredKeys = $requiredCatalogKeys[$catalogEntry.Verdict]
     }
 
-    $missingKeys = @($requiredCatalogKeys[$catalogEntry.Kind] | Where-Object { -not $catalogEntry.Contains($_) })
+    $missingKeys = @($requiredKeys | Where-Object { -not $catalogEntry.Contains($_) })
     if ($missingKeys.Count -gt 0) {
-        Write-Error ("Catalog entry '{0}' (Kind '{1}') is missing required setting(s): {2}." -f $catalogTestName, $catalogEntry.Kind, ($missingKeys -join ', '))
+        Write-Error ("Catalog entry '{0}' is missing required setting(s): {1}." -f $catalogTestName, ($missingKeys -join ', '))
         exit 1
     }
 }
@@ -498,7 +524,12 @@ function Invoke-BrokerOutageCheck {
     # heartbeats published after that phase's broker came up -- no stale hits.
     param(
         [hashtable]$Settings,
-        [string]$Port
+        [string]$Port,
+
+        # Part of the verdict-function contract the catalog dispatches through, and
+        # deliberately unused here: this check's evidence is the broker's own logs, and
+        # it captures no managed debug output from the device.
+        [string]$LogPath
     )
 
     $topic = $Settings.HeartbeatTopic
@@ -666,8 +697,11 @@ function Get-MosquittoTool {
 # choose. Two attempts at shortening it both broke the conformance check, and the
 # measurements are worth keeping so nobody repeats them:
 #
-#   - Ending the wait after 250ms of quiet output: 7 failures. The output is buffered and
-#     lands in chunks, so "quiet" does not mean "finished".
+#   - Ending the wait after 250ms of quiet output: 7 failures. Retained replay and live
+#     traffic arrive with gaps in them, so "quiet" does not mean "finished". (This used
+#     to blame stdio buffering. It is not that -- see Stop-HomieCapture, where the
+#     buffering was measured and found not to exist. The 7 failures stand; the
+#     explanation for them was wrong.)
 #   - A flat 1s: 3 failures, 54 topics where a healthy run sees ~64.
 #   - mosquitto_sub -W 1, waiting for it to exit rather than killing it: complete, but
 #     6.3s -- slower than what it replaced.
@@ -781,6 +815,25 @@ function Start-HomieCapture {
     $command = '/c ""{0}" {1} > "{2}" 2>&1"' -f $sub, $subscriberArgs, $out
     $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
 
+    # A record, not a bare pid. mosquitto_sub quits by itself when it cannot reach the
+    # broker -- measured at between 2 and 3 seconds, and it takes its cmd.exe with it --
+    # while Stop-HomieCapture holds the window open for $SnapshotSettleSeconds (3). So an
+    # unreachable broker leaves this launcher dead just BEFORE the stop, as the ordinary
+    # outcome rather than as a narrow race, and taskkill on a dead pid throws under this
+    # script's error preference (see Stop-HomieCapture). New-SmartHomeProcessRecord carries
+    # the name and start time that also tell a dead pid apart from a recycled one; -Tree
+    # because the real work is in the mosquitto_sub grandchild.
+    #
+    # Taken HERE, before the connect wait, rather than at the return: Process.ProcessName
+    # reads back $null once the process has exited -- StartTime survives, the name does not
+    # -- and Get-SmartHomeRecordedProcess skips its name comparison for a record that
+    # carries no name. A record built after the wait would therefore fall back to the
+    # start-time window alone, silently giving up the recycled-pid defence this record is
+    # here for. The wait really can outlive the launcher: against an unreachable broker it
+    # returns at ~2.4s, satisfied by the subscriber's own error rather than by a message
+    # (#59), and the launcher is gone by 3s.
+    $record = New-SmartHomeProcessRecord -Label 'homie snapshot subscriber' -Process $process -Tree
+
     if ($WaitForConnectSeconds -gt 0) {
         $connectDeadline = (Get-Date).AddSeconds($WaitForConnectSeconds)
         while ((Get-Date) -lt $connectDeadline) {
@@ -793,7 +846,7 @@ function Start-HomieCapture {
         }
     }
 
-    return @{ ProcessId = $process.Id; Path = $out }
+    return @{ Record = $record; Path = $out }
 }
 
 function Stop-HomieCapture {
@@ -814,29 +867,78 @@ function Stop-HomieCapture {
     # figure that explains a run's duration, and it cannot be read off the code.
     $script:snapshotsTaken++
 
-    # Item 2 of #36 recorded that taskkill /F would lose whatever mosquitto_sub still had
-    # in its stdio buffer -- redirected to a file, so full buffering (~4KB) rather than
-    # line buffering -- and that a capture smaller than that boundary would therefore
-    # arrive truncated. Measured against Mosquitto 2.0.22 on this machine and it does not
-    # happen: mosquitto_sub flushes per message. A five-topic store is 105 bytes on disk
-    # 200ms into the window, a message published 1s later is on disk 200ms after that,
-    # and both survive the kill unchanged; a 200-topic store came back complete, all 200
-    # lines. The tail of a window is not at risk, whatever its size.
-    #
-    # Which is why the capture below is preserved rather than treated as unreliable: what
-    # it holds is what the subscriber received.
+    # The whole body is in a try whose finally preserves the capture file. The window is
+    # what a conformance verdict is computed from, and Start-HomieCapture deletes the
+    # previous one at the start of the next window -- so anything that throws in here
+    # loses not just the lines but the only record of what the subscriber saw. #54's
+    # throw was the case that made this urgent and is fixed below; the finally stays
+    # because the guarantee should not depend on which statement fails.
     try {
         Start-Sleep -Seconds $SettleSeconds
-        Stop-SmartHomeProcessTree -ProcessId $Capture.ProcessId
+        # taskkill /F loses nothing here, and that is measured rather than assumed.
+        #
+        # #36 item 2 argued the opposite: stdout is redirected to a file, so the MSVC CRT
+        # buffers fully (~4KB) rather than by line, and a tail still sitting in that buffer
+        # would die with the process -- making the callers that read the END of a window
+        # (the refused-transition step, the out-of-format step) work only by accident of how
+        # much retained replay happened to precede it. That was a plausible mechanism and it
+        # is not what mosquitto_sub does.
+        #
+        # Measured on this machine against Mosquitto 2.0.22, no hardware involved:
+        #
+        #   - With the subscriber still RUNNING, the redirected file grows by exactly one
+        #     line per message (50, 100, 150 bytes for three publishes). A full buffer would
+        #     hold all three; there is nothing to lose because nothing is retained in it.
+        #   - taskkill /F immediately after the publish (0ms, 50ms, 250ms, 3s) keeps the tail
+        #     every time, in a file of 377 bytes -- a tenth of the supposed 4KB boundary.
+        #   - Repeated across retained-store sizes of 0, 5, 53 and 120 topics: the tail is
+        #     present at every size, including an EMPTY store, which is the case the buffer
+        #     theory says must fail.
+        #
+        # So mosquitto_sub flushes stdout per message and the window's tail is as reliable as
+        # its bulk. Do not reintroduce -W to "fix" this: it was measured at 15.2s for a 3s
+        # window here (and 6.3s for a 1s one, see $SnapshotSettleSeconds), which would cost
+        # minutes across a run to solve a problem that does not exist.
+        #
+        # Through the recorded-process helper rather than Stop-SmartHomeProcessTree, for the
+        # reason Stop-DeviceDebugCapture uses it: taskkill on a pid that has already exited
+        # writes to stderr, PowerShell 5.1 wraps that in a NativeCommandError, and under this
+        # script's $ErrorActionPreference = 'Stop' that is terminating -- thrown out of the
+        # finally the refused-transition step closes its window in, replacing the verdict that
+        # step had already reached. Per Start-HomieCapture the subscriber really is dead by
+        # then whenever the broker is unreachable, so this was the routine path, not the edge.
+        # The helper also declines to kill a pid Windows has since reissued.
+        #
+        # Its per-process progress lines go nowhere (stream 6 is Write-Host): one line per
+        # snapshot, dozens per conformance run, for a window that is not an event worth
+        # narrating. Warnings are stream 3 and still come through, which is what the recycled
+        # pid case reports on.
+        $wasAlive = Stop-SmartHomeRecordedProcess -Record $Capture.Record 6> $null
 
-        return @(Get-Content -Path $Capture.Path -ErrorAction SilentlyContinue)
+        $lines = @(Get-Content -Path $Capture.Path -ErrorAction SilentlyContinue)
+
+        # A subscriber that was already gone did not observe the whole window, so its capture
+        # is short for a host-side reason -- indistinguishable, in the lines alone, from a
+        # device that published nothing. Said here, where the difference is known, rather than
+        # left for a caller to misread as evidence about the device.
+        #
+        # mosquitto_sub's own reason is already in $lines: its stderr shares this file, so an
+        # unreachable broker leaves 'Error: ... Connection refused' among them. That is the
+        # detail #54 records as available but unread -- and the one the old throw discarded,
+        # because it happened before this Get-Content.
+        #
+        # A warning rather than a failure, for the same reason Stop-DeviceDebugCapture warns:
+        # this also runs inside that finally, so throwing here would recreate the masking the
+        # change above exists to remove.
+        if (-not $wasAlive) {
+            $reasons = @($lines | Where-Object { $_ -match '\S' -and $null -eq (ConvertFrom-HomieCaptureLine -Line $_) })
+            $detail = if ($reasons.Count -gt 0) { $reasons -join ' / ' } else { 'it recorded no reason' }
+            Write-Warning ("The snapshot subscriber exited before its {0}s window closed, so this capture is short for a host-side reason and says nothing about the device: {1} (capture file: {2})." -f $SettleSeconds, $detail, $Capture.Path)
+        }
+
+        return $lines
     }
     finally {
-        # In a finally so the evidence outlives a stop that throws. Stop-SmartHomeProcessTree
-        # on an already-dead subscriber does throw (#54), and it throws before the
-        # Get-Content above -- so the run loses the lines and, without this, the file they
-        # were in as well. #54 is the fix for the throw; this only makes sure the window
-        # is still readable afterwards.
         Save-SnapshotEvidence -Capture $Capture
     }
 }
@@ -1080,9 +1182,9 @@ function Stop-ConformancePhase {
 }
 
 function Write-ConformancePhaseBreakdown {
-    # Called from the test loop, not from the check itself: the check returns from four
-    # places (two of them failure paths), and those are exactly the runs whose timing is
-    # worth seeing. One call after it returns covers all four.
+    # Called from Invoke-HomieConformanceCheck's finally, not from the measurement
+    # itself: that returns from four places (two of them failure paths), and those are
+    # exactly the runs whose timing is worth seeing. One call around it covers all four.
     Stop-ConformancePhase
 
     if ($script:conformancePhases.Count -eq 0) {
@@ -1116,7 +1218,50 @@ function Get-ConformanceCaptureSeconds {
            60
 }
 
+function Add-ConformanceWarning {
+    # Both at once, on purpose: to the console while the run is happening, and to the
+    # list the verdict's detail is built from so it survives into the summary and the
+    # log. Either alone is a way to lose it.
+    param([Parameter(Mandatory = $true)][string]$Message)
+
+    $script:conformanceWarnings += $Message
+    Write-Warning $Message
+}
+
 function Invoke-HomieConformanceCheck {
+    # The verdict function the catalog names for HomieClientCheck: everything the
+    # conformance measurement needs around it, so the run loop needs to know none of it.
+    #
+    # -LogPath is where the managed debug output captured alongside the measurement is
+    # written. Only the device's own log can say whether it saw a command at all -- see
+    # Start-DeviceDebugCapture for why a host-decided check wants one.
+    param(
+        [hashtable]$Settings,
+        [string]$Port,
+        [string]$LogPath
+    )
+
+    $debugCapture = Start-DeviceDebugCapture -LogPath $LogPath `
+                                             -TimeoutSeconds (Get-ConformanceCaptureSeconds -Settings $Settings)
+    try {
+        return Measure-HomieConformance -Settings $Settings -Port $Port
+    }
+    finally {
+        # In the finally, because returning is not the measurement's only way out: a
+        # missing mosquitto tool, a capture file that cannot be cleared or a publish
+        # that fails all propagate under $ErrorActionPreference = 'Stop' and land in the
+        # test loop's catch as an ERROR verdict. That is the run whose phase timings are
+        # worth reading most, and it would otherwise be the one run that printed none.
+        Stop-DeviceDebugCapture -Capture $debugCapture
+
+        # After Stop-DeviceDebugCapture, not before: that call releases the COM port the
+        # next deploy needs, and it is documented not to throw -- it warns on a recycled
+        # or already-dead pid -- so ordering it first does not cost the breakdown.
+        Write-ConformancePhaseBreakdown
+    }
+}
+
+function Measure-HomieConformance {
     # Measures a purpose-built device against the Homie v4 convention, from the
     # broker's side. Every assertion is collected rather than thrown, so one run
     # reports everything that is wrong instead of only the first thing.
@@ -1135,6 +1280,12 @@ function Invoke-HomieConformanceCheck {
     # reconcile, and an assertion added against the wrong one would have been collected
     # into a list the verdict never reads: a silently passing conformance test.
     $script:conformanceFailures = @()
+    # Things a run should report without failing on: observed, attributable to something
+    # other than the device, and therefore not a conformance verdict. Kept next to the
+    # failures rather than left to Write-Warning alone, because a warning only exists in
+    # the console -- it reaches neither the summary nor the run's log directory, which is
+    # the "left no evidence" gap #35 is about.
+    $script:conformanceWarnings = @()
     $script:conformancePhases = @()
     $script:currentPhase = $null
 
@@ -1499,29 +1650,72 @@ function Invoke-HomieConformanceCheck {
 
             $refused = ConvertTo-HomieSnapshot -Lines $lines
 
+            # What this step asserts is THE DEVICE'S BEHAVIOUR, read from the wire. It is
+            # deliberately not an assertion about the retained store's final contents, and
+            # #36 item 1 is the decision to make that explicit rather than leave the two
+            # claims tangled together.
+            #
+            # They came apart because a settled per-topic read can be flipped by a QoS-1
+            # retransmission. ConvertTo-HomieSnapshot only merges on an EQUAL payload, so a
+            # DUP of the reflected 'sleeping' arriving after the correction replaces it:
+            # wire order [sleeping, alert, sleeping-dup] settles on 'sleeping' while every
+            # ordered assertion passes. And the store really does end up holding it --
+            # MQTT 3.1.1 3.3.1.1 says a receiver "cannot assume that it has seen an earlier
+            # copy" of a DUP packet, and QoS 1 has no dedup, so the broker re-processes it.
+            #
+            # That is a true statement about the store and a false one about the device: it
+            # reflected and corrected exactly as required, and the retransmission is the
+            # transport's, not its. Worse, the runner cannot tell that sequence apart from a
+            # device that genuinely republished the refused value after correcting it -- the
+            # subscriber sees a broker-forwarded DUP as an ordinary message. Asserting on it
+            # therefore names a defect this window cannot distinguish, which is the same
+            # call 2af2b12 already made for the "corrected too early" branch.
+            #
+            # So the settled reads below are used for two things only: presence (was
+            # anything measured at all) and evidence in the messages. The verdicts come from
+            # the ordered reads.
             $stateAfter = if ($refused.Contains("$root/`$state")) { $refused["$root/`$state"].Payload } else { $null }
-            # See #36: this settled read can be flipped by a QoS-1 retransmission. The
-            # per-topic collapse only merges on an equal payload, so a duplicate of the
-            # reflected 'sleeping' arriving after the correction replaces it -- wire order
-            # [sleeping, alert, sleeping-dup] leaves 'sleeping' here while the three wire
-            # assertions below all pass. Left as is deliberately: a broker re-processes a
-            # DUP PUBLISH, so the retained store really would hold the contradiction.
             $lifecycleAfter = if ($refused.Contains("$node/lifecycle")) { $refused["$node/lifecycle"].Payload } else { $null }
 
             # Absent, not merely wrong: neither topic being in the window means nothing
             # was measured -- a subscriber that never came up, not a device that took the
             # forbidden transition. Reported as such rather than as a device defect, the
             # way the wire assertions below already do for a lost command.
+            #
+            # Presence is the one thing the collapse answers soundly whatever arrives: a
+            # duplicate can change WHICH payload a topic settles on, never whether the
+            # topic was seen.
             if ($null -eq $stateAfter -or $null -eq $lifecycleAfter) {
                 $script:conformanceFailures += "refused '$($step.Command)': the capture window caught no `$state or $nodeId/lifecycle at all, so nothing about the refusal was measured"
             }
             else {
-                if ($stateAfter -ne $step.Expect) {
-                    $script:conformanceFailures += "forbidden $($step.Expect) -> $($step.Command) transition was applied (`$state is '$stateAfter')"
-                }
+                # Published values, not the last value. A refusal publishes nothing on
+                # $state, so anything the device puts there live inside this window is a
+                # move it should not have made -- and reading the published payloads
+                # rather than where the topic settled is what makes that immune to the
+                # flip above.
+                #
+                # $step.Expect is the one payload tolerated, and only that one. It is the
+                # value $state already holds, and the preceding step republishes its
+                # command every poll round while M2Mqtt retransmits an unacknowledged
+                # QoS-1 publish for MaximumAttemptsRetry (3) x DelayOnRetry (1000ms), so
+                # a fresh copy of it can legitimately still be arriving. Nothing else can:
+                # every older $state value was published well outside that ~3s budget --
+                # the preceding step polls in 3s snapshots before it returns.
+                #
+                # Which is why this is NOT narrowed to $step.Command. Looking only for the
+                # commanded value would pass a device that answered the refused command by
+                # moving $state somewhere else entirely (a CanChangeState regression
+                # leaving it at 'init' or 'lost'), and that is a defect this step used to
+                # catch before it read the wire.
+                $statePayloads = Get-HomieLivePayloads -Lines $lines -Topic "$root/`$state"
+                $moved = @($statePayloads | Where-Object { $_ -ne $step.Expect })
 
-                if ($lifecycleAfter -ne $step.Expect) {
-                    $script:conformanceFailures += "refused '$($step.Command)' left $nodeId/lifecycle advertising '$lifecycleAfter' while `$state is '$stateAfter'"
+                if ([array]::IndexOf($moved, $step.Command) -ge 0) {
+                    $script:conformanceFailures += "forbidden $($step.Expect) -> $($step.Command) transition was applied (`$state went to '$($step.Command)'; saw: $($statePayloads -join ', '))"
+                }
+                elseif ($moved.Count -gt 0) {
+                    $script:conformanceFailures += "refused '$($step.Command)' moved `$state off '$($step.Expect)' to '$($moved -join "', '")' -- not the forbidden transition, but not a refusal either (saw: $($statePayloads -join ', '))"
                 }
             }
 
@@ -1561,6 +1755,34 @@ function Invoke-HomieConformanceCheck {
             }
             elseif ($corrected -lt 0) {
                 $script:conformanceFailures += "device left the reflected '$($step.Command)' on $nodeId/lifecycle and never published '$($step.Expect)' over it (saw: $($lifecyclePayloads -join ', '))"
+            }
+            elseif ($lifecycleAfter -eq $step.Command) {
+                # The device corrected, and the topic still settled back on the value it
+                # corrected AWAY from. That is the duplicate #36 item 1 describes: a DUP of
+                # the reflection re-processed by the broker after the correction. The store
+                # disagrees with the device, and the device is not what is wrong -- so it is
+                # reported and not counted.
+                #
+                # Not swallowed, because it is a real contradiction in the retained store
+                # while it lasts: a controller connecting before the next lifecycle publish
+                # reads the refused value beside a $state that never took it. It is
+                # transient (the next command overwrites it) and outside this device's
+                # control, but a run that hits it should say so rather than look clean --
+                # so it also goes into the verdict's detail below, where the summary and
+                # the run's log can carry it. A console-only warning is exactly the kind of
+                # evidence #35 was unable to go back and read.
+                Add-ConformanceWarning ("refused '{0}': {1}/lifecycle settled back on '{2}' beside `$state='{3}' even though the correction to '{4}' is on the wire -- a retransmitted duplicate re-processed by the broker, not a device defect (saw: {5})" -f $step.Command, $nodeId, $lifecycleAfter, $stateAfter, $step.Expect, ($lifecyclePayloads -join ', '))
+            }
+            elseif ($lifecycleAfter -ne $step.Expect) {
+                # Settled on something that is neither the corrected value nor the value it
+                # corrected away from. A retransmission can only ever repeat a payload the
+                # device already published, and everything it published before this window
+                # is outside M2Mqtt's ~3s retry budget (see the $state read above), so this
+                # is a genuine new publish onto the property after the correction -- the
+                # store left advertising a state the device is not in, which is the defect
+                # this step exists for. Counted, not demoted: the duplicate reasoning above
+                # does not reach it.
+                $script:conformanceFailures += "refused '$($step.Command)' left $nodeId/lifecycle advertising '$lifecycleAfter' after correcting to '$($step.Expect)', while `$state is '$stateAfter' (saw: $($lifecyclePayloads -join ', '))"
             }
 
             continue
@@ -1604,16 +1826,26 @@ function Invoke-HomieConformanceCheck {
         }
     }
 
+    # Appended to whichever verdict is returned, so a run that observed one carries it
+    # into the summary line and the log instead of only into scrollback. A PASS with a
+    # note is still a PASS: nothing here is a conformance failure.
+    $warningDetail = if ($script:conformanceWarnings.Count -gt 0) {
+        " [$($script:conformanceWarnings.Count) warning(s): " + ($script:conformanceWarnings -join '; ') + "]"
+    }
+    else {
+        ''
+    }
+
     if ($script:conformanceFailures.Count -gt 0) {
         return @{
             Outcome = 'FAIL'
-            Detail  = "$($script:conformanceFailures.Count) conformance failure(s): " + ($script:conformanceFailures -join '; ')
+            Detail  = "$($script:conformanceFailures.Count) conformance failure(s): " + ($script:conformanceFailures -join '; ') + $warningDetail
         }
     }
 
     return @{
         Outcome = 'PASS'
-        Detail  = "attributes, datatypes, retained flags, /set round-trip, refused out-of-format payloads, alert/sleeping, a refused transition and re-announce all conform"
+        Detail  = "attributes, datatypes, retained flags, /set round-trip, refused out-of-format payloads, alert/sleeping, a refused transition and re-announce all conform" + $warningDetail
     }
 }
 
@@ -1645,8 +1877,20 @@ foreach ($testName in $Tests) {
         }
     }
 
-    if (($settings.Kind -eq 'BrokerOutage' -or $settings.Kind -eq 'HomieConformance') -and $NoBroker) {
+    # Read off the entry's own capability, so a check that owns the broker declares it
+    # once and every guard follows. This one is the reason that matters: forgetting to
+    # list a new kind here produced no error, only a confusing failure once the check
+    # tore down a broker it did not start.
+    if ($settings.OwnsBroker -and $NoBroker) {
         Write-Error "$testName needs to own the broker's lifetime, so it cannot run with -NoBroker. Drop the switch, or exclude it with -Tests."
+        exit 1
+    }
+
+    # The catalog validation above gates Verdict to a name this script knows; this gates
+    # a known name to a function that actually exists. It can only run here, after the
+    # function definitions -- and it still runs before the first build and flash.
+    if ($settings.Contains('Verdict') -and -not (Get-Command -Name $settings.Verdict -CommandType Function -ErrorAction SilentlyContinue)) {
+        Write-Error ("Catalog entry '{0}' names Verdict function '{1}', which this script does not define." -f $testName, $settings.Verdict)
         exit 1
     }
 }
@@ -1715,47 +1959,48 @@ try {
             Write-Host ""
 
             # ── Host-decided ──────────────────────────────────────────────────
-            # Dispatch first, then handle the verdict once. The two kinds differ only in
-            # which function produces it; everything after was duplicated line for line,
-            # and had already drifted -- only one copy carried the comment explaining why
-            # the broker is restarted.
-            $verdict = $null
-            if ($settings.Kind -eq 'HomieConformance') {
-                $debugCapture = Start-DeviceDebugCapture -LogPath $logFile `
-                                                         -TimeoutSeconds (Get-ConformanceCaptureSeconds -Settings $settings)
+            # One invoke, by name, for every check whose verdict comes from the broker
+            # rather than from the device. Everything a particular check needs around
+            # itself -- the debug capture and phase breakdown the conformance check runs
+            # under, for instance -- lives inside that function, so a fourth kind of
+            # test adds no branch here and cannot be forgotten in one.
+            #
+            # Keyed off the entry rather than off the returned value: a host-decided
+            # check that returned $null used to fall through and be measured as a
+            # device-decided one, which reads as a device that never emitted a marker.
+            if ($settings.Contains('Verdict')) {
                 try {
-                    $verdict = Invoke-HomieConformanceCheck -Settings $settings -Port $mqttPort
+                    $verdict = & $settings.Verdict -Settings $settings -Port $mqttPort -LogPath $logFile
+
+                    # Named here rather than left to Set-StrictMode. A function that
+                    # falls off the end returns $null, and $verdict.Outcome then throws
+                    # a PropertyNotFoundException -- reported in the host's language,
+                    # naming neither the test nor the contract it broke, which is the
+                    # kind of failure this dispatch exists to stop producing.
+                    if ($null -eq $verdict) {
+                        throw ("{0} returned no verdict. A verdict function must return a hashtable with Outcome and Detail." -f $settings.Verdict)
+                    }
+
+                    $outcome = $verdict.Outcome
+                    $detail = $verdict.Detail
                 }
                 finally {
-                    Stop-DeviceDebugCapture -Capture $debugCapture
-
-                    # In the finally with it, because returning is not the check's only
-                    # way out: a missing mosquitto tool, a capture file that cannot be
-                    # cleared or a publish that fails all propagate under
-                    # $ErrorActionPreference = 'Stop' and land in the catch below as an
-                    # ERROR verdict. That is the run whose phase timings are worth
-                    # reading most, and outside the finally it was the one run that
-                    # printed none.
-                    #
-                    # After Stop-DeviceDebugCapture, not before: that call releases the
-                    # COM port the next deploy needs, and it is documented not to throw
-                    # -- it warns on a recycled or already-dead pid -- so ordering it
-                    # first does not cost the breakdown.
-                    Write-ConformancePhaseBreakdown
-                }
-            }
-            elseif ($settings.Kind -eq 'BrokerOutage') {
-                $verdict = Invoke-BrokerOutageCheck -Settings $settings -Port $mqttPort
-            }
-
-            if ($null -ne $verdict) {
-                $outcome = $verdict.Outcome
-                $detail = $verdict.Detail
-
-                # Both host-decided kinds take the broker away to make their measurement.
-                # Whatever happened, leave one up for the tests that follow.
-                if (-not (Get-SmartHomeDevEnvState -Port $mqttPort)) {
-                    Start-SuiteBroker -Port $mqttPort
+                    # A check that owns the broker took it away to make its measurement,
+                    # and it can fail with the broker still down -- the conformance check
+                    # replaces the broker mid-run, so anything throwing after that leaves
+                    # none. In the finally for that reason: without it, one failed check
+                    # turns every test after it into a second, unrelated failure that
+                    # hides the first.
+                    if ($settings.OwnsBroker -and -not (Get-SmartHomeDevEnvState -Port $mqttPort)) {
+                        # Caught, because a broker that will not come back must not
+                        # replace the failure already on its way out of this block.
+                        try {
+                            Start-SuiteBroker -Port $mqttPort
+                        }
+                        catch {
+                            Write-Warning ("Could not restore the broker after {0}: {1}" -f $testName, $_.Exception.Message)
+                        }
+                    }
                 }
             }
             else {

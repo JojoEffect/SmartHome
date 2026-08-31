@@ -6,7 +6,10 @@ description: Run the whole SmartHome on-device integration suite (WiFi, MQTT rou
 # SmartHome integration test suite
 
 Run `scripts\Run-IntegrationTests.ps1` — one call covers every project under
-`src\integrationTests`. Every test is deployed first; the verdict comes from one of three kinds:
+`src\integrationTests`. Every test is deployed first; how its verdict is reached is declared by
+its `$testCatalog` entry — `Verdict` names the function that decides it (no `Verdict` means the
+device decides), and `OwnsBroker` says that function cycles the broker itself. Three shapes exist
+today:
 
 - **`DeviceMarker`** (WifiCheck, MqttCheck, Bmp280Check) — the runner reboots the device,
   captures managed debug output, and reads the `[ITEST] <name> PASS/FAIL` marker.
@@ -21,8 +24,9 @@ Run `scripts\Run-IntegrationTests.ps1` — one call covers every project under
   broker is replaced. It emits no `[ITEST]` marker by design — the evidence
   is what lands on the broker.
 
-Both host-decided kinds (`BrokerOutage`, `HomieConformance`) take the broker away and put a fresh
-one up, so neither can run with `-NoBroker`.
+The two host-decided ones (`BrokerOutage`, `HomieConformance`) take the broker away and put a
+fresh one up. Their entries say `OwnsBroker = $true`, which is what the `-NoBroker` guard reads,
+so neither can run under that switch.
 
 ```powershell
 .\scripts\Run-IntegrationTests.ps1                              # all five checks
