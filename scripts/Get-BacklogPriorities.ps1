@@ -275,7 +275,7 @@ $rules = @(
 
     # --- VerifyNeeds: CI ------------------------------------------------------
     @{ Axis = 'VerifyCI'; W = 3; P = 'unit\s+test|nanoclr|virtual\s+device|NFUnitTest|UnitTests?\b|HomieClientTests'; Why = 'the unit suite can prove it' }
-    @{ Axis = 'VerifyCI'; W = 2; P = '\bCI\b|GitHub\s+Actions?|workflow|Dependabot|MinVer|releases?\b'; Why = 'the pipeline can prove it' }
+    @{ Axis = 'VerifyCI'; W = 2; P = '\bCI\b|GitHub\s+Actions?|workflow|Dependabot|MinVer|\breleases?\b'; Why = 'the pipeline can prove it' }
     @{ Axis = 'VerifyCI'; W = 1; P = 'builds?\s+every|compil'; Why = 'a build proves it' }
 
     # --- VerifyNeeds: None ----------------------------------------------------
@@ -654,6 +654,10 @@ foreach ($issue in $issues) {
         EvidenceDebt = $debt
         Where        = $where
         VerifyNeeds  = $verifyNeeds
+        # Not folded into Signals: every member of that object is a list of the Why strings
+        # that fired, and a bare scalar among them breaks anything walking it. This is also
+        # what the report marks with `?`, so it belongs where the axis it qualifies is.
+        VerifyFromBody = ($verifyScope -eq 'body')
         Track        = $track
         Risk         = $risk
         Effort       = $effort
@@ -678,7 +682,6 @@ foreach ($issue in $issues) {
             EvidenceDebt = @($debtHits | ForEach-Object { $_.Why })
             Hardware     = @($hardwareHits | ForEach-Object { $_.Why })
             Desk         = @($deskHits | ForEach-Object { $_.Why })
-            VerifyScope  = $verifyScope
             VerifyHardware = @($verifyHardwareHits | ForEach-Object { $_.Why })
             VerifyCI     = @($verifyCiHits | ForEach-Object { $_.Why })
             VerifyNone   = @($verifyNoneHits | ForEach-Object { $_.Why })
@@ -699,6 +702,27 @@ foreach ($issue in $issues) {
 # Blocked is overridable even though it comes from a label: an issue can be waiting on
 # something real without anyone having relabelled it, and the body is what says so.
 Set-OverriddenAxes -Records $records -Axes @('Trust', 'EvidenceDebt', 'Where', 'VerifyNeeds', 'Track', 'Risk', 'Effort', 'Blocked', 'DependsOn', 'Note')
+
+# A corrected VerifyNeeds is the caller's judgment, not a reading of the body, so the marker
+# that says "this came from the body" has to go with the value it described.
+foreach ($record in $records) {
+    if (@($record.Overridden) -contains 'VerifyNeeds') { $record.VerifyFromBody = $false }
+}
+
+# Where stopped carrying the session multiplier when VerifyNeeds took it over, so correcting
+# it now changes the report and not the ranking. Accepting that in silence is the same
+# failure the strict validation above exists to prevent -- and the pre-split help gave
+# { "26": { "Where": "Hardware", "Risk": "Friction" } } as its worked example, so an override
+# file written against the shipped docs is the likely case rather than the odd one. A warning
+# rather than an error: correcting Where is still legitimate, it just no longer moves a row.
+$inertWhere = @($overrideMap.Keys | Where-Object {
+        $overrideMap[$_].ContainsKey('Where') -and -not $overrideMap[$_].ContainsKey('VerifyNeeds')
+    } | Sort-Object { [int]$_ })
+if ($inertWhere.Count -gt 0) {
+    Write-Warning ("Overrides set Where without VerifyNeeds for #$($inertWhere -join ', #'). " +
+        'Where describes the edit and no longer weights the ranking; VerifyNeeds carries the ' +
+        'device-availability multiplier. Set VerifyNeeds too if the intent was to move these rows.')
+}
 
 # ---------------------------------------------------------- dependency edges ----
 
@@ -950,8 +974,8 @@ if ($unclassified.Count -gt 0) {
 Write-Host ''
 Write-Host 'RANKING' -ForegroundColor White
 Write-Host ''
-Write-Host ('  {0,-4} {1,-6} {2,-4} {3,-8} {4,-8} {5,-12} {6,-6} {7,-11} {8}' -f 'Rank', 'Issue', 'Prio', 'Where', 'Verify', 'Risk', 'Effort', 'Track', 'Title')
-Write-Host ('  ' + ('-' * 117)) -ForegroundColor DarkGray
+Write-Host ('  {0,-4} {1,-6} {2,-4} {3,-8} {4,-9} {5,-12} {6,-6} {7,-11} {8}' -f 'Rank', 'Issue', 'Prio', 'Where', 'Verify', 'Risk', 'Effort', 'Track', 'Title')
+Write-Host ('  ' + ('-' * 118)) -ForegroundColor DarkGray
 
 $shown = if ($Top -gt 0) { @($ranked | Select-Object -First $Top) } else { $ranked }
 $rank = 0
@@ -976,8 +1000,15 @@ foreach ($record in $shown) {
     if ($record.Blocked) { $color = 'DarkGray' }
     if ($record.State -ne 'OPEN') { $color = 'DarkGray' }
 
-    Write-Host ('  {0,-4} #{1,-5} {2,-4} {3,-8} {4,-8} {5,-12} {6,-6} {7,-11} {8}' -f `
-            $rank, $record.Number, $record.Relative, $record.Where, $record.VerifyNeeds, $record.Risk, $record.Effort, $record.Track, $title) -ForegroundColor $color
+    # `?` is the axis admitting where it read the answer. A body-derived call is right about
+    # three times in four against a hand-labelled reading of this backlog, where a
+    # title-derived one has not yet been wrong -- and the multiplier it feeds is the largest
+    # in the script, so the difference has to be on screen and not only in -Json.
+    $verifyCell = $record.VerifyNeeds
+    if ($record.VerifyFromBody) { $verifyCell += '?' }
+
+    Write-Host ('  {0,-4} #{1,-5} {2,-4} {3,-8} {4,-9} {5,-12} {6,-6} {7,-11} {8}' -f `
+            $rank, $record.Number, $record.Relative, $record.Where, $verifyCell, $record.Risk, $record.Effort, $record.Track, $title) -ForegroundColor $color
 }
 
 if ($Top -gt 0 -and $ranked.Count -gt $Top) {
@@ -996,8 +1027,10 @@ if ($Handoff -gt 0) {
         Write-Host ''
         Write-Host ("  #{0} - {1}" -f $record.Number, $record.Title) -ForegroundColor Cyan
         Write-Host ("    {0}" -f $record.Url) -ForegroundColor DarkGray
+        $verifyText = $record.VerifyNeeds
+        if ($record.VerifyFromBody) { $verifyText += ' (read from the body, low confidence)' }
         Write-Host ("    prio {0}  edit {1}  verify {2}  risk {3}  effort {4}  {5}" -f `
-                $record.Relative, $record.Where, $record.VerifyNeeds, $record.Risk, $record.Effort, $record.Track)
+                $record.Relative, $record.Where, $verifyText, $record.Risk, $record.Effort, $record.Track)
         Write-Host ("    why: {0}" -f (@($record.Why) -join ' ; ')) -ForegroundColor DarkGray
 
         if (@($record.Overridden).Count -gt 0) {
@@ -1026,6 +1059,8 @@ if ($State -ne 'open') { $flagLegend += ', C closed' }
 Write-Host $flagLegend -ForegroundColor DarkGray
 Write-Host '  Where is where the edit lands; Verify is what proving it needs, and is the axis' -ForegroundColor DarkGray
 Write-Host '  the -Hardware session weighting keys off. They disagree, and that is the point.' -ForegroundColor DarkGray
+Write-Host '  Verify marked ? was read from the issue body, not its title, and is the least' -ForegroundColor DarkGray
+Write-Host '  reliable call the script makes - read that body before trusting its rank.' -ForegroundColor DarkGray
 Write-Host '  Prio is 0-100 against the top of this run, so the two rounds share one scale.' -ForegroundColor DarkGray
 if ($weighted) {
     Write-Host '  It is session-weighted; the raw and unweighted values are Score and BaseScore in -Json.' -ForegroundColor DarkGray

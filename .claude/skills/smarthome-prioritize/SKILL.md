@@ -143,6 +143,11 @@ the ranking script.
 Any axis may be set. An overridden axis reports confidence `Override`, and the heuristic's own
 value stays in the JSON under `Heuristic` so the two can be compared.
 
+Setting `Where` alone raises a warning. It describes where the edit lands and carries no
+multiplier — `VerifyNeeds` is the axis that moves a row for a session with or without the
+device — so an override file written before the two were split corrects the report and not the
+ranking. Set `VerifyNeeds` when the intent was to move something.
+
 | Axis | Accepted values |
 |---|---|
 | `Trust`, `EvidenceDebt`, `Blocked` | JSON `true` / `false` — **unquoted** |
@@ -180,7 +185,9 @@ names ESP32 packages; a Homie library issue walks through the conformance check)
 body first put 33 of 37 issues in `Hardware`, which is an axis carrying no information. A
 body-derived call is therefore reported at confidence `Low` however many patterns fired: on the
 37 issues in this repository every title-derived call was right, and every wrong one came from
-the body. **`Low` on `VerifyNeeds` means read the issue before trusting the rank.**
+the body. The ranking table marks those rows `Hardware?`, `CI?`, `None?` — **a `?` on `Verify`
+means read the issue before trusting the rank.** Roughly half the backlog carries one, so this
+is not a rare corner; `-Json` carries the same thing as `VerifyFromBody`.
 
 ## The eight axes
 
@@ -223,7 +230,9 @@ hardware-gated, device available x1.25 ; large, deep session x1.3 ; theme Capabi
 ```
 
 Flags in the title column: `T` verification trust, `E` evidence debt, `U` unblocks another
-issue, `B` blocked.
+issue, `B` blocked. A `?` after the `Verify` value is separate from those: it means that axis
+was read from the issue body rather than its title, which is the least reliable call the script
+makes.
 
 ## What this does not decide
 

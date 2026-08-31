@@ -561,7 +561,9 @@ script — keys off the second. They disagree for every host-side tool that only
 can exercise: `Run-IntegrationTests.ps1` and the capture helpers are edited at a desk and
 verified on hardware. `VerifyNeeds` is read from the issue title first and from the body only
 as a fallback, because every body in this repo mentions the device; a body-derived call is
-reported at confidence `Low` and is the one to check before trusting a rank.
+reported at confidence `Low`, marked `?` in the ranking table, and is the one to check before
+trusting a rank. An `-Overrides` file that sets `Where` alone now warns, because before the
+split that key was how a row got moved and it no longer is.
 
 ### File what you find
 
