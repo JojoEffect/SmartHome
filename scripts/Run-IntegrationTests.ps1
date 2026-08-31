@@ -245,28 +245,34 @@ function Save-SnapshotEvidence {
     # from the store to a new subscriber -- so "was this the retained store or a live
     # echo" is readable in the snapshot capture and nowhere else. Start-HomieCapture
     # deletes the previous capture at the start of every window, so a conformance run
-    # opened ~25 of them and kept none. That is the "left no evidence" half of issue #35:
-    # the run that lost all five /set commands left nothing behind to read.
+    # opened a dozen of them and kept none. That is the "left no evidence" half of issue
+    # #35: the run that lost all five /set commands left nothing behind to read.
+    # (Measured over ten hardware runs on 2026-08-31: 12 to 13 windows per run.)
     #
     # Named by the phase as well as the number so the files can be picked out without the
-    # console breakdown next to them -- a /set phase that cost ten windows leaves ten
+    # console breakdown next to them -- a /set phase that cost three windows leaves three
     # files saying so.
     param([hashtable]$Capture)
 
-    $phase = if ($null -eq $script:currentPhase) { 'unphased' } else { $script:currentPhase.Name }
-    # Phase names are prose -- '/set round-trip', 'out-of-format /set' -- and two of them
-    # carry a path separator.
-    $slug = ($phase -replace '[^A-Za-z0-9]+', '-').Trim('-').ToLowerInvariant()
-
-    $destination = Join-Path $LogDirectory ("{0}-snapshot-{1:d3}-{2}.log" -f $script:evidenceLabel, $script:snapshotsTaken, $slug)
+    # EVERYTHING is inside the try, not just the copy. This runs from a finally, where a
+    # throw replaces the exception already in flight -- Stop-SmartHomeProcessTree over an
+    # already-dead subscriber (#54), or the verdict the refused-transition step had
+    # reached. Under Set-StrictMode -Version Latest a phase object that has no Name, or a
+    # capture with no Path, is a terminating error, so naming the file has to be as
+    # guarded as writing it. Preserving evidence must never be the reason a run fails.
     try {
-        # The subscriber has just been killed, so nothing holds this open -- but the copy
-        # is in a finally either way, for the same reason as above: evidence must never
-        # be what fails a run.
+        $phase = if ($null -eq $script:currentPhase) { 'unphased' } else { $script:currentPhase.Name }
+        # Phase names are prose -- '/set round-trip', 'out-of-format /set' -- and two of
+        # them carry a path separator.
+        $slug = ($phase -replace '[^A-Za-z0-9]+', '-').Trim('-').ToLowerInvariant()
+
+        $destination = Join-Path $LogDirectory ("{0}-snapshot-{1:d3}-{2}.log" -f $script:evidenceLabel, $script:snapshotsTaken, $slug)
         Copy-Item -LiteralPath $Capture.Path -Destination $destination -ErrorAction Stop
     }
     catch {
-        Write-Warning ("Could not preserve the snapshot capture {0}: {1}" -f $Capture.Path, $_.Exception.Message)
+        # $Capture.Path is deliberately not named here: reading it is one of the things
+        # that can have thrown.
+        Write-Warning ("Could not preserve a snapshot capture: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -1315,13 +1321,20 @@ function Invoke-HomieConformanceCheck {
         $script:conformanceFailures += "/set on $property did not come back on the property topic (saw '$($lastSeen[$property])', expected '$wanted')"
     }
 
-    # A second round means a command was lost and re-sent, which is the condition issue
-    # #35 is about -- and since the retry above makes the run PASS through it, nothing
-    # else would say so. The phase breakdown shows it as extra snapshots, but only to a
-    # reader who already knows to look; this names it, next to the preserved snapshot
-    # captures that can be read to find out what the round actually saw.
+    # A second round is the condition issue #35 is about -- and since the retry above
+    # makes the run PASS through it, nothing else would say so. The phase breakdown shows
+    # it as extra snapshots, but only to a reader who already knows to look; this names
+    # it, next to the preserved snapshot captures that can be read to find out what the
+    # round actually saw.
+    #
+    # Worded as what was measured, not as what it usually means. An extra round proves
+    # only that a window held no echo: a lost command is the common cause and the one #35
+    # confirmed on hardware, but a reflection that lands after the 3s window closes, or a
+    # QoS-1 retransmission on M2Mqtt's 1s DelayOnRetry, produces the same count against a
+    # device that received the command and applied it. This line is the documented tell
+    # for #35, so it must not assert the cause the captures are there to establish.
     if ($rounds -gt 1) {
-        Write-Warning ("The /set round trip needed {0} rounds: at least one command was lost and re-sent (issue #35). The snapshot captures for this phase are in {1}." -f $rounds, $LogDirectory)
+        Write-Warning ("The /set round trip needed {0} rounds: a command produced no echo within its snapshot window and was re-sent (issue #35). The snapshot captures for this phase are in {1}." -f $rounds, $LogDirectory)
     }
 
     # ── payloads the properties' own $datatype/$format forbid ────────────────
