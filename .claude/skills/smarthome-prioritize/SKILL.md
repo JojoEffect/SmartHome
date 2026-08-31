@@ -7,7 +7,7 @@ description: Analyse the GitHub backlog, classify it into clusters, then ask a t
 
 The repository's labels (`type:`, `area:`, `status:`) classify an issue but never rank it —
 nothing in them decides between eleven `type: task` issues. `Get-BacklogPriorities.ps1` adds
-the seven axes that do, and this skill runs it in **two rounds with an interview between
+the eight axes that do, and this skill runs it in **two rounds with an interview between
 them**. The order matters: the interview asks the user to choose among clusters that are
 already on screen with real issue numbers in them, not among abstractions.
 
@@ -46,8 +46,15 @@ Two things to get right:
   and ranks nothing.
 
 The hardware question is the one that changes the answer most, because CI here cannot run the
-integration suite — roughly two thirds of this backlog is hardware-gated, and asking for it
-while the device is on someone's desk in another room wastes the session.
+integration suite — roughly three quarters of this backlog cannot be *verified* without the
+device, and asking for it while the device is on someone's desk in another room wastes the
+session.
+
+It keys off `VerifyNeeds`, not `Where`, and those two disagree for a whole class of issue here.
+Host-side tooling for the integration suite — `Run-IntegrationTests.ps1`, the capture helpers,
+the verdict functions — is edited at a desk and can be proved by nothing but a real suite run.
+Ranking it as desk work is what issue #57 was about, and it moved those issues further than any
+other single axis, because this multiplier is the largest one in the script.
 
 ## Round 3 — re-rank and commit to an order
 
@@ -72,7 +79,7 @@ many (3, 4 or 5 is the useful range) rather than picking a number — it is the 
 ```
 
 `-Handoff N` prints the selected issues with their url, axes, full scoring trail, any override
-note, and a marker on the hardware-gated ones. Three kinds of row are never handed out, however
+note, and a marker on the ones whose `VerifyNeeds` is `Hardware`. Three kinds of row are never handed out, however
 high they rank:
 
 - **blocked** — it names what it is waiting for, not work that can start
@@ -119,9 +126,15 @@ back so the ranking stays reproducible. Write a JSON file and re-run:
 ```json
 {
   "54": { "Effort": "S", "Note": "one guard around an already-exited subscriber" },
-  "26": { "Unblocks": [14, 35], "Risk": "Friction" }
+  "26": { "Unblocks": [14, 35], "Risk": "Friction" },
+  "57": { "VerifyNeeds": "None", "Note": "proved by re-running the ranking script, not the suite" }
 }
 ```
+
+The `57` row is the standing example of the `VerifyNeeds` blind spot: that issue's body quotes
+`Run-IntegrationTests.ps1` and `src/integrationTests` throughout, so the fallback reads it as
+hardware-verified, while the only thing that proves a change to the ranking script is running
+the ranking script.
 
 ```powershell
 .\scripts\Get-BacklogPriorities.ps1 -Overrides .\overrides.json -RankingOnly
@@ -130,10 +143,16 @@ back so the ranking stays reproducible. Write a JSON file and re-run:
 Any axis may be set. An overridden axis reports confidence `Override`, and the heuristic's own
 value stays in the JSON under `Heuristic` so the two can be compared.
 
+Setting `Where` alone raises a warning. It describes where the edit lands and carries no
+multiplier — `VerifyNeeds` is the axis that moves a row for a session with or without the
+device — so an override file written before the two were split corrects the report and not the
+ranking. Set `VerifyNeeds` when the intent was to move something.
+
 | Axis | Accepted values |
 |---|---|
 | `Trust`, `EvidenceDebt`, `Blocked` | JSON `true` / `false` — **unquoted** |
 | `Where` | `Hardware`, `Desk`, `Either`, `Unknown` |
+| `VerifyNeeds` | `Hardware`, `CI`, `None`, `Unknown` |
 | `Track` | `Capability`, `Velocity`, `Either`, `Unknown` |
 | `Risk` | `SilentWrong`, `LoudFailure`, `Friction`, `Cosmetic` |
 | `Effort` | `S`, `M`, `L` |
@@ -159,15 +178,27 @@ judgment, not a durable fact about the backlog.
 The `Needs a human call` cluster is the script naming its own blind spots: it lists every issue
 where at least one axis found no signal at all. Those are the first bodies worth reading.
 
-## The seven axes
+`VerifyNeeds` names a second blind spot through its confidence instead. It scores the **title
+and labels** first and falls back to the body only when those say nothing at all — the title
+says what an issue *is*, while every body in this repo mentions the device (the Dependabot issue
+names ESP32 packages; a Homie library issue walks through the conformance check). Scoring the
+body first put 33 of 37 issues in `Hardware`, which is an axis carrying no information. A
+body-derived call is therefore reported at confidence `Low` however many patterns fired: on the
+37 issues in this repository every title-derived call was right, and every wrong one came from
+the body. The ranking table marks those rows `Hardware?`, `CI?`, `None?` — **a `?` on `Verify`
+means read the issue before trusting the rank.** Roughly half the backlog carries one, so this
+is not a rare corner; `-Json` carries the same thing as `VerifyFromBody`.
 
-Four are specific to this repository, three are generic.
+## The eight axes
+
+Five are specific to this repository, three are generic.
 
 | Axis | Question | Weight |
 |---|---|---|
 | **Trust** | Can this make a check *lie* — pass silently, lose its evidence, mask a real failure? | +30, the heaviest single term |
 | **EvidenceDebt** | Does it name a constant, default or calibration asserted without measurement? | +15 |
-| **Where** | `Hardware` (needs the ESP32, probe or broker present) or `Desk` (CI can verify it) | session multiplier, ×0.15 to ×1.25 |
+| **Where** | Where the *edit* lands: `Hardware` (device-side code) or `Desk` (host-side source, scripts, docs) | none — descriptive only |
+| **VerifyNeeds** | What *proving* it takes: `Hardware` (a real device run), `CI` (the unit suite or a build), `None` (any desk) | session multiplier, ×0.15 to ×1.25 |
 | **Track** | `Capability` (ships device behaviour) or `Velocity` (speeds the dev loop) | theme multiplier only |
 | **Risk** | `SilentWrong` > `LoudFailure` > `Friction` > `Cosmetic` | 40 / 25 / 10 / 3 |
 | **Effort** | S / M / L | +8 / 0 / −6, then ×1.4 to ×0.5 by time budget |
@@ -199,7 +230,9 @@ hardware-gated, device available x1.25 ; large, deep session x1.3 ; theme Capabi
 ```
 
 Flags in the title column: `T` verification trust, `E` evidence debt, `U` unblocks another
-issue, `B` blocked.
+issue, `B` blocked. A `?` after the `Verify` value is separate from those: it means that axis
+was read from the issue body rather than its title, which is the least reliable call the script
+makes.
 
 ## What this does not decide
 
