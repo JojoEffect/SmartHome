@@ -405,8 +405,10 @@ these markers *are* the exit code. Emit one as soon as the outcome is known, bef
 loop. Adding a new integration test means: new project under `src\integrationTests`, emit the
 marker, add it to `$testCatalog` in `Run-IntegrationTests.ps1`. A host-decided test emits no
 marker and instead adds a verdict function, names it in its entry's `Verdict`, and lists that
-function's required settings under the same name in `$requiredCatalogKeys` — which is also what
-gates a `Verdict` the script does not define.
+function's required settings under the same name in `$requiredCatalogKeys` — which doubles as the
+list of names an entry may point at. That the name resolves to a function that actually exists is
+a separate `Get-Command` check in the pre-flight, which is where it has to be: the functions are
+defined further down the script than the catalog validation runs.
 
 `Bmp280Check` links `IntegrationTest.cs` as a shared source file instead of referencing
 `TestSupport` as a project. That kept the WiFi/networking assemblies out of a deliberately

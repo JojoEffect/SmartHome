@@ -1718,15 +1718,38 @@ try {
             # check that returned $null used to fall through and be measured as a
             # device-decided one, which reads as a device that never emitted a marker.
             if ($settings.Contains('Verdict')) {
-                $verdict = & $settings.Verdict -Settings $settings -Port $mqttPort -LogPath $logFile
+                try {
+                    $verdict = & $settings.Verdict -Settings $settings -Port $mqttPort -LogPath $logFile
 
-                $outcome = $verdict.Outcome
-                $detail = $verdict.Detail
+                    # Named here rather than left to Set-StrictMode. A function that
+                    # falls off the end returns $null, and $verdict.Outcome then throws
+                    # a PropertyNotFoundException -- reported in the host's language,
+                    # naming neither the test nor the contract it broke, which is the
+                    # kind of failure this dispatch exists to stop producing.
+                    if ($null -eq $verdict) {
+                        throw ("{0} returned no verdict. A verdict function must return a hashtable with Outcome and Detail." -f $settings.Verdict)
+                    }
 
-                # A check that owns the broker took it away to make its measurement.
-                # Whatever happened, leave one up for the tests that follow.
-                if ($settings.OwnsBroker -and -not (Get-SmartHomeDevEnvState -Port $mqttPort)) {
-                    Start-SuiteBroker -Port $mqttPort
+                    $outcome = $verdict.Outcome
+                    $detail = $verdict.Detail
+                }
+                finally {
+                    # A check that owns the broker took it away to make its measurement,
+                    # and it can fail with the broker still down -- the conformance check
+                    # replaces the broker mid-run, so anything throwing after that leaves
+                    # none. In the finally for that reason: without it, one failed check
+                    # turns every test after it into a second, unrelated failure that
+                    # hides the first.
+                    if ($settings.OwnsBroker -and -not (Get-SmartHomeDevEnvState -Port $mqttPort)) {
+                        # Caught, because a broker that will not come back must not
+                        # replace the failure already on its way out of this block.
+                        try {
+                            Start-SuiteBroker -Port $mqttPort
+                        }
+                        catch {
+                            Write-Warning ("Could not restore the broker after {0}: {1}" -f $testName, $_.Exception.Message)
+                        }
+                    }
                 }
             }
             else {
