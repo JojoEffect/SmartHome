@@ -359,20 +359,27 @@ for the interface instead of racing it.
   works; that's what `integrationTests` is for.
 
 Those tests differ in which dependency they exercise, as above, and separately in *who decides
-the verdict*. The latter is declared per entry by the `Kind` field in `$testCatalog` in
-`Run-IntegrationTests.ps1`, and there are three (not the same three as the locations above):
+the verdict*. The latter is declared per entry in `$testCatalog` in `Run-IntegrationTests.ps1`,
+by two capability fields rather than by a kind name: `Verdict` names the function that returns
+the outcome, and `OwnsBroker` says that function stops and starts the broker itself — which is
+what `-NoBroker` refuses. An entry that names no `Verdict` is device-decided. The run loop reads
+both generically (one invoke by name, one shared epilogue), so a fourth kind of check is a new
+function plus its catalog entry, with no branch or guard elsewhere to keep in step. The three
+that exist are still worth naming (not the same three as the locations above):
 
 - **`DeviceMarker`** — the device decides. The runner captures managed debug output and reads
-  the test's own `[ITEST]` marker. WifiCheck, MqttCheck and Bmp280Check work this way.
+  the test's own `[ITEST]` marker. WifiCheck, MqttCheck and Bmp280Check work this way, and
+  their entries name no `Verdict`.
 - **`HomieConformance`** — the host measures a purpose-built device against the Homie v4
   convention: mandatory attributes and their retained flags, one property of every datatype with
   its `$format`/`$unit`/`$settable`/`$retained`, a `/set` command applied and reflected back, a
   payload each datatype's own `$format` forbids that must be refused rather than applied, the
   `alert` and `sleeping` states driven through a control property, a refused transition that
   must not be advertised as if it had happened, and a full re-announce after the broker is
-  replaced. `HomieClientCheck` is this kind. Retained-ness is read from a *fresh*
-  subscriber (`mosquitto_sub -F '%t %r %p'`), because MQTT only sets the retain flag when
-  replaying from the store — a live retained publish arrives with the flag clear.
+  replaced. `HomieClientCheck` is this kind (`Verdict = 'Invoke-HomieConformanceCheck'`).
+  Retained-ness is read from a *fresh* subscriber (`mosquitto_sub -F '%t %r %p'`), because MQTT
+  only sets the retain flag when replaying from the store — a live retained publish arrives with
+  the flag clear.
 
   The refused transition is asserted **on the wire, about the device**, not on where the
   retained store settled — issue #36 closed on that distinction. A settled per-topic read
@@ -393,10 +400,10 @@ the verdict*. The latter is declared per entry by the `Kind` field in `$testCata
   only prove the *connection* returned. Publishing resumes the moment the socket is up, so a
   reconnect that replayed no subscriptions (a live client subscribed to nothing, which is what a
   throw out of `ResubscribeCachedTopics` used to leave behind) is indistinguishable from a
-  healthy one until something is sent *to* the device. `MqttReconnectCheck` is this kind, and it
-  deliberately emits no `[ITEST]` marker — a device claiming it reconnected would be a second,
-  weaker verdict competing with the evidence at the broker. See the `smarthome-mqtt-reconnect`
-  skill.
+  healthy one until something is sent *to* the device. `MqttReconnectCheck` is this kind
+  (`Verdict = 'Invoke-BrokerOutageCheck'`), and it deliberately emits no `[ITEST]` marker — a
+  device claiming it reconnected would be a second, weaker verdict competing with the evidence at
+  the broker. See the `smarthome-mqtt-reconnect` skill.
 
 DeviceMarker tests report by writing a marker line to managed debug output:
 
@@ -409,7 +416,12 @@ DeviceMarker tests report by writing a marker line to managed debug output:
 these, and `Run-IntegrationTests.ps1` parses them. A device app never exits with a status code —
 these markers *are* the exit code. Emit one as soon as the outcome is known, before any idle
 loop. Adding a new integration test means: new project under `src\integrationTests`, emit the
-marker, add it to `$testCatalog` in `Run-IntegrationTests.ps1`.
+marker, add it to `$testCatalog` in `Run-IntegrationTests.ps1`. A host-decided test emits no
+marker and instead adds a verdict function, names it in its entry's `Verdict`, and lists that
+function's required settings under the same name in `$requiredCatalogKeys` — which doubles as the
+list of names an entry may point at. That the name resolves to a function that actually exists is
+a separate `Get-Command` check in the pre-flight, which is where it has to be: the functions are
+defined further down the script than the catalog validation runs.
 
 `Bmp280Check` links `IntegrationTest.cs` as a shared source file instead of referencing
 `TestSupport` as a project. That kept the WiFi/networking assemblies out of a deliberately
