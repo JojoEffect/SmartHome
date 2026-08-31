@@ -24,7 +24,9 @@
     look at. On failure it exits 1 and prints the captured device log path for the
     failing test, which is where any real investigation starts. Alongside it in the same
     directory are the broker's own log and the homie/# log for every broker generation
-    the run went through, kept because the dev environment deletes both at teardown.
+    the run went through, kept because the dev environment deletes both at teardown, and
+    -- for the conformance check -- one file per snapshot window, which is the only place
+    the retain flags a verdict was reached on can still be read.
 
     *** HARDWARE: this flashes and runs code on the physical device on the configured
     COM port, once per test. Treat it exactly like Deploy-ToDevice.ps1. ***
@@ -44,9 +46,10 @@
     tearing down someone else's broker is not theirs to do.
 
 .PARAMETER LogDirectory
-    Where to write the per-test device logs, and the preserved broker and homie/# logs
-    that go with them. Defaults to a timestamped folder under the system temp directory;
-    the path is printed at the end of the run.
+    Where to write the per-test device logs, the preserved broker and homie/# logs that
+    go with them, and the conformance check's snapshot captures. Defaults to a
+    timestamped folder under the system temp directory; the path is printed at the end
+    of the run.
 
 .EXAMPLE
     .\scripts\Run-IntegrationTests.ps1
@@ -230,6 +233,40 @@ function Save-BrokerEvidence {
             # called from a finally where a throw would replace the suite's own outcome.
             Write-Warning ("Could not preserve {0}: {1}" -f $source, $_.Exception.Message)
         }
+    }
+}
+
+function Save-SnapshotEvidence {
+    # The fresh-subscriber window a conformance verdict is actually computed from.
+    #
+    # Save-BrokerEvidence keeps the broker's own log and the long-running homie/# log,
+    # and neither can answer the question a lost /set raises: what the check *saw*. The
+    # long-running log carries no retain flags -- MQTT sets the flag only when replaying
+    # from the store to a new subscriber -- so "was this the retained store or a live
+    # echo" is readable in the snapshot capture and nowhere else. Start-HomieCapture
+    # deletes the previous capture at the start of every window, so a conformance run
+    # opened ~25 of them and kept none. That is the "left no evidence" half of issue #35:
+    # the run that lost all five /set commands left nothing behind to read.
+    #
+    # Named by the phase as well as the number so the files can be picked out without the
+    # console breakdown next to them -- a /set phase that cost ten windows leaves ten
+    # files saying so.
+    param([hashtable]$Capture)
+
+    $phase = if ($null -eq $script:currentPhase) { 'unphased' } else { $script:currentPhase.Name }
+    # Phase names are prose -- '/set round-trip', 'out-of-format /set' -- and two of them
+    # carry a path separator.
+    $slug = ($phase -replace '[^A-Za-z0-9]+', '-').Trim('-').ToLowerInvariant()
+
+    $destination = Join-Path $LogDirectory ("{0}-snapshot-{1:d3}-{2}.log" -f $script:evidenceLabel, $script:snapshotsTaken, $slug)
+    try {
+        # The subscriber has just been killed, so nothing holds this open -- but the copy
+        # is in a finally either way, for the same reason as above: evidence must never
+        # be what fails a run.
+        Copy-Item -LiteralPath $Capture.Path -Destination $destination -ErrorAction Stop
+    }
+    catch {
+        Write-Warning ("Could not preserve the snapshot capture {0}: {1}" -f $Capture.Path, $_.Exception.Message)
     }
 }
 
@@ -648,6 +685,12 @@ $SnapshotSettleSeconds = 3
 # terminating error, which would arrive as an 'ERROR' verdict blamed on the device.
 $script:snapshotsTaken = 0
 
+# The conformance phase a snapshot belongs to, for the file Save-SnapshotEvidence names
+# after it. Set by Start-ConformancePhase, and declared here for the same StrictMode
+# reason as the counter above: Stop-HomieCapture reads it on every window, and only the
+# conformance check ever assigns it.
+$script:currentPhase = $null
+
 function Get-HomieRetainedSnapshot {
     # What a controller joining *now* would see: the broker's retained store.
     #
@@ -765,15 +808,31 @@ function Stop-HomieCapture {
     # figure that explains a run's duration, and it cannot be read off the code.
     $script:snapshotsTaken++
 
-    Start-Sleep -Seconds $SettleSeconds
-    # See #36: taskkill /F does not wait for mosquitto_sub to flush. Its stdout is
-    # redirected to a file, so the CRT buffers fully (~4KB) rather than by line, and
-    # whatever is still in that buffer dies with the process. Only the refused-transition
-    # step depends on the TAIL of a window -- every other caller needs the bulk retained
-    # replay, which is far past the buffer boundary by the time the window closes.
-    Stop-SmartHomeProcessTree -ProcessId $Capture.ProcessId
+    # Item 2 of #36 recorded that taskkill /F would lose whatever mosquitto_sub still had
+    # in its stdio buffer -- redirected to a file, so full buffering (~4KB) rather than
+    # line buffering -- and that a capture smaller than that boundary would therefore
+    # arrive truncated. Measured against Mosquitto 2.0.22 on this machine and it does not
+    # happen: mosquitto_sub flushes per message. A five-topic store is 105 bytes on disk
+    # 200ms into the window, a message published 1s later is on disk 200ms after that,
+    # and both survive the kill unchanged; a 200-topic store came back complete, all 200
+    # lines. The tail of a window is not at risk, whatever its size.
+    #
+    # Which is why the capture below is preserved rather than treated as unreliable: what
+    # it holds is what the subscriber received.
+    try {
+        Start-Sleep -Seconds $SettleSeconds
+        Stop-SmartHomeProcessTree -ProcessId $Capture.ProcessId
 
-    return @(Get-Content -Path $Capture.Path -ErrorAction SilentlyContinue)
+        return @(Get-Content -Path $Capture.Path -ErrorAction SilentlyContinue)
+    }
+    finally {
+        # In a finally so the evidence outlives a stop that throws. Stop-SmartHomeProcessTree
+        # on an already-dead subscriber does throw (#54), and it throws before the
+        # Get-Content above -- so the run loses the lines and, without this, the file they
+        # were in as well. #54 is the fix for the throw; this only makes sure the window
+        # is still readable afterwards.
+        Save-SnapshotEvidence -Capture $Capture
+    }
 }
 
 function ConvertFrom-HomieCaptureLine {
@@ -1219,7 +1278,9 @@ function Invoke-HomieConformanceCheck {
     # nothing is ever re-sent. Only still-pending properties are republished, and a
     # repeated command is idempotent -- the device applies the same value again and
     # publishes back the same reflection.
+    $rounds = 0
     while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        $rounds++
         foreach ($property in $pending) {
             Publish-HomieCommand -Port $Port -Topic "$node/$property/set" -Payload $commands[$property]
         }
@@ -1252,6 +1313,15 @@ function Invoke-HomieConformanceCheck {
     foreach ($property in $pending) {
         $wanted = if ($expectedEcho.Contains($property)) { $expectedEcho[$property] } else { $commands[$property] }
         $script:conformanceFailures += "/set on $property did not come back on the property topic (saw '$($lastSeen[$property])', expected '$wanted')"
+    }
+
+    # A second round means a command was lost and re-sent, which is the condition issue
+    # #35 is about -- and since the retry above makes the run PASS through it, nothing
+    # else would say so. The phase breakdown shows it as extra snapshots, but only to a
+    # reader who already knows to look; this names it, next to the preserved snapshot
+    # captures that can be read to find out what the round actually saw.
+    if ($rounds -gt 1) {
+        Write-Warning ("The /set round trip needed {0} rounds: at least one command was lost and re-sent (issue #35). The snapshot captures for this phase are in {1}." -f $rounds, $LogDirectory)
     }
 
     # ── payloads the properties' own $datatype/$format forbid ────────────────
