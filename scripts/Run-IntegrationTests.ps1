@@ -766,6 +766,25 @@ function Start-HomieCapture {
     $command = '/c ""{0}" {1} > "{2}" 2>&1"' -f $sub, $subscriberArgs, $out
     $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
 
+    # A record, not a bare pid. mosquitto_sub quits by itself when it cannot reach the
+    # broker -- measured at between 2 and 3 seconds, and it takes its cmd.exe with it --
+    # while Stop-HomieCapture holds the window open for $SnapshotSettleSeconds (3). So an
+    # unreachable broker leaves this launcher dead just BEFORE the stop, as the ordinary
+    # outcome rather than as a narrow race, and taskkill on a dead pid throws under this
+    # script's error preference (see Stop-HomieCapture). New-SmartHomeProcessRecord carries
+    # the name and start time that also tell a dead pid apart from a recycled one; -Tree
+    # because the real work is in the mosquitto_sub grandchild.
+    #
+    # Taken HERE, before the connect wait, rather than at the return: Process.ProcessName
+    # reads back $null once the process has exited -- StartTime survives, the name does not
+    # -- and Get-SmartHomeRecordedProcess skips its name comparison for a record that
+    # carries no name. A record built after the wait would therefore fall back to the
+    # start-time window alone, silently giving up the recycled-pid defence this record is
+    # here for. The wait really can outlive the launcher: against an unreachable broker it
+    # returns at ~2.4s, satisfied by the subscriber's own error rather than by a message
+    # (#59), and the launcher is gone by 3s.
+    $record = New-SmartHomeProcessRecord -Label 'homie snapshot subscriber' -Process $process -Tree
+
     if ($WaitForConnectSeconds -gt 0) {
         $connectDeadline = (Get-Date).AddSeconds($WaitForConnectSeconds)
         while ((Get-Date) -lt $connectDeadline) {
@@ -778,7 +797,7 @@ function Start-HomieCapture {
         }
     }
 
-    return @{ ProcessId = $process.Id; Path = $out }
+    return @{ Record = $record; Path = $out }
 }
 
 function Stop-HomieCapture {
@@ -824,9 +843,44 @@ function Stop-HomieCapture {
     # its bulk. Do not reintroduce -W to "fix" this: it was measured at 15.2s for a 3s
     # window here (and 6.3s for a 1s one, see $SnapshotSettleSeconds), which would cost
     # minutes across a run to solve a problem that does not exist.
-    Stop-SmartHomeProcessTree -ProcessId $Capture.ProcessId
+    #
+    # Through the recorded-process helper rather than Stop-SmartHomeProcessTree, for the
+    # reason Stop-DeviceDebugCapture uses it: taskkill on a pid that has already exited
+    # writes to stderr, PowerShell 5.1 wraps that in a NativeCommandError, and under this
+    # script's $ErrorActionPreference = 'Stop' that is terminating -- thrown out of the
+    # finally the refused-transition step closes its window in, replacing the verdict that
+    # step had already reached. Per Start-HomieCapture the subscriber really is dead by
+    # then whenever the broker is unreachable, so this was the routine path, not the edge.
+    # The helper also declines to kill a pid Windows has since reissued.
+    #
+    # Its per-process progress lines go nowhere (stream 6 is Write-Host): one line per
+    # snapshot, dozens per conformance run, for a window that is not an event worth
+    # narrating. Warnings are stream 3 and still come through, which is what the recycled
+    # pid case reports on.
+    $wasAlive = Stop-SmartHomeRecordedProcess -Record $Capture.Record 6> $null
 
-    return @(Get-Content -Path $Capture.Path -ErrorAction SilentlyContinue)
+    $lines = @(Get-Content -Path $Capture.Path -ErrorAction SilentlyContinue)
+
+    # A subscriber that was already gone did not observe the whole window, so its capture
+    # is short for a host-side reason -- indistinguishable, in the lines alone, from a
+    # device that published nothing. Said here, where the difference is known, rather than
+    # left for a caller to misread as evidence about the device.
+    #
+    # mosquitto_sub's own reason is already in $lines: its stderr shares this file, so an
+    # unreachable broker leaves 'Error: ... Connection refused' among them. That is the
+    # detail #54 records as available but unread -- and the one the old throw discarded,
+    # because it happened before this Get-Content.
+    #
+    # A warning rather than a failure, for the same reason Stop-DeviceDebugCapture warns:
+    # this also runs inside that finally, so throwing here would recreate the masking the
+    # change above exists to remove.
+    if (-not $wasAlive) {
+        $reasons = @($lines | Where-Object { $_ -match '\S' -and $null -eq (ConvertFrom-HomieCaptureLine -Line $_) })
+        $detail = if ($reasons.Count -gt 0) { $reasons -join ' / ' } else { 'it recorded no reason' }
+        Write-Warning ("The snapshot subscriber exited before its {0}s window closed, so this capture is short for a host-side reason and says nothing about the device: {1} (capture file: {2})." -f $SettleSeconds, $detail, $Capture.Path)
+    }
+
+    return $lines
 }
 
 function ConvertFrom-HomieCaptureLine {
