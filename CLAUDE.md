@@ -59,7 +59,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style | No | `smarthome-restore-packages` |
 | `scripts\Initialize-Worktree.ps1 [-NoRestore] [-MainWorktree <path>]` | Seeds a fresh linked worktree with the three git-ignored things `git worktree add` never brings: both `local.env` files, copied from the main working tree, and a restored `packages\`. Idempotent — never overwrites a config file the worktree already has, and no-ops with exit 0 in the main checkout, so it is safe to call unconditionally | No | `smarthome-init-worktree` |
 | `scripts\Clean-GitBranches.ps1 [-Worktrees] [-Delete] [-Scope Local\|Remote\|Both] [-Protect <names>]` | Classifies every worktree and every local and remote branch against `origin/main` and, with `-Delete`, removes the merged ones in one batch. Report-only without it. Keeps the base branch, anything with an open pull request, anything unmerged, and — unless `-Worktrees` frees them — the branches worktrees pin. A dirty worktree is never removed, and there is deliberately no flag that overrides that | No | `smarthome-clean-branches` |
-| `scripts\Get-BacklogPriorities.ps1 [-Hardware ...] [-TimeBudget ...] [-Theme ...] [-Overrides <path>] [-Handoff <n>] [-RankingOnly] [-Top <n>] [-Json]` | Classifies every open issue on seven axes the labels don't cover — verification trust, evidence debt, hardware-gated vs desk, capability vs velocity, risk, effort, what it unblocks — then clusters and ranks them. Run plain first; the interview in the skill turns the answers into the weighting flags for a second run. Classification is a keyword heuristic that reports its own confidence and blind spots, and `-Overrides` is how a read of the actual bodies corrects it | No | `smarthome-prioritize` |
+| `scripts\Get-BacklogPriorities.ps1 [-Hardware ...] [-TimeBudget ...] [-Theme ...] [-Overrides <path>] [-Handoff <n>] [-RankingOnly] [-Top <n>] [-Json]` | Classifies every open issue on eight axes the labels don't cover — verification trust, evidence debt, where the edit lands, what verifying it needs, capability vs velocity, risk, effort, what it unblocks — then clusters and ranks them. Run plain first; the interview in the skill turns the answers into the weighting flags for a second run. Classification is a keyword heuristic that reports its own confidence and blind spots, and `-Overrides` is how a read of the actual bodies corrects it | No | `smarthome-prioritize` |
 | `scripts\Test-Setup.ps1` | Reports everything the other scripts assume exists on this machine — both `local.env` files and their values, restored `packages\`, the test adapter, `gh` auth, MSBuild/vstest, Mosquitto, the COM port, the companion repos — all at once, rather than one abort at a time. Read-only; opens no port and touches no device | No | `smarthome-check-setup` |
 | `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` | Raw serial capture of the device's native boot log only — nanoCLR silences this at `app_main()` and switches to binary WireProtocol, so this can't see managed output | Resets only | `smarthome-watch-serial` |
 | `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot] [-NoBuild] [-BuildOnly] [-Until <regex>] [-DumpConfig]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
@@ -551,8 +551,17 @@ When the question is *what to work on next* rather than *what exists*, use
 `scripts\Get-BacklogPriorities.ps1` (skill: `smarthome-prioritize`), which scores the backlog
 on the axes the labels leave out and then re-weights for whether the device is reachable, how
 much time there is, and which cluster to work in. `-Handoff <n>` closes the loop by printing
-the top few as spin-off pointers — blocked and closed rows skipped, hardware-gated ones marked
-so the confirm-before-device-scripts rule reaches the session that picks them up.
+the top few as spin-off pointers — blocked and closed rows skipped, the ones needing hardware
+to verify marked so the confirm-before-device-scripts rule reaches the session that picks them
+up.
+
+Two of its axes look alike and are not. `Where` says where the *edit* lands; `VerifyNeeds` says
+what *proving* it takes, and the device-availability weighting — the largest multiplier in the
+script — keys off the second. They disagree for every host-side tool that only a real suite run
+can exercise: `Run-IntegrationTests.ps1` and the capture helpers are edited at a desk and
+verified on hardware. `VerifyNeeds` is read from the issue title first and from the body only
+as a fallback, because every body in this repo mentions the device; a body-derived call is
+reported at confidence `Low` and is the one to check before trusting a rank.
 
 ### File what you find
 

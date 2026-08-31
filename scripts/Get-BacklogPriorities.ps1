@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Classify the open GitHub backlog on seven axes and rank it, optionally re-weighted
+    Classify the open GitHub backlog on eight axes and rank it, optionally re-weighted
     for the session you are actually about to have.
 
 .DESCRIPTION
@@ -25,16 +25,22 @@
     caller reads the issue bodies, decides, and hands the decisions back, so the ranking
     stays reproducible instead of living in a conversation.
 
-    The seven axes, and what each answers:
+    The eight axes, and what each answers:
 
       Trust        Can this issue make a check lie -- silently pass, lose its evidence,
                    or mask a real failure? Weighted hardest, because every other verdict
                    in this repo rests on the checks being honest.
       EvidenceDebt Does it name a constant, default or calibration asserted without
                    measurement? A latent wrong answer, not a cosmetic one.
-      Where        Hardware (needs the ESP32, probe or broker physically present) or Desk
-                   (doable anywhere, CI can verify it). Splits the backlog into two
-                   schedulable pools, because CI here cannot run the integration suite.
+      Where        Where the edit lands: Hardware (device-side code) or Desk (host-side
+                   source, scripts, docs). Descriptive only -- it carries no multiplier.
+      VerifyNeeds  What PROVING the change takes: Hardware (a real device run), CI (the
+                   unit suite or a build), or None (any desk). This is what splits the
+                   backlog into two schedulable pools, because CI here cannot run the
+                   integration suite -- and it is a different question from Where. Host-side
+                   tooling for the integration suite is edited at the desk and can only be
+                   proved on hardware; Where answered for both until it was split out, and
+                   reported Desk for exactly that class.
       Track        Capability (ships device behaviour) or Velocity (speeds the dev loop).
       Risk         What leaving it open costs: SilentWrong > LoudFailure > Friction >
                    Cosmetic. The worst band that fires wins; risks are not summed.
@@ -47,9 +53,9 @@
     authenticated `gh`.
 
 .PARAMETER Hardware
-    Session shape. Available raises hardware-gated issues, Unavailable pushes them down
-    to near-zero (they are still listed -- suppressed, not deleted). Unknown (default)
-    leaves them alone.
+    Session shape. Available raises issues that need hardware to verify, Unavailable
+    pushes them down to near-zero (they are still listed -- suppressed, not deleted).
+    Unknown (default) leaves them alone. It reads VerifyNeeds, not Where.
 
 .PARAMETER TimeBudget
     Quick favours small issues, Deep favours large ones, HalfDay (default) is neutral.
@@ -57,19 +63,21 @@
 .PARAMETER Theme
     Cluster to work in this session: Trust, EvidenceDebt, Capability, Velocity, Hardware,
     or Any (default). The matching cluster is raised and everything else damped; nothing
-    is filtered out.
+    is filtered out. Hardware here means VerifyNeeds Hardware -- what needs the device to
+    prove, not what is edited device-side.
 
 .PARAMETER Overrides
     Path to a JSON file of per-issue corrections, as produced after reading the bodies:
 
         { "35": { "Trust": true, "Effort": "S", "Note": "single Write-Host guard" },
-          "26": { "Where": "Hardware", "Risk": "Friction" } }
+          "26": { "VerifyNeeds": "Hardware", "Risk": "Friction" } }
 
     Must be a JSON object keyed by issue number; an array wrapper is rejected rather than
     silently ignored. Accepted axes and values:
 
       Trust, EvidenceDebt, Blocked  JSON true / false, unquoted
       Where                         Hardware | Desk | Either | Unknown
+      VerifyNeeds                   Hardware | CI | None | Unknown
       Track                         Capability | Velocity | Either | Unknown
       Risk                          SilentWrong | LoudFailure | Friction | Cosmetic
       Effort                        S | M | L
@@ -103,8 +111,8 @@
 
 .PARAMETER Handoff
     Print the top N as pointers for spinning each one off into its own session: url, axes,
-    the full scoring trail, any override note, and a marker on the hardware-gated ones so
-    the confirm-before-device-scripts rule reaches the new session.
+    the full scoring trail, any override note, and a marker on the ones that need hardware
+    to verify, so the confirm-before-device-scripts rule reaches the new session.
 
     Three kinds of row are never handed out, however high they rank: blocked (it names what
     it is waiting for, not work that can start), closed (settled), and in-progress (a
@@ -253,6 +261,28 @@ $rules = @(
     @{ Axis = 'Desk'; W = 2; P = 'refactor|dispatch|rename|README|CONTRIBUTING|CLAUDE\.md|documentation|\bdocs?\b'; Why = 'source or doc change only' }
     @{ Axis = 'Desk'; W = 1; P = 'script|\.ps1|helper|parse|regex'; Why = 'host-side tooling' }
 
+    # --- VerifyNeeds: Hardware ------------------------------------------------
+    # Deliberately a different vocabulary from the Where rules above, because the two axes
+    # ask different questions and the same words do not answer both. Host-side tooling for
+    # the integration suite is a desk *edit* whose only proof is a real suite run, so the
+    # suite's own nouns -- its runner, its projects, its verdict machinery -- weigh as
+    # hardware here while Where goes on reading the edit exactly as it did.
+    @{ Axis = 'VerifyHardware'; W = 3; P = 'ESP32|COM\s*port|flash(ed|ing)?|on-?device|device-?side|real\s+hardware|BMP280|ADS1115|I2C|solder|wiring'; Why = 'only the device can show it' }
+    @{ Axis = 'VerifyHardware'; W = 3; P = 'integration\s+(suite|test)|Run-IntegrationTests|integrationTests|conformance|broker\s+outage'; Why = 'proved only by an integration-suite run' }
+    @{ Axis = 'VerifyHardware'; W = 3; P = 'WifiCheck|MqttCheck|Bmp280Check|MqttReconnectCheck|HomieClientCheck'; Why = 'names an on-device check' }
+    @{ Axis = 'VerifyHardware'; W = 2; P = 'commission|probe|self-?hosted\s+runner|Deploy-ToDevice|nanoff|deploy(ment)?[-\s]?(partition|padding)|DeployPartition|retained[-\s]store|\[ITEST\]'; Why = 'needs the physical setup' }
+    @{ Axis = 'VerifyHardware'; W = 1; P = 'sensor|driver|firmware|relay|actuator'; Why = 'device-side behaviour' }
+
+    # --- VerifyNeeds: CI ------------------------------------------------------
+    @{ Axis = 'VerifyCI'; W = 3; P = 'unit\s+test|nanoclr|virtual\s+device|NFUnitTest|UnitTests?\b|HomieClientTests'; Why = 'the unit suite can prove it' }
+    @{ Axis = 'VerifyCI'; W = 2; P = '\bCI\b|GitHub\s+Actions?|workflow|Dependabot|MinVer|releases?\b'; Why = 'the pipeline can prove it' }
+    @{ Axis = 'VerifyCI'; W = 1; P = 'builds?\s+every|compil'; Why = 'a build proves it' }
+
+    # --- VerifyNeeds: None ----------------------------------------------------
+    @{ Axis = 'VerifyNone'; W = 3; P = 'README|CONTRIBUTING|CLAUDE\.md|documentation|documented|\bdocs?\b'; Why = 'prose only' }
+    @{ Axis = 'VerifyNone'; W = 2; P = 'wording|spelling|typo|rename'; Why = 'no behaviour to prove' }
+    @{ Axis = 'VerifyNone'; W = 1; P = 'script|\.ps1|helper|parse|regex'; Why = 'host-side, runs anywhere' }
+
     # --- Track: Capability ----------------------------------------------------
     @{ Axis = 'Capability'; W = 3; P = 'IrrigationControl|OvenControl|RoomSensor|RainwaterCistern|new\s+device'; Why = 'device application' }
     @{ Axis = 'Capability'; W = 2; P = 'stub|not\s+implemented|\bempty\b|Homie|actuator|relay|\bMCP\b|Skills\s+Discovery'; Why = 'shippable behaviour' }
@@ -326,6 +356,7 @@ $overrideSchema = [ordered]@{
     EvidenceDebt = 'Boolean'
     Blocked      = 'Boolean'
     Where        = @('Hardware', 'Desk', 'Either', 'Unknown')
+    VerifyNeeds  = @('Hardware', 'CI', 'None', 'Unknown')
     Track        = @('Capability', 'Velocity', 'Either', 'Unknown')
     Risk         = @('SilentWrong', 'LoudFailure', 'Friction', 'Cosmetic')
     Effort       = @('S', 'M', 'L')
@@ -499,6 +530,18 @@ foreach ($issue in $issues) {
     $debtHits = Get-AxisHits -Axis 'EvidenceDebt' -Text $text
     $hardwareHits = Get-AxisHits -Axis 'Hardware' -Text $text
     $deskHits = Get-AxisHits -Axis 'Desk' -Text $text
+    # VerifyNeeds reads the subject line first, not the whole issue. The title says what an
+    # issue IS; the body says what it MENTIONS, and in this repo every body mentions the
+    # device -- the Dependabot issue names ESP32 packages, a Homie library issue walks
+    # through the conformance check, this very issue quotes `Run-IntegrationTests.ps1`.
+    # Scoring the body first made 33 of 37 issues read as hardware-verified, which is an
+    # axis carrying no information at all. The body is the fallback for a title that says
+    # nothing, and what it produces is reported at Low confidence.
+    $verifySubject = "$($issue.title)`n$($labels -join ' ')"
+    $verifyScope = 'title'
+    $verifyHardwareHits = Get-AxisHits -Axis 'VerifyHardware' -Text $verifySubject
+    $verifyCiHits = Get-AxisHits -Axis 'VerifyCI' -Text $verifySubject
+    $verifyNoneHits = Get-AxisHits -Axis 'VerifyNone' -Text $verifySubject
     $capabilityHits = Get-AxisHits -Axis 'Capability' -Text $text
     $velocityHits = Get-AxisHits -Axis 'Velocity' -Text $text
 
@@ -506,11 +549,14 @@ foreach ($issue in $issues) {
     $debtScore = Get-HitScore $debtHits
     $hardwareScore = Get-HitScore $hardwareHits
     $deskScore = Get-HitScore $deskHits
+    $verifyHardwareScore = Get-HitScore $verifyHardwareHits
+    $verifyCiScore = Get-HitScore $verifyCiHits
+    $verifyNoneScore = Get-HitScore $verifyNoneHits
     $capabilityScore = Get-HitScore $capabilityHits
     $velocityScore = Get-HitScore $velocityHits
 
     # Labels are evidence too, and stronger than prose: someone chose them deliberately.
-    if ($labels -contains 'area: sensor') { $hardwareScore += 3; $capabilityScore += 2 }
+    if ($labels -contains 'area: sensor') { $hardwareScore += 3; $verifyHardwareScore += 3; $capabilityScore += 2 }
     if ($labels -contains 'area: homie') { $capabilityScore += 2 }
     if ($labels -contains 'area: infra') { $velocityScore += 3 }
     if ($labels -contains 'type: feature') { $capabilityScore += 3 }
@@ -522,6 +568,41 @@ foreach ($issue in $issues) {
     if ($hardwareScore -gt $deskScore) { $where = 'Hardware' }
     elseif ($deskScore -gt $hardwareScore) { $where = 'Desk' }
     elseif ($hardwareScore -gt 0) { $where = 'Either' }
+
+    # VerifyNeeds asks what *proving* the change takes, which is a different question from
+    # where the edit lands and answers differently for a whole class of issue here: host-side
+    # tooling for the integration suite reads as desk work because the prose is about scripts
+    # and parsing, while nothing but a real suite run can show the change works. Where used to
+    # answer for both and carried the session multiplier, so that disagreement moved an issue
+    # further than any other single axis (#57).
+    #
+    # Ties resolve to the stricter environment rather than to Unknown, because the two
+    # mistakes do not cost the same: calling hardware work desk work burns a session that
+    # cannot finish it, while the reverse only sorts a desk issue lower than it deserved in a
+    # session that has the device anyway.
+    if (($verifyHardwareScore + $verifyCiScore + $verifyNoneScore) -eq 0) {
+        $verifyScope = 'body'
+        $verifyHardwareHits = Get-AxisHits -Axis 'VerifyHardware' -Text $body
+        $verifyCiHits = Get-AxisHits -Axis 'VerifyCI' -Text $body
+        $verifyNoneHits = Get-AxisHits -Axis 'VerifyNone' -Text $body
+        $verifyHardwareScore = Get-HitScore $verifyHardwareHits
+        $verifyCiScore = Get-HitScore $verifyCiHits
+        $verifyNoneScore = Get-HitScore $verifyNoneHits
+    }
+
+    $verifyTop = [Math]::Max($verifyHardwareScore, [Math]::Max($verifyCiScore, $verifyNoneScore))
+    $verifyNeeds = 'Unknown'
+    if ($verifyTop -gt 0) {
+        if ($verifyHardwareScore -eq $verifyTop) { $verifyNeeds = 'Hardware' }
+        elseif ($verifyCiScore -eq $verifyTop) { $verifyNeeds = 'CI' }
+        else { $verifyNeeds = 'None' }
+    }
+
+    # A body-derived call is capped at Low however many patterns fired. On the 37 issues in
+    # this repository every title-derived call was right and every wrong one came from the
+    # body, so the score is not what separates them -- the scope is.
+    $verifyConfidence = Get-Confidence $verifyTop
+    if ($verifyScope -eq 'body' -and $verifyConfidence -ne 'None') { $verifyConfidence = 'Low' }
 
     $track = 'Unknown'
     if ($capabilityScore -gt $velocityScore) { $track = 'Capability' }
@@ -572,13 +653,14 @@ foreach ($issue in $issues) {
         Trust        = $trust
         EvidenceDebt = $debt
         Where        = $where
+        VerifyNeeds  = $verifyNeeds
         Track        = $track
         Risk         = $risk
         Effort       = $effort
         DependsOn    = $dependsOn
         Unblocks     = @()
         Heuristic    = [pscustomobject]@{
-            Trust = $trust; EvidenceDebt = $debt; Where = $where
+            Trust = $trust; EvidenceDebt = $debt; Where = $where; VerifyNeeds = $verifyNeeds
             Track = $track; Risk = $risk; Effort = $effort
         }
         Overridden   = @()
@@ -586,6 +668,7 @@ foreach ($issue in $issues) {
             Trust        = Get-Confidence $trustScore
             EvidenceDebt = Get-Confidence $debtScore
             Where        = Get-Confidence ([Math]::Max($hardwareScore, $deskScore))
+            VerifyNeeds  = $verifyConfidence
             Track        = Get-Confidence ([Math]::Max($capabilityScore, $velocityScore))
             Risk         = Get-Confidence (Get-HitScore $riskHits)
             Effort       = $effortConfidence
@@ -595,6 +678,10 @@ foreach ($issue in $issues) {
             EvidenceDebt = @($debtHits | ForEach-Object { $_.Why })
             Hardware     = @($hardwareHits | ForEach-Object { $_.Why })
             Desk         = @($deskHits | ForEach-Object { $_.Why })
+            VerifyScope  = $verifyScope
+            VerifyHardware = @($verifyHardwareHits | ForEach-Object { $_.Why })
+            VerifyCI     = @($verifyCiHits | ForEach-Object { $_.Why })
+            VerifyNone   = @($verifyNoneHits | ForEach-Object { $_.Why })
             Capability   = @($capabilityHits | ForEach-Object { $_.Why })
             Velocity     = @($velocityHits | ForEach-Object { $_.Why })
             Risk         = @($riskHits | ForEach-Object { $_.Why })
@@ -611,7 +698,7 @@ foreach ($issue in $issues) {
 
 # Blocked is overridable even though it comes from a label: an issue can be waiting on
 # something real without anyone having relabelled it, and the body is what says so.
-Set-OverriddenAxes -Records $records -Axes @('Trust', 'EvidenceDebt', 'Where', 'Track', 'Risk', 'Effort', 'Blocked', 'DependsOn', 'Note')
+Set-OverriddenAxes -Records $records -Axes @('Trust', 'EvidenceDebt', 'Where', 'VerifyNeeds', 'Track', 'Risk', 'Effort', 'Blocked', 'DependsOn', 'Note')
 
 # ---------------------------------------------------------- dependency edges ----
 
@@ -685,13 +772,17 @@ foreach ($record in $records) {
 
     # ---- session weighting: multiplicative, so the base score stays readable ----
 
-    if ($record.Where -eq 'Hardware') {
-        if ($Hardware -eq 'Unavailable') { $score *= 0.15; $why += 'hardware-gated, device unavailable x0.15' }
-        elseif ($Hardware -eq 'Available') { $score *= 1.25; $why += 'hardware-gated, device available x1.25' }
+    # Keyed on VerifyNeeds rather than Where: the question a session with or without the
+    # device needs answered is whether it can PROVE the change, not where the edit is typed.
+    # This is the largest multiplier in the script, so it belongs on the axis that actually
+    # answers it (#57).
+    if ($record.VerifyNeeds -eq 'Hardware') {
+        if ($Hardware -eq 'Unavailable') { $score *= 0.15; $why += 'needs hardware to verify, device unavailable x0.15' }
+        elseif ($Hardware -eq 'Available') { $score *= 1.25; $why += 'needs hardware to verify, device available x1.25' }
     }
-    elseif ($record.Where -eq 'Desk' -and $Hardware -eq 'Available') {
+    elseif (@('CI', 'None') -contains $record.VerifyNeeds -and $Hardware -eq 'Available') {
         $score *= 0.9
-        $why += 'desk work while the device is free x0.9'
+        $why += 'verifiable without the device while it is free x0.9'
     }
 
     if ($TimeBudget -eq 'Quick') {
@@ -710,7 +801,7 @@ foreach ($record in $records) {
             'EvidenceDebt' { $matchesTheme = $record.EvidenceDebt }
             'Capability' { $matchesTheme = ($record.Track -eq 'Capability') }
             'Velocity' { $matchesTheme = ($record.Track -eq 'Velocity') }
-            'Hardware' { $matchesTheme = ($record.Where -eq 'Hardware') }
+            'Hardware' { $matchesTheme = ($record.VerifyNeeds -eq 'Hardware') }
         }
         if ($matchesTheme) { $score *= 1.5; $why += "theme $Theme x1.5" }
         else { $score *= 0.7; $why += "off theme $Theme x0.7" }
@@ -843,12 +934,12 @@ Write-Cluster -Title 'Capability' -Color Green -Items @($ranked | Where-Object {
     -Meaning 'ships device behaviour'
 Write-Cluster -Title 'Velocity' -Color Blue -Items @($ranked | Where-Object { $_.Track -eq 'Velocity' }) `
     -Meaning 'speeds the dev loop'
-Write-Cluster -Title 'Hardware-gated' -Color Magenta -Items @($ranked | Where-Object { $_.Where -eq 'Hardware' }) `
-    -Meaning 'needs the ESP32, probe or broker present; CI cannot verify these'
+Write-Cluster -Title 'Hardware-gated' -Color Magenta -Items @($ranked | Where-Object { $_.VerifyNeeds -eq 'Hardware' }) `
+    -Meaning 'only a real device run can prove these; CI cannot, wherever the edit lands'
 Write-Cluster -Title 'Blocked' -Color DarkGray -Items @($ranked | Where-Object { $_.Blocked }) `
     -Meaning 'status: blocked - the body names what it is waiting for'
 
-$unclassified = @($ranked | Where-Object { $_.Where -eq 'Unknown' -or $_.Track -eq 'Unknown' -or $_.Confidence.Effort -eq 'None' })
+$unclassified = @($ranked | Where-Object { $_.Where -eq 'Unknown' -or $_.VerifyNeeds -eq 'Unknown' -or $_.Track -eq 'Unknown' -or $_.Confidence.Effort -eq 'None' })
 if ($unclassified.Count -gt 0) {
     Write-Cluster -Title 'Needs a human call' -Color DarkYellow -Items $unclassified `
         -Meaning 'no signal on at least one axis - read the body and correct it with -Overrides'
@@ -859,8 +950,8 @@ if ($unclassified.Count -gt 0) {
 Write-Host ''
 Write-Host 'RANKING' -ForegroundColor White
 Write-Host ''
-Write-Host ('  {0,-4} {1,-6} {2,-7} {3,-9} {4,-12} {5,-6} {6,-11} {7}' -f 'Rank', 'Issue', 'Prio', 'Where', 'Risk', 'Effort', 'Track', 'Title')
-Write-Host ('  ' + ('-' * 112)) -ForegroundColor DarkGray
+Write-Host ('  {0,-4} {1,-6} {2,-4} {3,-8} {4,-8} {5,-12} {6,-6} {7,-11} {8}' -f 'Rank', 'Issue', 'Prio', 'Where', 'Verify', 'Risk', 'Effort', 'Track', 'Title')
+Write-Host ('  ' + ('-' * 117)) -ForegroundColor DarkGray
 
 $shown = if ($Top -gt 0) { @($ranked | Select-Object -First $Top) } else { $ranked }
 $rank = 0
@@ -885,8 +976,8 @@ foreach ($record in $shown) {
     if ($record.Blocked) { $color = 'DarkGray' }
     if ($record.State -ne 'OPEN') { $color = 'DarkGray' }
 
-    Write-Host ('  {0,-4} #{1,-5} {2,-7} {3,-9} {4,-12} {5,-6} {6,-11} {7}' -f `
-            $rank, $record.Number, $record.Relative, $record.Where, $record.Risk, $record.Effort, $record.Track, $title) -ForegroundColor $color
+    Write-Host ('  {0,-4} #{1,-5} {2,-4} {3,-8} {4,-8} {5,-12} {6,-6} {7,-11} {8}' -f `
+            $rank, $record.Number, $record.Relative, $record.Where, $record.VerifyNeeds, $record.Risk, $record.Effort, $record.Track, $title) -ForegroundColor $color
 }
 
 if ($Top -gt 0 -and $ranked.Count -gt $Top) {
@@ -905,8 +996,8 @@ if ($Handoff -gt 0) {
         Write-Host ''
         Write-Host ("  #{0} - {1}" -f $record.Number, $record.Title) -ForegroundColor Cyan
         Write-Host ("    {0}" -f $record.Url) -ForegroundColor DarkGray
-        Write-Host ("    prio {0}  {1}  risk {2}  effort {3}  {4}" -f `
-                $record.Relative, $record.Where, $record.Risk, $record.Effort, $record.Track)
+        Write-Host ("    prio {0}  edit {1}  verify {2}  risk {3}  effort {4}  {5}" -f `
+                $record.Relative, $record.Where, $record.VerifyNeeds, $record.Risk, $record.Effort, $record.Track)
         Write-Host ("    why: {0}" -f (@($record.Why) -join ' ; ')) -ForegroundColor DarkGray
 
         if (@($record.Overridden).Count -gt 0) {
@@ -918,7 +1009,7 @@ if ($Handoff -gt 0) {
         if (@($record.Unblocks).Count -gt 0) {
             Write-Host ("    unblocks: {0}" -f ((@($record.Unblocks) | ForEach-Object { "#$_" }) -join ', ')) -ForegroundColor DarkGray
         }
-        if ($record.Where -eq 'Hardware') {
+        if ($record.VerifyNeeds -eq 'Hardware') {
             Write-Host '    HARDWARE: the handoff prompt must carry the confirm-before-device-scripts rule.' -ForegroundColor Yellow
         }
     }
@@ -933,6 +1024,8 @@ Write-Host ''
 $flagLegend = '  Flags: T verification trust, E evidence debt, U unblocks another issue, B blocked'
 if ($State -ne 'open') { $flagLegend += ', C closed' }
 Write-Host $flagLegend -ForegroundColor DarkGray
+Write-Host '  Where is where the edit lands; Verify is what proving it needs, and is the axis' -ForegroundColor DarkGray
+Write-Host '  the -Hardware session weighting keys off. They disagree, and that is the point.' -ForegroundColor DarkGray
 Write-Host '  Prio is 0-100 against the top of this run, so the two rounds share one scale.' -ForegroundColor DarkGray
 if ($weighted) {
     Write-Host '  It is session-weighted; the raw and unweighted values are Score and BaseScore in -Json.' -ForegroundColor DarkGray
