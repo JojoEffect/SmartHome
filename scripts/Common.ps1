@@ -203,19 +203,32 @@ function Get-SmartHomeMainWorktreeRoot {
 
     $repoRoot = Get-SmartHomeRepoRoot
 
+    $commonDir = $null
+    $gitExit = 1
     try {
         # --path-format=absolute would save the rooting dance below, but that flag is
         # git 2.31+. Plain --git-common-dir answers on every version, relatively.
         $commonDir = git -C $repoRoot rev-parse --git-common-dir 2>$null
+
+        # Read inside the try, not after it. Two different ways this line can throw,
+        # and both have to land in the catch for the function to keep its "$null when
+        # git can't answer" contract:
+        #   - git is not on PATH at all -- $ErrorActionPreference = 'Stop' makes the
+        #     CommandNotFoundException terminating;
+        #   - `git` resolves to a PowerShell function or alias rather than the
+        #     executable (profile wrappers, corporate shims), so no native command
+        #     ran and $LASTEXITCODE was never set -- which Set-StrictMode -Version
+        #     Latest turns into a terminating "variable cannot be retrieved" error.
+        # Read outside the try, that second one escapes the function and takes down
+        # Test-Setup.ps1, whose whole point is to report every gap rather than abort
+        # on the first.
+        $gitExit = $LASTEXITCODE
     }
     catch {
-        # git not on PATH at all. $ErrorActionPreference = 'Stop' turns the
-        # CommandNotFoundException terminating, so the exit-code check below would
-        # never be reached without this.
         return $null
     }
 
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commonDir)) {
+    if ($gitExit -ne 0 -or [string]::IsNullOrWhiteSpace($commonDir)) {
         return $null
     }
 

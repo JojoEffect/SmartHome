@@ -25,11 +25,12 @@
     config file is missing, which is the very state this script exists to repair.
 
 .PARAMETER NoRestore
-    Skip the packages\ restore and copy the config files only. The restore is the slow
-    part of a first run (the copy is a few milliseconds; the restore has to copy every
-    referenced package folder out of the local NuGet cache), so this is the switch to
-    pass when something cheap needs to run unattended -- a SessionStart hook, say --
-    or when packages\ is known good.
+    Skip the packages\ restore and copy the config files only. The restore is the
+    larger half of the work, but not by as much as it sounds: a fresh worktree seeds
+    in about 1.6s all in, an already-seeded one re-runs in 0.5s, and the config copy
+    alone is 0.03s. So this switch is for when packages\ is known good, not a default
+    to reach for -- skipping the restore leaves the CS0518 wall in place for the first
+    build, which is the failure this script exists to prevent.
 
 .PARAMETER MainWorktree
     Root of the working tree to copy the config files from. Defaults to the main
@@ -42,7 +43,7 @@
 
 .EXAMPLE
     .\scripts\Initialize-Worktree.ps1 -NoRestore
-    Copy the config files only. Fast enough to run on every session start.
+    Copy the config files only, leaving packages\ alone.
 #>
 
 [CmdletBinding()]
@@ -63,12 +64,17 @@ $scriptsDir = Get-SmartHomeScriptsDir
 # ------------------------------------------------------------- which checkout? --
 
 if ($MainWorktree) {
-    if (-not (Test-Path $MainWorktree)) {
-        Write-Error "-MainWorktree does not exist: $MainWorktree"
+    # -LiteralPath throughout this script, never -Path. -Path interprets [ and ] as
+    # wildcards, and both are legal in a Windows directory name: with the repository
+    # at "C:\repos\SmartHome [wip]", Test-Path -Path reports False for a directory
+    # that exists, so a perfectly good -MainWorktree is rejected as missing and an
+    # already-present config file is copied over instead of kept.
+    if (-not (Test-Path -LiteralPath $MainWorktree -PathType Container)) {
+        Write-Error "-MainWorktree is not an existing directory: $MainWorktree"
         exit 1
     }
 
-    $sourceRoot = (Resolve-Path $MainWorktree).Path
+    $sourceRoot = (Resolve-Path -LiteralPath $MainWorktree).Path
 
     if ($sourceRoot.TrimEnd('\', '/') -eq $repoRoot.TrimEnd('\', '/')) {
         Write-Error @"
@@ -126,19 +132,19 @@ foreach ($name in $configFiles) {
     $destination = Join-Path $scriptsDir $name
     $source = Join-Path $sourceScripts $name
 
-    if (Test-Path $destination) {
+    if (Test-Path -LiteralPath $destination) {
         Write-Host "  kept:    scripts\$name (already present)" -ForegroundColor DarkGray
         $kept++
         continue
     }
 
-    if (-not (Test-Path $source)) {
+    if (-not (Test-Path -LiteralPath $source)) {
         Write-Host "  MISSING: scripts\$name -- not in $sourceScripts either" -ForegroundColor Red
         $absent.Add($name)
         continue
     }
 
-    Copy-Item -Path $source -Destination $destination
+    Copy-Item -LiteralPath $source -Destination $destination
     Write-Host "  copied:  scripts\$name" -ForegroundColor Green
     $copied++
 }

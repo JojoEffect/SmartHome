@@ -12,8 +12,8 @@
               "-NoProfile",
               "-ExecutionPolicy",
               "Bypass",
-              "-File",
-              "${CLAUDE_PROJECT_DIR}/scripts/Initialize-Worktree.ps1"
+              "-Command",
+              "$dir = $env:CLAUDE_PROJECT_DIR; if (-not $dir) { $dir = $PWD.Path }; $s = Join-Path $dir 'scripts\\Initialize-Worktree.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; & $s; exit $LASTEXITCODE"
             ],
             "timeout": 120,
             "statusMessage": "Seeding worktree (config files + packages)..."
