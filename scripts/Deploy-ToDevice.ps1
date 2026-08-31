@@ -70,16 +70,22 @@ param(
     # with the whole of src\devices and src\integrationTests in mind.
     [int]$FallbackPadSize = 409600,
 
-    # Refuse to pad past the deploy partition; writing beyond it would run into the
-    # "config" partition that starts where this one ends, at 0x3C0000. Measured
-    # 2026-08-30 off the device the same way -DeployAddress above was -- the boot-log
-    # partition table from .\scripts\Watch-DeviceSerial.ps1, this time the "deploy"
+    # Refuse to pad past the deploy partition; nothing outside it is ours to erase.
+    # Measured 2026-08-30 off the device from the same boot-log partition table as
+    # -DeployAddress above (.\scripts\Watch-DeviceSerial.ps1), this time the "deploy"
     # line's Length column rather than its Offset:
+    #   2 factory   factory app    00 00 00010000 001d0000
     #   3 deploy    Unknown data   01 84 001e0000 001c0000
     #   4 config    Unknown data   01 83 003c0000 00040000
-    # (4MB flash, nanoCLR 1.17.0.339, ESP-IDF v5.5.4). Until then the value had only
-    # ever been copied from a prose comment of unclear provenance -- issue #47.
-    # Re-derive it there if a firmware update changes the layout.
+    # on a 4MB flash running nanoCLR 1.17.0.339 / ESP-IDF v5.5.4. So deploy runs
+    # 0x1E0000..0x3A0000, and what follows it is NOT the next partition: config does
+    # not start until 0x3C0000, leaving 0x20000 (128KB) of unallocated flash in
+    # between. Don't reach for that headroom -- it is outside the partition the CLR
+    # scans and outside what nanoff was told to write, so it buys nothing, and the
+    # next firmware image is free to lay its partitions out differently.
+    # Until this was measured the value had only ever been copied from a prose
+    # comment of unclear provenance -- issue #47. Re-read that "deploy" line if a
+    # firmware update changes the layout.
     [int]$DeployPartitionSize = 0x1C0000,
 
     # Ignore any recorded size and pad to -FallbackPadSize. Use this after something
