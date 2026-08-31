@@ -4,18 +4,21 @@
 
 .DESCRIPTION
     One entry point for every project under src\integrationTests. Every test is
-    deployed to the ESP32 first; how its verdict is reached depends on its kind:
+    deployed to the ESP32 first; how its verdict is reached is declared by its entry
+    in $testCatalog below:
 
-      DeviceMarker  the device decides. The runner reboots it, captures managed
-                    debug output, and reads the "[ITEST] <name> PASS/FAIL" marker
-                    the test emits (see
-                    src\integrationTests\TestSupport\IntegrationTest.cs).
+      device-decided  the entry names no Verdict function. The runner reboots the
+                      device, captures managed debug output, and reads the
+                      "[ITEST] <name> PASS/FAIL" marker the test emits (see
+                      src\integrationTests\TestSupport\IntegrationTest.cs).
 
-      BrokerOutage  the host decides. The device just publishes a heartbeat; the
-                    runner takes the broker away, brings it back, and asserts that
-                    heartbeats reappear on homie/#. A device claiming it
-                    reconnected is weaker evidence than a message actually
-                    arriving at the recreated broker.
+      host-decided    the entry names a Verdict function, which reaches the verdict
+                      from the broker's side. MqttReconnectCheck's takes the broker
+                      away and asserts heartbeats reappear on homie/#;
+                      HomieClientCheck's measures a purpose-built device against the
+                      Homie v4 convention. A device claiming it reconnected, or
+                      conformed, is weaker evidence than what actually reached the
+                      broker.
 
     A local Mosquitto broker is started detached for the run and stopped again at
     the end, even if the suite fails.
@@ -39,9 +42,9 @@
 
 .PARAMETER NoBroker
     Don't start/stop Mosquitto. Use when a broker is already running (started by
-    Start-DevEnv.ps1, or a service), or when running only non-MQTT tests. BrokerOutage
-    tests cannot run under this switch -- they need to own the broker's lifetime, and
-    tearing down someone else's broker is not theirs to do.
+    Start-DevEnv.ps1, or a service), or when running only non-MQTT tests. A test whose
+    catalog entry says OwnsBroker cannot run under this switch -- it needs to own the
+    broker's lifetime, and tearing down someone else's broker is not theirs to do.
 
 .PARAMETER LogDirectory
     Where to write the per-test device logs, and the preserved broker and homie/# logs
@@ -79,16 +82,25 @@ $mqttPort = Get-OptionalEnvValue -Name 'SMARTHOME_MQTT_PORT' -DefaultValue '1883
 # from its name (src\integrationTests\<Name>\<Name>.nfproj). Adding a test is one
 # line here plus the project itself.
 #
+# An entry declares capabilities, not a kind. Verdict names the function that decides
+# the outcome, and OwnsBroker says that function stops and starts the broker itself.
+# Both are read generically -- the run loop invokes Verdict by name, and -NoBroker
+# consults OwnsBroker -- so a new kind of check is a new function plus its entry here,
+# with no list of kinds anywhere else to keep in step. An entry that names no Verdict
+# is device-decided: the runner reads the test's own [ITEST] marker instead. (The three
+# kinds are still described by name in CLAUDE.md; they are no longer a field.)
+#
 # CaptureSeconds is a window -- "long enough that a healthy device has already
-# reported", not how long the test takes. Every DeviceMarker test emits its marker
+# reported", not how long the test takes. Every device-decided test emits its marker
 # as soon as the outcome is known and then idles. WifiCheck gets the longest window
 # because NetworkHelper's own connect timeout is 60s.
 $testCatalog = [ordered]@{
-    'WifiCheck'   = @{ Kind = 'DeviceMarker'; CaptureSeconds = 75 }
-    'MqttCheck'   = @{ Kind = 'DeviceMarker'; CaptureSeconds = 90 }
-    'Bmp280Check' = @{ Kind = 'DeviceMarker'; CaptureSeconds = 45 }
+    'WifiCheck'   = @{ OwnsBroker = $false; CaptureSeconds = 75 }
+    'MqttCheck'   = @{ OwnsBroker = $false; CaptureSeconds = 90 }
+    'Bmp280Check' = @{ OwnsBroker = $false; CaptureSeconds = 45 }
     'HomieClientCheck' = @{
-        Kind = 'HomieConformance'
+        OwnsBroker = $true
+        Verdict    = 'Invoke-HomieConformanceCheck'
         # The device this check deploys is built for the convention, not for a room:
         # one property of every datatype, settable and not, retained and not. These
         # must match src\integrationTests\HomieClientCheck\Program.cs.
@@ -99,7 +111,8 @@ $testCatalog = [ordered]@{
         RecoverySeconds = 90
     }
     'MqttReconnectCheck' = @{
-        Kind = 'BrokerOutage'
+        OwnsBroker = $true
+        Verdict    = 'Invoke-BrokerOutageCheck'
         # Topic the device publishes its heartbeat on. Must match HeartbeatTopic in
         # that project's Program.cs -- the pre-flight below checks that it does.
         HeartbeatTopic = 'homie/mqtt-reconnect-check/heartbeat'
@@ -140,29 +153,42 @@ if ($unknown.Count -gt 0) {
 # Switching those reads to $settings['Foo'] would be worse, not better: that returns
 # $null, so a forgotten CaptureSeconds would silently become a zero-length window.
 # Adding a test is advertised above as "one line here", so that line gets checked.
+#
+# Keyed by the Verdict function an entry names, which makes this table the list of
+# verdict functions the run loop may invoke: a name that is not in it is a one-line
+# error here, not a "term is not recognized" ERROR verdict 90s into the run.
+# $deviceDecidedKeys covers an entry that names no Verdict at all.
+$deviceDecidedKeys = @('CaptureSeconds')
 $requiredCatalogKeys = @{
-    'DeviceMarker'     = @('CaptureSeconds')
-    'HomieConformance' = @('DeviceId', 'NodeId', 'SettleSeconds', 'CommandTimeoutSeconds', 'RecoverySeconds')
-    'BrokerOutage'     = @('HeartbeatTopic', 'SettleSeconds', 'OutageSeconds', 'RecoverySeconds', 'EchoCommandTopic', 'EchoTopic', 'CommandTimeoutSeconds')
+    'Invoke-HomieConformanceCheck' = @('DeviceId', 'NodeId', 'SettleSeconds', 'CommandTimeoutSeconds', 'RecoverySeconds')
+    'Invoke-BrokerOutageCheck'     = @('HeartbeatTopic', 'SettleSeconds', 'OutageSeconds', 'RecoverySeconds', 'EchoCommandTopic', 'EchoTopic', 'CommandTimeoutSeconds')
 }
-$knownKinds = (@($requiredCatalogKeys.Keys) | Sort-Object) -join ', '
+$knownVerdicts = (@($requiredCatalogKeys.Keys) | Sort-Object) -join ', '
 
 foreach ($catalogTestName in $Tests) {
     $catalogEntry = $testCatalog[$catalogTestName]
 
-    if (-not $catalogEntry.Contains('Kind')) {
-        Write-Error ("Catalog entry '{0}' declares no Kind. Known kinds: {1}." -f $catalogTestName, $knownKinds)
+    # Required of every entry, device-decided ones included, because it is read as
+    # $settings.OwnsBroker on every path -- and because leaving it out would default to
+    # whichever answer is quietly wrong for the next check that owns the broker.
+    if (-not $catalogEntry.Contains('OwnsBroker')) {
+        Write-Error ("Catalog entry '{0}' declares no OwnsBroker. Say `$true if its verdict function stops and starts the broker itself, `$false otherwise." -f $catalogTestName)
         exit 1
     }
 
-    if (-not $requiredCatalogKeys.Contains($catalogEntry.Kind)) {
-        Write-Error ("Catalog entry '{0}' has unknown Kind '{1}'. Known kinds: {2}." -f $catalogTestName, $catalogEntry.Kind, $knownKinds)
-        exit 1
+    $requiredKeys = $deviceDecidedKeys
+    if ($catalogEntry.Contains('Verdict')) {
+        if (-not $requiredCatalogKeys.Contains($catalogEntry.Verdict)) {
+            Write-Error ("Catalog entry '{0}' names an unknown Verdict function '{1}'. Known: {2}." -f $catalogTestName, $catalogEntry.Verdict, $knownVerdicts)
+            exit 1
+        }
+
+        $requiredKeys = $requiredCatalogKeys[$catalogEntry.Verdict]
     }
 
-    $missingKeys = @($requiredCatalogKeys[$catalogEntry.Kind] | Where-Object { -not $catalogEntry.Contains($_) })
+    $missingKeys = @($requiredKeys | Where-Object { -not $catalogEntry.Contains($_) })
     if ($missingKeys.Count -gt 0) {
-        Write-Error ("Catalog entry '{0}' (Kind '{1}') is missing required setting(s): {2}." -f $catalogTestName, $catalogEntry.Kind, ($missingKeys -join ', '))
+        Write-Error ("Catalog entry '{0}' is missing required setting(s): {1}." -f $catalogTestName, ($missingKeys -join ', '))
         exit 1
     }
 }
@@ -455,7 +481,12 @@ function Invoke-BrokerOutageCheck {
     # heartbeats published after that phase's broker came up -- no stale hits.
     param(
         [hashtable]$Settings,
-        [string]$Port
+        [string]$Port,
+
+        # Part of the verdict-function contract the catalog dispatches through, and
+        # deliberately unused here: this check's evidence is the broker's own logs, and
+        # it captures no managed debug output from the device.
+        [string]$LogPath
     )
 
     $topic = $Settings.HeartbeatTopic
@@ -1015,9 +1046,9 @@ function Stop-ConformancePhase {
 }
 
 function Write-ConformancePhaseBreakdown {
-    # Called from the test loop, not from the check itself: the check returns from four
-    # places (two of them failure paths), and those are exactly the runs whose timing is
-    # worth seeing. One call after it returns covers all four.
+    # Called from Invoke-HomieConformanceCheck's finally, not from the measurement
+    # itself: that returns from four places (two of them failure paths), and those are
+    # exactly the runs whose timing is worth seeing. One call around it covers all four.
     Stop-ConformancePhase
 
     if ($script:conformancePhases.Count -eq 0) {
@@ -1052,6 +1083,39 @@ function Get-ConformanceCaptureSeconds {
 }
 
 function Invoke-HomieConformanceCheck {
+    # The verdict function the catalog names for HomieClientCheck: everything the
+    # conformance measurement needs around it, so the run loop needs to know none of it.
+    #
+    # -LogPath is where the managed debug output captured alongside the measurement is
+    # written. Only the device's own log can say whether it saw a command at all -- see
+    # Start-DeviceDebugCapture for why a host-decided check wants one.
+    param(
+        [hashtable]$Settings,
+        [string]$Port,
+        [string]$LogPath
+    )
+
+    $debugCapture = Start-DeviceDebugCapture -LogPath $LogPath `
+                                             -TimeoutSeconds (Get-ConformanceCaptureSeconds -Settings $Settings)
+    try {
+        return Measure-HomieConformance -Settings $Settings -Port $Port
+    }
+    finally {
+        # In the finally, because returning is not the measurement's only way out: a
+        # missing mosquitto tool, a capture file that cannot be cleared or a publish
+        # that fails all propagate under $ErrorActionPreference = 'Stop' and land in the
+        # test loop's catch as an ERROR verdict. That is the run whose phase timings are
+        # worth reading most, and it would otherwise be the one run that printed none.
+        Stop-DeviceDebugCapture -Capture $debugCapture
+
+        # After Stop-DeviceDebugCapture, not before: that call releases the COM port the
+        # next deploy needs, and it is documented not to throw -- it warns on a recycled
+        # or already-dead pid -- so ordering it first does not cost the breakdown.
+        Write-ConformancePhaseBreakdown
+    }
+}
+
+function Measure-HomieConformance {
     # Measures a purpose-built device against the Homie v4 convention, from the
     # broker's side. Every assertion is collected rather than thrown, so one run
     # reports everything that is wrong instead of only the first thing.
@@ -1562,8 +1626,20 @@ foreach ($testName in $Tests) {
         }
     }
 
-    if (($settings.Kind -eq 'BrokerOutage' -or $settings.Kind -eq 'HomieConformance') -and $NoBroker) {
+    # Read off the entry's own capability, so a check that owns the broker declares it
+    # once and every guard follows. This one is the reason that matters: forgetting to
+    # list a new kind here produced no error, only a confusing failure once the check
+    # tore down a broker it did not start.
+    if ($settings.OwnsBroker -and $NoBroker) {
         Write-Error "$testName needs to own the broker's lifetime, so it cannot run with -NoBroker. Drop the switch, or exclude it with -Tests."
+        exit 1
+    }
+
+    # The catalog validation above gates Verdict to a name this script knows; this gates
+    # a known name to a function that actually exists. It can only run here, after the
+    # function definitions -- and it still runs before the first build and flash.
+    if ($settings.Contains('Verdict') -and -not (Get-Command -Name $settings.Verdict -CommandType Function -ErrorAction SilentlyContinue)) {
+        Write-Error ("Catalog entry '{0}' names Verdict function '{1}', which this script does not define." -f $testName, $settings.Verdict)
         exit 1
     }
 }
@@ -1632,46 +1708,24 @@ try {
             Write-Host ""
 
             # ── Host-decided ──────────────────────────────────────────────────
-            # Dispatch first, then handle the verdict once. The two kinds differ only in
-            # which function produces it; everything after was duplicated line for line,
-            # and had already drifted -- only one copy carried the comment explaining why
-            # the broker is restarted.
-            $verdict = $null
-            if ($settings.Kind -eq 'HomieConformance') {
-                $debugCapture = Start-DeviceDebugCapture -LogPath $logFile `
-                                                         -TimeoutSeconds (Get-ConformanceCaptureSeconds -Settings $settings)
-                try {
-                    $verdict = Invoke-HomieConformanceCheck -Settings $settings -Port $mqttPort
-                }
-                finally {
-                    Stop-DeviceDebugCapture -Capture $debugCapture
+            # One invoke, by name, for every check whose verdict comes from the broker
+            # rather than from the device. Everything a particular check needs around
+            # itself -- the debug capture and phase breakdown the conformance check runs
+            # under, for instance -- lives inside that function, so a fourth kind of
+            # test adds no branch here and cannot be forgotten in one.
+            #
+            # Keyed off the entry rather than off the returned value: a host-decided
+            # check that returned $null used to fall through and be measured as a
+            # device-decided one, which reads as a device that never emitted a marker.
+            if ($settings.Contains('Verdict')) {
+                $verdict = & $settings.Verdict -Settings $settings -Port $mqttPort -LogPath $logFile
 
-                    # In the finally with it, because returning is not the check's only
-                    # way out: a missing mosquitto tool, a capture file that cannot be
-                    # cleared or a publish that fails all propagate under
-                    # $ErrorActionPreference = 'Stop' and land in the catch below as an
-                    # ERROR verdict. That is the run whose phase timings are worth
-                    # reading most, and outside the finally it was the one run that
-                    # printed none.
-                    #
-                    # After Stop-DeviceDebugCapture, not before: that call releases the
-                    # COM port the next deploy needs, and it is documented not to throw
-                    # -- it warns on a recycled or already-dead pid -- so ordering it
-                    # first does not cost the breakdown.
-                    Write-ConformancePhaseBreakdown
-                }
-            }
-            elseif ($settings.Kind -eq 'BrokerOutage') {
-                $verdict = Invoke-BrokerOutageCheck -Settings $settings -Port $mqttPort
-            }
-
-            if ($null -ne $verdict) {
                 $outcome = $verdict.Outcome
                 $detail = $verdict.Detail
 
-                # Both host-decided kinds take the broker away to make their measurement.
+                # A check that owns the broker took it away to make its measurement.
                 # Whatever happened, leave one up for the tests that follow.
-                if (-not (Get-SmartHomeDevEnvState -Port $mqttPort)) {
+                if ($settings.OwnsBroker -and -not (Get-SmartHomeDevEnvState -Port $mqttPort)) {
                     Start-SuiteBroker -Port $mqttPort
                 }
             }
