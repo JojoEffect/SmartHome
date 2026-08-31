@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 # propagates $WhatIfPreference into it. Without the override, a -WhatIf run reports
 # "WhatIf: Set variable SmartHomeMSBuildPath" as though it were an action the user
 # asked about, and skips the assignment -- noise in front of the real preview.
-foreach ($memo in 'SmartHomeMSBuildPath', 'SmartHomeVsTestPath', 'SmartHomeSiblingRoot') {
+foreach ($memo in 'SmartHomeMSBuildPath', 'SmartHomeVsTestPath', 'SmartHomeSiblingRoot', 'SmartHomeMainWorktreeRoot') {
     if (-not (Test-Path "variable:global:$memo")) {
         Set-Variable -Name $memo -Scope Global -Value $null -WhatIf:$false
     }
@@ -182,6 +182,82 @@ function Get-NfProjectAssemblyName {
     return [System.IO.Path]::GetFileNameWithoutExtension($ProjectPath)
 }
 
+function Get-SmartHomeMainWorktreeRoot {
+    # The root of the MAIN working tree, whether this checkout is that tree or a
+    # linked worktree under it. $null means only "git could not answer" -- no git on
+    # PATH, not a repository, an exported source tree -- never "this is the main
+    # one"; use Test-SmartHomeLinkedWorktree for that question.
+    #
+    # `git rev-parse --git-common-dir` reports the main repository's .git, which every
+    # linked worktree shares; its parent is the main working tree. That holds wherever
+    # the worktree sits, which a relative hop like ..\..\.. does not -- that one is
+    # correct only for a worktree exactly three levels down.
+    #
+    # Memoised in the global scope for the same reason as the tool lookups above: a
+    # suite run invokes sub-scripts in this one process, and each would otherwise pay
+    # for its own `git rev-parse`. A $null is deliberately not memoised -- it costs a
+    # re-probe per call in the one case where the answer is unusable anyway.
+    if ($global:SmartHomeMainWorktreeRoot) {
+        return $global:SmartHomeMainWorktreeRoot
+    }
+
+    $repoRoot = Get-SmartHomeRepoRoot
+
+    $commonDir = $null
+    $gitExit = 1
+    try {
+        # --path-format=absolute would save the rooting dance below, but that flag is
+        # git 2.31+. Plain --git-common-dir answers on every version, relatively.
+        $commonDir = git -C $repoRoot rev-parse --git-common-dir 2>$null
+
+        # Read inside the try, not after it. Two different ways this line can throw,
+        # and both have to land in the catch for the function to keep its "$null when
+        # git can't answer" contract:
+        #   - git is not on PATH at all -- $ErrorActionPreference = 'Stop' makes the
+        #     CommandNotFoundException terminating;
+        #   - `git` resolves to a PowerShell function or alias rather than the
+        #     executable (profile wrappers, corporate shims), so no native command
+        #     ran and $LASTEXITCODE was never set -- which Set-StrictMode -Version
+        #     Latest turns into a terminating "variable cannot be retrieved" error.
+        # Read outside the try, that second one escapes the function and takes down
+        # Test-Setup.ps1, whose whole point is to report every gap rather than abort
+        # on the first.
+        $gitExit = $LASTEXITCODE
+    }
+    catch {
+        return $null
+    }
+
+    if ($gitExit -ne 0 -or [string]::IsNullOrWhiteSpace($commonDir)) {
+        return $null
+    }
+
+    if (-not [System.IO.Path]::IsPathRooted($commonDir)) {
+        $commonDir = Join-Path $repoRoot $commonDir
+    }
+
+    $resolved = Resolve-Path -Path $commonDir -ErrorAction SilentlyContinue
+    if (-not $resolved) {
+        return $null
+    }
+
+    # <main repo>\.git  ->  <main repo>
+    $global:SmartHomeMainWorktreeRoot = Split-Path $resolved.Path -Parent
+    return $global:SmartHomeMainWorktreeRoot
+}
+
+function Test-SmartHomeLinkedWorktree {
+    # True only when this checkout is provably a linked worktree. The main working
+    # tree is false, and so is a checkout git cannot answer for -- a caller that
+    # seeds a worktree from its main checkout must not act on a guess.
+    $mainRoot = Get-SmartHomeMainWorktreeRoot
+    if (-not $mainRoot) {
+        return $false
+    }
+
+    return ($mainRoot.TrimEnd('\', '/') -ne (Get-SmartHomeRepoRoot).TrimEnd('\', '/'))
+}
+
 function Get-SiblingRoot {
     $override = [Environment]::GetEnvironmentVariable('SMARTHOME_NANOFW_ROOT')
     if (-not [string]::IsNullOrWhiteSpace($override)) {
@@ -199,27 +275,14 @@ function Get-SiblingRoot {
     # whatever directory this script happens to run from. Inside a linked git
     # worktree (.claude\worktrees\<name>) the plain parent directory would be the
     # worktrees folder, which would clone 14 nanoFramework repos into it and hide
-    # the siblings the main checkout already has. Resolve the main working tree via
-    # git's common dir instead; fall back to the plain parent when git can't answer
-    # (no git on PATH, not a repo, an exported source tree).
-    $repoRoot = Get-SmartHomeRepoRoot
-
-    $commonDir = git -C $repoRoot rev-parse --git-common-dir 2>$null
-    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($commonDir)) {
-        if (-not [System.IO.Path]::IsPathRooted($commonDir)) {
-            $commonDir = Join-Path $repoRoot $commonDir
-        }
-
-        $resolved = Resolve-Path -Path $commonDir -ErrorAction SilentlyContinue
-        if ($resolved) {
-            # <main repo>\.git  ->  <main repo>  ->  the directory holding it
-            $mainRepoRoot = Split-Path $resolved.Path -Parent
-            $global:SmartHomeSiblingRoot = Split-Path $mainRepoRoot -Parent
-            return $global:SmartHomeSiblingRoot
-        }
+    # the siblings the main checkout already has. Fall back to the plain parent only
+    # when git can't answer at all.
+    $mainRoot = Get-SmartHomeMainWorktreeRoot
+    if (-not $mainRoot) {
+        $mainRoot = Get-SmartHomeRepoRoot
     }
 
-    $global:SmartHomeSiblingRoot = Split-Path $repoRoot -Parent
+    $global:SmartHomeSiblingRoot = Split-Path $mainRoot -Parent
     return $global:SmartHomeSiblingRoot
 }
 

@@ -64,29 +64,15 @@ function Test-OnPath {
     return $null
 }
 
-# The main working tree, when this is running inside a linked worktree. Used only to
-# make the remediation for a missing local.env concrete: the file is git-ignored, so
-# a fresh worktree never has one even though the main checkout is fully configured.
-function Get-MainCheckoutRoot {
-    try {
-        $commonDir = & git -C $repoRoot rev-parse --path-format=absolute --git-common-dir 2>$null
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commonDir)) {
-            return $null
-        }
-
-        $mainRoot = Split-Path $commonDir -Parent
-        if ($mainRoot -and ($mainRoot.TrimEnd('\') -ne $repoRoot.TrimEnd('\'))) {
-            return $mainRoot
-        }
-    }
-    catch {
-        # git absent, or not a repository. The template hint still applies.
-    }
-
-    return $null
+# The main working tree, when this is running inside a linked worktree; $null in the
+# main checkout and whenever git cannot answer. Used only to steer the remediation:
+# both config files and packages\ are git-ignored, so a fresh worktree has none of
+# them even though the main checkout is fully configured -- and Initialize-Worktree.ps1
+# fixes all three in one call, which is a better answer than three separate ones.
+$mainCheckout = $null
+if (Test-SmartHomeLinkedWorktree) {
+    $mainCheckout = Get-SmartHomeMainWorktreeRoot
 }
-
-$mainCheckout = Get-MainCheckoutRoot
 
 # ---------------------------------------------------------------- config files --
 
@@ -110,8 +96,8 @@ foreach ($config in $configFiles) {
     if (-not (Test-Path $path)) {
         $fix = "Copy-Item `"$template`" `"$path`"  (then fill it in)"
         if ($mainCheckout) {
-            $fix = "Copy-Item `"$(Join-Path $mainCheckout "scripts\$($config.Name)")`" `"$scriptsDir`"  " +
-                   "-- this is a worktree; the file is git-ignored, so it did not come along"
+            $fix = ".\scripts\Initialize-Worktree.ps1  -- this is a worktree; the file is git-ignored, " +
+                   "so it did not come along. That copies it from $mainCheckout and restores packages\ too"
         }
 
         Add-Result -Name "scripts\$($config.Name)" -Status 'FAIL' -Detail 'missing' -Fix $fix
@@ -279,8 +265,15 @@ elseif ($missingPackages.Count -eq 0) {
     Add-Result -Name 'packages\' -Status 'OK' -Detail "all packages restored ($($configs.Count) packages.config)"
 }
 else {
+    # In a worktree, name the one script that fixes this row and the config rows
+    # together -- a fresh worktree is normally missing all of them at once.
+    $packagesFix = '.\scripts\Restore-Packages.ps1 -- otherwise every project fails to compile with CS0518, which looks like broken source'
+    if ($mainCheckout) {
+        $packagesFix = '.\scripts\Initialize-Worktree.ps1 -- otherwise every project fails to compile with CS0518, which looks like broken source'
+    }
+
     Add-Result -Name 'packages\' -Status 'FAIL' -Detail "$($missingPackages.Count) package(s) not restored, e.g. $($missingPackages[0])" `
-               -Fix '.\scripts\Restore-Packages.ps1 -- otherwise every project fails to compile with CS0518, which looks like broken source'
+               -Fix $packagesFix
 }
 
 # The unit-test adapter lives inside packages\, so this only means anything once the
@@ -291,8 +284,13 @@ if ($adapterDir) {
     Add-Result -Name 'nanoFramework test adapter' -Status 'OK' -Detail $adapterDir
 }
 else {
+    $adapterFix = '.\scripts\Restore-Packages.ps1 -- Run-Tests.ps1 cannot run without it'
+    if ($mainCheckout) {
+        $adapterFix = '.\scripts\Initialize-Worktree.ps1 -- Run-Tests.ps1 cannot run without it'
+    }
+
     Add-Result -Name 'nanoFramework test adapter' -Status 'FAIL' -Detail 'nanoFramework.TestAdapter.dll not in packages\' `
-               -Fix '.\scripts\Restore-Packages.ps1 -- Run-Tests.ps1 cannot run without it'
+               -Fix $adapterFix
 }
 
 # -------------------------------------------------------------- sibling repos --

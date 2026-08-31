@@ -57,6 +57,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
 | `scripts\Sync-NanoFrameworkRepos.ps1 [-Force]` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
 | `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style | No | `smarthome-restore-packages` |
+| `scripts\Initialize-Worktree.ps1 [-NoRestore] [-MainWorktree <path>]` | Seeds a fresh linked worktree with the three git-ignored things `git worktree add` never brings: both `local.env` files, copied from the main working tree, and a restored `packages\`. Idempotent — never overwrites a config file the worktree already has, and no-ops with exit 0 in the main checkout, so it is safe to call unconditionally | No | `smarthome-init-worktree` |
 | `scripts\Clean-GitBranches.ps1 [-Worktrees] [-Delete] [-Scope Local\|Remote\|Both] [-Protect <names>]` | Classifies every worktree and every local and remote branch against `origin/main` and, with `-Delete`, removes the merged ones in one batch. Report-only without it. Keeps the base branch, anything with an open pull request, anything unmerged, and — unless `-Worktrees` frees them — the branches worktrees pin. A dirty worktree is never removed, and there is deliberately no flag that overrides that | No | `smarthome-clean-branches` |
 | `scripts\Get-BacklogPriorities.ps1 [-Hardware ...] [-TimeBudget ...] [-Theme ...] [-Overrides <path>] [-Handoff <n>] [-RankingOnly] [-Top <n>] [-Json]` | Classifies every open issue on seven axes the labels don't cover — verification trust, evidence debt, hardware-gated vs desk, capability vs velocity, risk, effort, what it unblocks — then clusters and ranks them. Run plain first; the interview in the skill turns the answers into the weighting flags for a second run. Classification is a keyword heuristic that reports its own confidence and blind spots, and `-Overrides` is how a read of the actual bodies corrects it | No | `smarthome-prioritize` |
 | `scripts\Test-Setup.ps1` | Reports everything the other scripts assume exists on this machine — both `local.env` files and their values, restored `packages\`, the test adapter, `gh` auth, MSBuild/vstest, Mosquitto, the COM port, the companion repos — all at once, rather than one abort at a time. Read-only; opens no port and touches no device | No | `smarthome-check-setup` |
@@ -176,9 +177,9 @@ them by name; the table is for when you meet one without having run it:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| A script exits at once with `Missing: ...\scripts\local.env.ps1` | config file absent | copy the templates above, or the filled-in files from another checkout |
+| A script exits at once with `Missing: ...\scripts\local.env.ps1` | config file absent | in a worktree, `scripts\Initialize-Worktree.ps1`; otherwise copy the templates above, or the filled-in files from another checkout |
 | `Missing environment variable: SMARTHOME_...` | config file present but incomplete | fill the value in, comparing against the template |
-| A wall of `error CS0518` — predefined type `System.Object`/`System.Void` not defined — in every project | NuGet packages not restored: `packages\` is git-ignored (`.gitignore:200`) and comes with no clone | `scripts\Restore-Packages.ps1`. A plain `msbuild /t:Restore` is a no-op for this project style |
+| A wall of `error CS0518` — predefined type `System.Object`/`System.Void` not defined — in every project | NuGet packages not restored: `packages\` is git-ignored (`.gitignore:200`) and comes with no clone | `scripts\Restore-Packages.ps1` (or `scripts\Initialize-Worktree.ps1`, which also seeds the config files). A plain `msbuild /t:Restore` is a no-op for this project style |
 | `gh` fails with an authentication error | `gh auth login` never run, or the token expired | `gh auth login`. The backlog is unreadable until then |
 
 MSBuild on this machine emits **German** diagnostics, so match on the error *code* (`CS0518`)
@@ -190,16 +191,35 @@ rather than on English message text.
 `.claude\worktrees\<name>` reads *its own* `scripts\local.env.ps1`, never the main checkout's.
 Both config files and `packages\` are git-ignored, so a new worktree has neither, and the first
 script call fails there even though the main checkout is fully set up. Seed it once, from the
-worktree root (`..\..\..` being `<name>` → `worktrees` → `.claude` → the repo root):
+worktree root:
 
 ```powershell
-Copy-Item ..\..\..\scripts\local.env.ps1 scripts\
-Copy-Item ..\..\..\scripts\nanoFramework.local.env.ps1 scripts\
-.\scripts\Restore-Packages.ps1
+.\scripts\Initialize-Worktree.ps1
 ```
 
-`Test-Setup.ps1` detects the worktree and prints that first `Copy-Item` with both paths already
-filled in, so running it first is quicker than reading this.
+That copies both config files from the main working tree and restores `packages\` — about 1.6s
+on a fresh worktree. **Run it as the first command of any session in a worktree**, rather than
+waiting for a script to abort or a build to emit CS0518 everywhere. It is idempotent, never
+overwrites a config file the worktree already has, and no-ops with exit 0 in the main checkout,
+so calling it unconditionally is fine. `-NoRestore` does the config half only (~0.03s).
+
+It finds the main checkout via `git rev-parse --git-common-dir` — the main repository's `.git`,
+shared by every linked worktree, whose parent is the main working tree. Not by a relative hop:
+`..\..\..` is only correct for a worktree exactly three levels down. `Common.ps1` exposes that
+as `Get-SmartHomeMainWorktreeRoot`, with `Test-SmartHomeLinkedWorktree` for the yes/no question;
+`Get-SiblingRoot` and `Test-Setup.ps1` both read it rather than re-deriving it.
+
+`Test-Setup.ps1` detects the worktree and names this script as the fix for every row it would
+repair, so running it first is quicker than reading this.
+
+**A committed `SessionStart` hook already runs it**, so in practice a worktree seeds itself before
+the first prompt. [`.claude/settings.json`](.claude/settings.json) holds it — matcher `startup`,
+exec form (`powershell.exe` plus an argument list, no shell, so nothing depends on whether Git
+Bash is on PATH), script path via `${CLAUDE_PROJECT_DIR}`. It is the only thing in that file. The
+hook is a convenience, not the mechanism: it is the same script with no switches, so running it by
+hand stays correct, and a session that starts before the hook lands (or with hooks disabled) is
+one command away from the same state. Its stdout is injected into the session's context, which is
+the reason the script's normal-path output is a handful of lines rather than a log.
 
 ## Repository layout
 
