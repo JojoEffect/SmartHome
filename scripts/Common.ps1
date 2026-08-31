@@ -522,12 +522,21 @@ function Get-SmartHomeRecordedProcess {
 function Stop-SmartHomeProcessTree {
     # taskkill /T takes the children too. Stop-Process would kill only the
     # launcher and leave the real process running with no way back to it.
+    #
+    # The redirect is cmd's, not PowerShell's, and that is the whole point. For a pid that
+    # is already gone taskkill writes "FEHLER: Der Prozess ... wurde nicht gefunden" to
+    # stderr, and in Windows PowerShell 5.1 redirecting a native command's stderr is what
+    # wraps it in a NativeCommandError -- so the `*> $null` that used to be here did not
+    # suppress a failure, it manufactured one, terminating under the callers'
+    # $ErrorActionPreference = 'Stop'. Stop-SmartHomeRecordedProcess checks liveness first,
+    # but that is check-then-act and a process can exit in the gap. Letting cmd swallow
+    # both streams keeps this silent AND non-throwing.
     param(
         [Parameter(Mandatory = $true)]
         [int]$ProcessId
     )
 
-    & taskkill.exe /PID $ProcessId /T /F *> $null
+    & cmd.exe /c "taskkill /PID $ProcessId /T /F >nul 2>&1"
 }
 
 function Stop-SmartHomeRecordedProcess {

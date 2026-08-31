@@ -732,6 +732,25 @@ function Start-HomieCapture {
     $command = '/c ""{0}" {1} > "{2}" 2>&1"' -f $sub, $subscriberArgs, $out
     $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
 
+    # A record, not a bare pid. mosquitto_sub quits by itself when it cannot reach the
+    # broker -- measured at between 2 and 3 seconds, and it takes its cmd.exe with it --
+    # while Stop-HomieCapture holds the window open for $SnapshotSettleSeconds (3). So an
+    # unreachable broker leaves this launcher dead just BEFORE the stop, as the ordinary
+    # outcome rather than as a narrow race, and taskkill on a dead pid throws under this
+    # script's error preference (see Stop-HomieCapture). New-SmartHomeProcessRecord carries
+    # the name and start time that also tell a dead pid apart from a recycled one; -Tree
+    # because the real work is in the mosquitto_sub grandchild.
+    #
+    # Taken HERE, before the connect wait, rather than at the return: Process.ProcessName
+    # reads back $null once the process has exited -- StartTime survives, the name does not
+    # -- and Get-SmartHomeRecordedProcess skips its name comparison for a record that
+    # carries no name. A record built after the wait would therefore fall back to the
+    # start-time window alone, silently giving up the recycled-pid defence this record is
+    # here for. The wait really can outlive the launcher: against an unreachable broker it
+    # returns at ~2.4s, satisfied by the subscriber's own error rather than by a message
+    # (#59), and the launcher is gone by 3s.
+    $record = New-SmartHomeProcessRecord -Label 'homie snapshot subscriber' -Process $process -Tree
+
     if ($WaitForConnectSeconds -gt 0) {
         $connectDeadline = (Get-Date).AddSeconds($WaitForConnectSeconds)
         while ((Get-Date) -lt $connectDeadline) {
@@ -744,18 +763,7 @@ function Start-HomieCapture {
         }
     }
 
-    # A record, not a bare pid. mosquitto_sub quits by itself when it cannot reach the
-    # broker -- measured at between 2 and 3 seconds, and it takes its cmd.exe with it --
-    # while Stop-HomieCapture holds the window open for $SnapshotSettleSeconds (3). So an
-    # unreachable broker leaves this launcher dead just BEFORE the stop, as the ordinary
-    # outcome rather than as a narrow race, and taskkill on a dead pid throws under this
-    # script's error preference (see Stop-HomieCapture). New-SmartHomeProcessRecord carries
-    # the name and start time that also tell a dead pid apart from a recycled one; -Tree
-    # because the real work is in the mosquitto_sub grandchild.
-    return @{
-        Record = New-SmartHomeProcessRecord -Label 'homie snapshot subscriber' -Process $process -Tree
-        Path   = $out
-    }
+    return @{ Record = $record; Path = $out }
 }
 
 function Stop-HomieCapture {
