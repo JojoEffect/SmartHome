@@ -372,6 +372,18 @@ the verdict*. The latter is declared per entry by the `Kind` field in `$testCata
   replaced. `HomieClientCheck` is this kind. Retained-ness is read from a *fresh*
   subscriber (`mosquitto_sub -F '%t %r %p'`), because MQTT only sets the retain flag when
   replaying from the store — a live retained publish arrives with the flag clear.
+
+  The refused transition is asserted **on the wire, about the device**, not on where the
+  retained store settled — issue #36 closed on that distinction. A settled per-topic read
+  can be flipped by a QoS-1 retransmission the broker re-processes ([MQTT 3.1.1
+  §3.3.1.1](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html#_Toc398718038):
+  a receiver "cannot assume that it has seen an earlier copy" of a DUP packet), which is a
+  true statement about the store and a false one about a device that reflected and corrected
+  exactly as required — and the runner cannot tell it apart from a device that genuinely
+  republished the refused value. So the verdict comes from the ordered payloads (the
+  reflection, then the correction over it, and `$state` never carrying the forbidden value),
+  and a store that disagrees with them is reported as a warning carrying the observed
+  sequence. Same call as `2af2b12`: don't name a defect the window cannot distinguish.
 - **`BrokerOutage`** — the host decides. The device publishes a heartbeat and subscribes to an
   echo topic; the runner takes the broker away, brings a fresh one up, and asserts heartbeats
   reappear on `homie/#` with a *higher* counter than before the outage. A lower counter means the
