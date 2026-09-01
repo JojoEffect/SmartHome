@@ -1378,6 +1378,26 @@ function Write-ConformancePhaseBreakdown {
     }
 }
 
+# The lifecycle states the conformance check drives the device through: ready -> alert ->
+# ready -> sleeping -> ready, with the one transition the convention's own state machine
+# forbids asked for in the middle. alert may only return to ready (or disconnect), so
+# alert -> sleeping must be refused -- and a device that advertises it as done anyway is
+# the defect the Refused step measures.
+#
+# At file scope because two things need to agree about it and used not to:
+# Measure-HomieConformance walks it, and Get-ConformanceCaptureSeconds sizes the debug
+# capture from how many steps there are. The count was written as a literal 5 about 420
+# lines from the table, so adding a step left the capture short by one
+# CommandTimeoutSeconds -- 30s on the current catalog entry -- and took the device-side
+# log away on exactly the slow run worth reading (issue #83).
+$conformanceLifecycleSteps = @(
+    @{ Command = 'alert';    Expect = 'alert';    Refused = $false }
+    @{ Command = 'sleeping'; Expect = 'alert';    Refused = $true  }
+    @{ Command = 'ready';    Expect = 'ready';    Refused = $false }
+    @{ Command = 'sleeping'; Expect = 'sleeping'; Refused = $false }
+    @{ Command = 'ready';    Expect = 'ready';    Refused = $false }
+)
+
 function Get-ConformanceCaptureSeconds {
     # A ceiling for the debug capture that runs alongside the check, derived from the
     # check's own timeouts rather than guessed: the announce wait, the /set round trip,
@@ -1387,15 +1407,21 @@ function Get-ConformanceCaptureSeconds {
     # Deliberately loose. A capture that ends early takes the device-side evidence with
     # it exactly when the run was slow enough to be worth reading, and nothing waits out
     # this window -- Stop-DeviceDebugCapture closes it as soon as the check returns.
-    param([hashtable]$Settings)
+    param(
+        [hashtable]$Settings,
 
-    $lifecycleSteps = 5
+        # Defaulted from the step table rather than restated, which is the whole point:
+        # the two used to be separate spellings of the same number. A parameter rather
+        # than a direct read so scripts\tests can prove the budget actually moves with the
+        # count -- a test that only recomputed the formula would pass on a literal too.
+        [int]$LifecycleStepCount = $conformanceLifecycleSteps.Count
+    )
 
     # +2 rather than +1: the /set round trip and the out-of-format phase each poll for up
     # to CommandTimeoutSeconds on top of the lifecycle steps.
     return $Settings.SettleSeconds +
            $Settings.RecoverySeconds +
-           (($lifecycleSteps + 2) * $Settings.CommandTimeoutSeconds) +
+           (($LifecycleStepCount + 2) * $Settings.CommandTimeoutSeconds) +
            60
 }
 
@@ -1806,19 +1832,10 @@ function Measure-HomieConformance {
     # ── the lifecycle states a device can be driven into ─────────────────────
     Start-ConformancePhase -Name 'lifecycle'
     Write-Host "  driving `$state through alert, sleeping and a refused transition..." -ForegroundColor DarkGray
-    # ready -> alert -> ready -> sleeping -> ready, with the one transition the
-    # convention's own state machine forbids asked for in the middle. alert may only
-    # return to ready (or disconnect), so alert -> sleeping must be refused -- and a
-    # device that advertises it as done anyway is the defect the Refused step measures.
-    $lifecycleSteps = @(
-        @{ Command = 'alert';    Expect = 'alert';    Refused = $false }
-        @{ Command = 'sleeping'; Expect = 'alert';    Refused = $true  }
-        @{ Command = 'ready';    Expect = 'ready';    Refused = $false }
-        @{ Command = 'sleeping'; Expect = 'sleeping'; Refused = $false }
-        @{ Command = 'ready';    Expect = 'ready';    Refused = $false }
-    )
-
-    foreach ($step in $lifecycleSteps) {
+    # The table is at file scope ($conformanceLifecycleSteps, near
+    # Get-ConformanceCaptureSeconds), which sizes the debug capture from its length. It
+    # used to live here and the length was restated as a literal up there (issue #83).
+    foreach ($step in $conformanceLifecycleSteps) {
         if ($step.Refused) {
             # Nothing to wait for here -- the assertion is that nothing changed -- so one
             # capture window IS the measurement rather than a poll for it, and it carries

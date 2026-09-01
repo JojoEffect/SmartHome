@@ -190,6 +190,44 @@ Describe 'The shipped catalog' {
     }
 }
 
+Describe 'The conformance lifecycle table' {
+    $settings = @{ SettleSeconds = 90; RecoverySeconds = 90; CommandTimeoutSeconds = 30 }
+
+    It 'drives ready -> alert -> ready -> sleeping -> ready with one refused transition' {
+        # alert may only return to ready (or disconnect), so alert -> sleeping is the one
+        # the convention's own state machine forbids. A device that advertises it as done
+        # anyway is the defect that step exists to measure.
+        Assert-Equal -Expected 5 -Actual $conformanceLifecycleSteps.Count
+
+        $refused = @($conformanceLifecycleSteps | Where-Object { $_.Refused })
+        Assert-Equal -Expected 1 -Actual $refused.Count
+        Assert-Equal -Expected 'sleeping' -Actual $refused[0].Command
+        Assert-Equal -Expected 'alert' -Actual $refused[0].Expect -Because 'a refused command must leave $state where it was'
+    }
+
+    It 'sizes the capture from the table, not from a second spelling of its length' {
+        # The defect this replaced: the count was a literal 5 about 420 lines from the
+        # table, so a sixth step left the capture one CommandTimeoutSeconds short and took
+        # the device-side log away on exactly the slow run worth reading (issue #83).
+        # Recomputing the formula would not catch that -- moving the count has to.
+        $atFive = Get-ConformanceCaptureSeconds -Settings $settings -LifecycleStepCount 5
+        $atSix = Get-ConformanceCaptureSeconds -Settings $settings -LifecycleStepCount 6
+
+        Assert-Equal -Expected $settings.CommandTimeoutSeconds -Actual ($atSix - $atFive)
+    }
+
+    It 'defaults to the shipped table' {
+        Assert-Equal -Expected (Get-ConformanceCaptureSeconds -Settings $settings -LifecycleStepCount $conformanceLifecycleSteps.Count) `
+                     -Actual (Get-ConformanceCaptureSeconds -Settings $settings)
+    }
+
+    It 'stays longer than the phases it has to outlive' {
+        # It is a ceiling, and a loose one on purpose: nothing waits this window out, and
+        # a capture that ends early loses the evidence.
+        Assert-True -Condition ((Get-ConformanceCaptureSeconds -Settings $settings) -gt ($settings.SettleSeconds + $settings.RecoverySeconds))
+    }
+}
+
 Describe 'ConvertFrom-HomieCaptureLine' {
     It 'reads topic, retain flag and payload out of a -F "%t %r %p" line' {
         $parsed = ConvertFrom-HomieCaptureLine -Line 'homie/room-sensor-office/$state 1 ready'
