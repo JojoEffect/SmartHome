@@ -32,11 +32,17 @@ function Import-SmartHomeLocalEnv {
     $localEnv = Join-Path $scriptsDir $FileName
     $template = Join-Path $scriptsDir ($FileName -replace '\.ps1$', '.template.ps1')
 
-    if (-not (Test-Path $localEnv)) {
+    # -LiteralPath: this is the gate every other script enters through, and -Path reads
+    # '[' and ']' as wildcard character-class syntax -- so on a checkout at
+    # 'C:\repos\SmartHome [wip]' the file on disk tested as absent and every script
+    # aborted claiming a config file that was right there was missing (issue #71).
+    # Test-Setup.ps1 makes the same test and would otherwise report the opposite of
+    # this one, which is the single thing a preflight must not do.
+    if (-not (Test-Path -LiteralPath $localEnv)) {
         Write-Error @"
 Missing: $localEnv
 Copy the template and fill in your machine settings:
-    Copy-Item "$template" "$localEnv"
+    Copy-Item -LiteralPath "$template" "$localEnv"
 "@
         exit 1
     }
