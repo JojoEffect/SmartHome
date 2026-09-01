@@ -704,8 +704,9 @@ function Wait-ForAnnounceWitnessed {
     # would usually miss it entirely. The detached subscriber is connected throughout and
     # records every message as it arrives.
     #
-    # Read-only and race-free: the watermark is taken before the deploy, so an announce that
-    # lands while the deploy is still finishing is still counted. Nothing is published here.
+    # The watermark is what makes this per-boot rather than per-device: it is read in the
+    # gap between the flash's hard reset and the new image's first publish, so a line after
+    # it cannot have come from the image that was replaced. Nothing is published here.
     param(
         [string]$Port,
         [string]$DeviceId,
@@ -792,16 +793,17 @@ $script:snapshotsTaken = 0
 # conformance check ever assigns it.
 $script:currentPhase = $null
 
-# How many lines the long-running homie/# log held immediately before this test's deploy.
-# Everything after it is traffic from the image this test just flashed; everything before
-# it belongs to whatever was running on the device beforehand -- which, when the previous
-# suite run left HomieClientCheck flashed, is the *same* device id announcing on the same
-# broker. Wait-ForAnnounceWitnessed reads from here down, so an announce it witnesses is
+# How many lines the long-running homie/# log held the moment this test's flash finished.
+# Everything after it is traffic from the image just flashed; everything before it belongs
+# to whatever was running on the device beforehand -- which, when the previous suite run
+# left HomieClientCheck flashed, is the *same* device id announcing on the same broker.
+# Wait-ForAnnounceWitnessed reads from here down, so an announce it witnesses is
 # necessarily this boot's.
 #
-# Taken in the run loop rather than inside a verdict function because it has to be read
-# before the deploy, and a verdict function only runs after one. Declared here for the
-# same StrictMode reason as the counter above.
+# Taken in the run loop rather than inside a verdict function, so that it is read in the
+# gap between the flash's hard reset and the new image's first publish -- see the comment
+# at the read for why neither side of that gap will do. Declared here for the same
+# StrictMode reason as the counter above.
 $script:subscriberLogWatermark = 0
 
 function Get-HomieRetainedSnapshot {
@@ -1383,9 +1385,11 @@ function Measure-HomieConformance {
     # and published five non-retained commands into a window the new instance had not yet
     # subscribed in (#35).
     #
-    # Both waits share the one SettleSeconds budget, so this cannot make a healthy run take
-    # longer than it did before; on a healthy run the init lands within a second of boot and
-    # costs almost nothing.
+    # Both waits come out of the one SettleSeconds budget: the witness may take all of it,
+    # and whatever is left goes to the retained-ready wait below. On a healthy run the init
+    # lands within a second of the device joining, so the witness costs almost nothing and
+    # the ready wait keeps the budget it had before this check existed. The floor below is
+    # the one way the phase can run past SettleSeconds, and it costs at most one snapshot.
     $announceDeadline = (Get-Date).AddSeconds($Settings.SettleSeconds)
     $witnessed = Wait-ForAnnounceWitnessed -Port $Port `
                                            -DeviceId $deviceId `
@@ -1412,7 +1416,7 @@ function Measure-HomieConformance {
     if (-not $ready.Ok) {
         return @{
             Outcome = 'NO-RESULT'
-            Detail  = "device announced but never reached a retained `$state=ready within $($Settings.SettleSeconds)s (saw '$($ready.Seen)')"
+            Detail  = "device announced but never reached a retained `$state=ready within the ${readyBudget}s left of the $($Settings.SettleSeconds)s announce budget (saw '$($ready.Seen)')"
         }
     }
 
@@ -2063,15 +2067,28 @@ try {
         # capture failure arrives here as a terminating error, not an exit code.
         try {
             # ── Deploy ────────────────────────────────────────────────────────
-            # Where the long-running homie/# log stands *before* the flash, so a check
-            # that has to tell this boot's traffic from the previous image's can. It has
-            # to be read here: by the time a verdict function runs, the device has already
-            # been reset and may already have announced. See $script:subscriberLogWatermark.
-            $script:subscriberLogWatermark = Get-SubscriberLogLineCount -Port $mqttPort
-
             # No exit-code check: per the comment above, a failure arrives here as a
             # terminating error. One used to sit here and could never run.
             & $deployScript -Project (Get-TestProjectPath -TestName $testName) -Configuration $Configuration
+
+            # Where the long-running homie/# log stands now, so a check that has to tell
+            # this boot's traffic from the previous image's can.
+            #
+            # Immediately *after* the flash, and not before it. nanoff's last act is a hard
+            # reset, so by this line the image that was running is gone and cannot publish
+            # again, while the one just flashed still has a boot, a WiFi association and an
+            # MQTT connect ahead of it before it can announce.
+            #
+            # Read before the flash instead and the window is wide open: the deploy rebuilds
+            # and flashes for tens of seconds, and an image left running by a previous suite
+            # run reconnects to the freshly started broker somewhere inside that window and
+            # re-announces -- ReconnectingMqttClient retries, and HandleConnectionOpen takes
+            # the device back through init. That $state=init lands after a pre-deploy
+            # watermark and satisfies the witness on behalf of the boot about to be erased,
+            # which is the #35 failure this witness exists to stop.
+            #
+            # See $script:subscriberLogWatermark.
+            $script:subscriberLogWatermark = Get-SubscriberLogLineCount -Port $mqttPort
 
             # Timed apart from the measurement that follows. Deploy-ToDevice.ps1 always
             # /t:Rebuild's, so this is a full build plus a flash and swings by tens of
