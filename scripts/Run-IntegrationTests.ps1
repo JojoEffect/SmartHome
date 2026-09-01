@@ -850,9 +850,17 @@ function Start-HomieCapture {
         # a healthy device.
         #
         # A subscriber to homie/# gets the whole retained store the moment it subscribes,
-        # so the first byte in the output file is the connection being live. Callers that
-        # only want the settled result do not need this: their 3s sleep starts before the
-        # connection and is a window, not a measurement of anything published inside it.
+        # so a delivered MESSAGE is the connection being live. Not a non-empty file: the
+        # subscriber's stderr is redirected into the same file (the '2>&1' below), so its
+        # first byte can be a diagnostic about a connection that never happened, and the
+        # wait would then report the very thing it exists to establish. Measured for #59:
+        # against a port with nothing listening this returned after 2.39s of a 5s budget,
+        # with 'Error: ... the target machine actively refused it' as the only content.
+        # So the wait below reads lines through ConvertFrom-HomieCaptureLine, which already
+        # tells a message from a diagnostic, and a diagnostic delays it rather than ending
+        # it. Callers that only want the settled result do not need this: their 3s sleep
+        # starts before the connection and is a window, not a measurement of anything
+        # published inside it.
         [int]$WaitForConnectSeconds = 0
     )
 
@@ -904,20 +912,72 @@ function Start-HomieCapture {
     # -- and Get-SmartHomeRecordedProcess skips its name comparison for a record that
     # carries no name. A record built after the wait would therefore fall back to the
     # start-time window alone, silently giving up the recycled-pid defence this record is
-    # here for. The wait really can outlive the launcher: against an unreachable broker it
-    # returns at ~2.4s, satisfied by the subscriber's own error rather than by a message
-    # (#59), and the launcher is gone by 3s.
+    # here for. The wait really can outlive the launcher: against an unreachable broker
+    # mosquitto_sub is gone by ~2.4s and no message ever arrives, so the wait runs to its
+    # own deadline unless it notices -- which is why it checks this record for liveness.
     $record = New-SmartHomeProcessRecord -Label 'homie snapshot subscriber' -Process $process -Tree
 
     if ($WaitForConnectSeconds -gt 0) {
         $connectDeadline = (Get-Date).AddSeconds($WaitForConnectSeconds)
-        while ((Get-Date) -lt $connectDeadline) {
-            $captured = Get-Item -Path $out -ErrorAction SilentlyContinue
-            if ($null -ne $captured -and $captured.Length -gt 0) {
+        $connected = $false
+        $diagnostics = @()
+        $subscriberGone = $false
+
+        while ($true) {
+            # A live read of a file another process is still writing, the same way
+            # Wait-ForAnnounceWitnessed reads the long-running subscriber log: cmd.exe's
+            # redirect shares the file for reading, and Get-Content takes a fresh view
+            # each pass rather than holding one open.
+            $captured = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue)
+            $messages = @($captured | Where-Object { $null -ne (ConvertFrom-HomieCaptureLine -Line $_) })
+
+            if ($messages.Count -gt 0) {
+                $connected = $true
+                break
+            }
+
+            # Kept for the report below, not to end the wait: everything mosquitto_sub can
+            # write here before its subscription is live is a diagnostic, and none of them
+            # mean it is listening.
+            $diagnostics = @($captured | Where-Object { $_ -match '\S' })
+
+            # Nothing will arrive from a subscriber that has exited, and against an
+            # unreachable broker it exits at ~2.4s. Without this the wait would spend its
+            # whole budget on a process that is already gone -- which is what the old
+            # length test accidentally avoided, by breaking on that process's own error.
+            # Through the recorded process rather than the raw pid so a pid Windows has
+            # since reissued does not read as "still connecting".
+            if ($null -eq (Get-SmartHomeRecordedProcess -Record $record)) {
+                $subscriberGone = $true
+                break
+            }
+
+            if ((Get-Date) -ge $connectDeadline) {
                 break
             }
 
             Start-Sleep -Milliseconds 100
+        }
+
+        # Said here, where the difference is known. The caller is about to publish into
+        # this window and read the response out of it, so "no message arrived" has to be
+        # distinguishable afterwards from "the device did not answer" -- and it is not,
+        # from the captured lines alone. A warning rather than a throw, for the reason
+        # Stop-HomieCapture warns: the callers close their window in a finally, and a
+        # throw here would leave that window open.
+        if (-not $connected) {
+            $detail = if ($diagnostics.Count -gt 0) {
+                'it wrote only diagnostics: {0}' -f ($diagnostics -join ' / ')
+            }
+            elseif ($subscriberGone) {
+                'it exited without recording a reason'
+            }
+            else {
+                'it recorded nothing at all'
+            }
+
+            $ended = if ($subscriberGone) { 'exited first' } else { "did not within {0}s" -f $WaitForConnectSeconds }
+            Write-Warning ("The snapshot subscriber never delivered a message, so it may not have been subscribed when this window opened and anything published into it can be missed ({0}; {1}; capture file: {2})." -f $ended, $detail, $out)
         }
     }
 
