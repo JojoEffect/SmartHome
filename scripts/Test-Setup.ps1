@@ -225,23 +225,15 @@ foreach ($vsTool in @(
 $packagesDir = Join-Path $repoRoot 'packages'
 $missingPackages = New-Object System.Collections.Generic.List[string]
 
-# Worktrees live *inside* the main checkout (.claude\worktrees\<name>), each a full
-# copy with its own packages.config set and its own packages\ folder. Recursing into
-# them would report on other checkouts than the one being checked: from the main
-# checkout that is 155 packages.config instead of 14, and a worktree that has pinned a
-# different package version to chase a regression would produce a "not restored"
-# failure here for a package this checkout does not need.
+# This checkout's configs only: a worktree that pinned a different package version to
+# chase a regression would otherwise produce a "not restored" failure here for a
+# package this checkout does not need. Get-SmartHomePackagesConfig carries the rest of
+# the reasoning, and Restore-Packages.ps1 reads the same list, so the two agree about
+# which packages this checkout is supposed to have.
 #
-# Anchored to $repoRoot rather than matched as a substring anywhere in the path: this
-# script usually runs *from* a worktree, whose own paths all contain
-# '\.claude\worktrees\', and a bare substring test would exclude every file it is
-# supposed to check.
-$worktreesDir = Join-Path $repoRoot '.claude\worktrees'
-$configs = @(Get-ChildItem -Path $repoRoot -Filter 'packages.config' -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.FullName -notmatch '\\(bin|obj)\\' -and
-        -not $_.FullName.StartsWith($worktreesDir, [StringComparison]::OrdinalIgnoreCase)
-    })
+# -ErrorAction SilentlyContinue because a preflight reports rather than aborts: a
+# subtree the enumerator cannot read costs this one row, not the whole run.
+$configs = Get-SmartHomePackagesConfig -RepoRoot $repoRoot -ErrorAction SilentlyContinue
 
 foreach ($configFile in $configs) {
     [xml]$xml = Get-Content $configFile.FullName

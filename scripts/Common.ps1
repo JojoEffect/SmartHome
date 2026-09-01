@@ -146,6 +146,49 @@ function Get-VsTestPath {
                                 -Fallback 'vstest.console')
 }
 
+function Get-SmartHomePackagesConfig {
+    # Every packages.config *this* checkout references -- the one list both
+    # Restore-Packages.ps1 (what to restore into packages\) and Test-Setup.ps1 (what
+    # to check is restored) work from. Shared because the two have to agree about it:
+    # the exclusion below was added to the preflight and the restore kept globbing
+    # everything, so a restore run from the main checkout pulled every worktree's
+    # referenced packages into the main checkout's packages\ (issue #68).
+    #
+    # bin\ and obj\ carry build-time copies of a config, not a reference of their own.
+    #
+    # Linked worktrees live *inside* the main checkout (.claude\worktrees\<name>),
+    # each a full copy of the source tree with its own packages.config set and its own
+    # packages\ folder, so recursing into them answers for checkouts other than the one
+    # asked about. Anchored at $RepoRoot rather than matched as a substring anywhere in
+    # the path: these scripts usually run *from* a worktree, whose own paths all
+    # contain '\.claude\worktrees\', and a bare substring test would exclude every file
+    # they are supposed to see.
+    #
+    # Always an array, so a caller can read .Count even when nothing matched. The
+    # leading comma in the return is what makes that true and is not a typo: a plain
+    # `return @(...)` is unrolled on the way out, so no match reaches the caller as
+    # $null (and one match as a bare FileInfo), and $null.Count throws under
+    # Set-StrictMode. Wrapping the array in a one-element array survives the unroll.
+    #
+    # A caller that would rather skip a subtree the enumerator cannot read than abort
+    # on it passes -ErrorAction SilentlyContinue, which this advanced function
+    # propagates to the Get-ChildItem below.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    # With the trailing separator, so the anchor is the folder and not a name prefix:
+    # a sibling '.claude\worktrees-something' is a different folder and stays in.
+    $worktreesDir = (Join-Path $RepoRoot '.claude\worktrees') + [System.IO.Path]::DirectorySeparatorChar
+
+    return ,@(Get-ChildItem -Path $RepoRoot -Filter 'packages.config' -Recurse -File |
+        Where-Object {
+            $_.FullName -notmatch '\\(bin|obj)\\' -and
+            -not $_.FullName.StartsWith($worktreesDir, [StringComparison]::OrdinalIgnoreCase)
+        })
+}
+
 function Get-NanoFrameworkTestAdapterDir {
     param(
         [Parameter(Mandatory = $true)]

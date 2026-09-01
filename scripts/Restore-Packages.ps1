@@ -11,8 +11,9 @@
     extracted into the repo-local packages\ folder (e.g. after switching branches,
     or after hand-editing a packages.config to pin/revert a version).
 
-    For each <package id="X" version="Y"> across every packages.config in the repo,
-    this script:
+    For each <package id="X" version="Y"> across every packages.config in *this*
+    checkout -- linked worktrees under .claude\worktrees\ are other checkouts and are
+    left to restore their own -- this script:
       1. Skips it if packages\X.Y\ already exists.
       2. Otherwise copies it from the local NuGet global cache
          (%NUGET_PACKAGES% or ~\.nuget\packages\<id>\<version>\), which already has
@@ -44,8 +45,9 @@ if (-not (Test-Path $packagesDir)) {
     New-Item -ItemType Directory -Path $packagesDir | Out-Null
 }
 
-$configs = Get-ChildItem -Path $repoRoot -Filter 'packages.config' -Recurse -File |
-    Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' }
+# This checkout's configs only -- see Get-SmartHomePackagesConfig for why a worktree's
+# must not be restored into the checkout the script was run from.
+$configs = Get-SmartHomePackagesConfig -RepoRoot $repoRoot
 
 Write-Host "Restoring packages referenced by $($configs.Count) packages.config file(s)..." -ForegroundColor Cyan
 
