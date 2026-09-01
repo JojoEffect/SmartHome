@@ -23,6 +23,14 @@ which package/version and says so clearly rather than guessing or downloading si
 case, restore once via Visual Studio (open `SmartHome.sln`, accept the NuGet restore prompt) to
 populate the cache, then re-run this script.
 
+It restores only the `packages.config` files of the checkout it runs from. Linked worktrees sit
+*inside* the main checkout (`.claude\worktrees\<name>`), each a full copy with its own configs and
+its own `packages\`, so a plain recursive glob run from the main checkout would pull every
+worktree's referenced versions into it — including a version pinned in a worktree to chase a
+regression, which `Get-NanoFrameworkTestAdapterDir` could then pick as the test adapter. The glob
+lives in `Get-SmartHomePackagesConfig` (`scripts\Common.ps1`) and is shared with
+`Test-Setup.ps1`, so the two always agree about what this checkout needs.
+
 Run this any time you've hand-edited a `packages.config` (e.g. pinning/reverting a version to
 test a regression) or after switching to a branch with different package versions, before
 building or deploying.
