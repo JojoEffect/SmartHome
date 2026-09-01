@@ -41,7 +41,13 @@ if ([string]::IsNullOrWhiteSpace($cacheRoot)) {
     $cacheRoot = Join-Path $env:USERPROFILE '.nuget\packages'
 }
 
-if (-not (Test-Path $packagesDir)) {
+# -LiteralPath throughout this script for every path derived from the checkout root or
+# from the NuGet cache root: -Path reads '[' and ']' as wildcard character-class syntax,
+# and both are legal in a Windows directory name, so on a checkout at
+# 'C:\repos\SmartHome [wip]' every one of these tests answered the opposite of the truth
+# (issue #71). New-Item is the exception below -- it has no -LiteralPath in Windows
+# PowerShell 5.1 and creates the literal name anyway.
+if (-not (Test-Path -LiteralPath $packagesDir)) {
     New-Item -ItemType Directory -Path $packagesDir | Out-Null
 }
 
@@ -56,21 +62,21 @@ $alreadyPresent = 0
 $missing = New-Object System.Collections.Generic.List[string]
 
 foreach ($config in $configs) {
-    [xml]$xml = Get-Content $config.FullName
+    [xml]$xml = Get-Content -LiteralPath $config.FullName
     foreach ($package in $xml.packages.package) {
         $id = $package.id
         $version = $package.version
         $destName = "$id.$version"
         $destPath = Join-Path $packagesDir $destName
 
-        if (Test-Path $destPath) {
+        if (Test-Path -LiteralPath $destPath) {
             $alreadyPresent++
             continue
         }
 
         $cachePath = Join-Path $cacheRoot "$($id.ToLowerInvariant())\$version"
-        if (Test-Path $cachePath) {
-            Copy-Item -Path $cachePath -Destination $destPath -Recurse
+        if (Test-Path -LiteralPath $cachePath) {
+            Copy-Item -LiteralPath $cachePath -Destination $destPath -Recurse
             Write-Host "  restored: $destName" -ForegroundColor Green
             $copied++
         }

@@ -173,6 +173,14 @@ function Get-SmartHomePackagesConfig {
     # A caller that would rather skip a subtree the enumerator cannot read than abort
     # on it passes -ErrorAction SilentlyContinue, which this advanced function
     # propagates to the Get-ChildItem below.
+    #
+    # -LiteralPath, not -Path: -Path reads '[' and ']' as wildcard character-class
+    # syntax, and both are legal in a Windows directory name, so a checkout at
+    # 'C:\repos\SmartHome [wip]' matched nothing at all -- and the two callers then
+    # failed differently, neither naming the cause: the restore threw on $null.Count,
+    # the preflight reported "no packages.config found" on a complete checkout
+    # (issue #71). $RepoRoot is always a concrete directory derived from $PSScriptRoot,
+    # so wildcard semantics are never wanted here.
     param(
         [Parameter(Mandatory = $true)]
         [string]$RepoRoot
@@ -182,7 +190,7 @@ function Get-SmartHomePackagesConfig {
     # a sibling '.claude\worktrees-something' is a different folder and stays in.
     $worktreesDir = (Join-Path $RepoRoot '.claude\worktrees') + [System.IO.Path]::DirectorySeparatorChar
 
-    return ,@(Get-ChildItem -Path $RepoRoot -Filter 'packages.config' -Recurse -File |
+    return ,@(Get-ChildItem -LiteralPath $RepoRoot -Filter 'packages.config' -Recurse -File |
         Where-Object {
             $_.FullName -notmatch '\\(bin|obj)\\' -and
             -not $_.FullName.StartsWith($worktreesDir, [StringComparison]::OrdinalIgnoreCase)
@@ -196,7 +204,10 @@ function Get-NanoFrameworkTestAdapterDir {
     )
 
     $packagesDir = Join-Path $RepoRoot 'packages'
-    $adapterDll = Get-ChildItem -Path $packagesDir -Recurse -Filter 'nanoFramework.TestAdapter.dll' -ErrorAction SilentlyContinue |
+    # -LiteralPath for the same reason as Get-SmartHomePackagesConfig above: a checkout
+    # path containing '[' or ']' finds nothing under -Path, and this one reports that as
+    # "adapter not restored".
+    $adapterDll = Get-ChildItem -LiteralPath $packagesDir -Recurse -Filter 'nanoFramework.TestAdapter.dll' -ErrorAction SilentlyContinue |
         Sort-Object FullName -Descending | Select-Object -First 1
 
     if (-not $adapterDll) {
@@ -279,7 +290,11 @@ function Get-SmartHomeMainWorktreeRoot {
         $commonDir = Join-Path $repoRoot $commonDir
     }
 
-    $resolved = Resolve-Path -Path $commonDir -ErrorAction SilentlyContinue
+    # -LiteralPath: git hands back this checkout's own path, brackets and all, and
+    # -Path would read them as wildcards and resolve nothing -- which this function
+    # reports as "git cannot answer for this checkout", so a linked worktree at a
+    # bracketed path would look like the main one.
+    $resolved = Resolve-Path -LiteralPath $commonDir -ErrorAction SilentlyContinue
     if (-not $resolved) {
         return $null
     }
