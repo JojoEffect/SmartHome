@@ -153,7 +153,11 @@ if ($absent.Count -gt 0) {
     Write-Host ""
     $templateHints = ($absent | ForEach-Object {
         $template = $_ -replace '\.ps1$', '.template.ps1'
-        "    Copy-Item `"$(Join-Path $scriptsDir $template)`" `"$(Join-Path $scriptsDir $_)`""
+        # -LiteralPath in the printed command for the same reason as the copies above:
+        # on a bracketed checkout Copy-Item -Path matches nothing and exits 0 having
+        # copied nothing at all, so a user who runs exactly what this prints sees
+        # success and then this identical error again, with nothing naming the cause.
+        "    Copy-Item -LiteralPath `"$(Join-Path $scriptsDir $template)`" `"$(Join-Path $scriptsDir $_)`""
     }) -join "`n"
 
     Write-Error @"

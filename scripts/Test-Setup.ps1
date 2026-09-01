@@ -93,8 +93,14 @@ foreach ($config in $configFiles) {
     $path = Join-Path $scriptsDir $config.Name
     $template = Join-Path $scriptsDir ($config.Name -replace '\.ps1$', '.template.ps1')
 
-    if (-not (Test-Path $path)) {
-        $fix = "Copy-Item `"$template`" `"$path`"  (then fill it in)"
+    # -LiteralPath for every path this preflight derives from the checkout: -Path reads
+    # '[' and ']' as wildcard character-class syntax, and both are legal in a Windows
+    # directory name, so on a checkout at 'C:\repos\SmartHome [wip]' each of these tests
+    # answered the opposite of the truth -- a preflight reporting a complete checkout as
+    # a broken one, and (below) skipping the packages check it exists to perform
+    # (issue #71). The remediation it prints has to be literal for the same reason.
+    if (-not (Test-Path -LiteralPath $path)) {
+        $fix = "Copy-Item -LiteralPath `"$template`" `"$path`"  (then fill it in)"
         if ($mainCheckout) {
             $fix = ".\scripts\Initialize-Worktree.ps1  -- this is a worktree; the file is git-ignored, " +
                    "so it did not come along. That copies it from $mainCheckout and restores packages\ too"
@@ -236,14 +242,14 @@ $missingPackages = New-Object System.Collections.Generic.List[string]
 $configs = Get-SmartHomePackagesConfig -RepoRoot $repoRoot -ErrorAction SilentlyContinue
 
 foreach ($configFile in $configs) {
-    [xml]$xml = Get-Content $configFile.FullName
+    [xml]$xml = Get-Content -LiteralPath $configFile.FullName
 
     # XPath rather than $xml.packages.package: under Set-StrictMode -Version Latest the
     # property access throws on a packages.config with no <package> children, which
     # would abort the whole preflight. SelectNodes just returns an empty list.
     foreach ($package in $xml.SelectNodes('/packages/package')) {
         $name = "$($package.id).$($package.version)"
-        if (-not (Test-Path (Join-Path $packagesDir $name)) -and -not $missingPackages.Contains($name)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $packagesDir $name)) -and -not $missingPackages.Contains($name)) {
             $missingPackages.Add($name)
         }
     }
@@ -289,7 +295,7 @@ else {
 
 $siblingRoot = Get-SiblingRoot
 $siblingProbe = @('nf-interpreter', 'nanoFramework.m2mqtt', 'Samples')
-$missingSiblings = @($siblingProbe | Where-Object { -not (Test-Path (Join-Path $siblingRoot $_)) })
+$missingSiblings = @($siblingProbe | Where-Object { -not (Test-Path -LiteralPath (Join-Path $siblingRoot $_)) })
 
 if ($missingSiblings.Count -eq 0) {
     Add-Result -Name 'companion nanoFramework repos' -Status 'OK' -Detail $siblingRoot

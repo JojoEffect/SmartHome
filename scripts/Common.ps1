@@ -32,11 +32,17 @@ function Import-SmartHomeLocalEnv {
     $localEnv = Join-Path $scriptsDir $FileName
     $template = Join-Path $scriptsDir ($FileName -replace '\.ps1$', '.template.ps1')
 
-    if (-not (Test-Path $localEnv)) {
+    # -LiteralPath: this is the gate every other script enters through, and -Path reads
+    # '[' and ']' as wildcard character-class syntax -- so on a checkout at
+    # 'C:\repos\SmartHome [wip]' the file on disk tested as absent and every script
+    # aborted claiming a config file that was right there was missing (issue #71).
+    # Test-Setup.ps1 makes the same test and would otherwise report the opposite of
+    # this one, which is the single thing a preflight must not do.
+    if (-not (Test-Path -LiteralPath $localEnv)) {
         Write-Error @"
 Missing: $localEnv
 Copy the template and fill in your machine settings:
-    Copy-Item "$template" "$localEnv"
+    Copy-Item -LiteralPath "$template" "$localEnv"
 "@
         exit 1
     }
@@ -173,6 +179,14 @@ function Get-SmartHomePackagesConfig {
     # A caller that would rather skip a subtree the enumerator cannot read than abort
     # on it passes -ErrorAction SilentlyContinue, which this advanced function
     # propagates to the Get-ChildItem below.
+    #
+    # -LiteralPath, not -Path: -Path reads '[' and ']' as wildcard character-class
+    # syntax, and both are legal in a Windows directory name, so a checkout at
+    # 'C:\repos\SmartHome [wip]' matched nothing at all -- and the two callers then
+    # failed differently, neither naming the cause: the restore threw on $null.Count,
+    # the preflight reported "no packages.config found" on a complete checkout
+    # (issue #71). $RepoRoot is always a concrete directory derived from $PSScriptRoot,
+    # so wildcard semantics are never wanted here.
     param(
         [Parameter(Mandatory = $true)]
         [string]$RepoRoot
@@ -182,7 +196,7 @@ function Get-SmartHomePackagesConfig {
     # a sibling '.claude\worktrees-something' is a different folder and stays in.
     $worktreesDir = (Join-Path $RepoRoot '.claude\worktrees') + [System.IO.Path]::DirectorySeparatorChar
 
-    return ,@(Get-ChildItem -Path $RepoRoot -Filter 'packages.config' -Recurse -File |
+    return ,@(Get-ChildItem -LiteralPath $RepoRoot -Filter 'packages.config' -Recurse -File |
         Where-Object {
             $_.FullName -notmatch '\\(bin|obj)\\' -and
             -not $_.FullName.StartsWith($worktreesDir, [StringComparison]::OrdinalIgnoreCase)
@@ -196,7 +210,10 @@ function Get-NanoFrameworkTestAdapterDir {
     )
 
     $packagesDir = Join-Path $RepoRoot 'packages'
-    $adapterDll = Get-ChildItem -Path $packagesDir -Recurse -Filter 'nanoFramework.TestAdapter.dll' -ErrorAction SilentlyContinue |
+    # -LiteralPath for the same reason as Get-SmartHomePackagesConfig above: a checkout
+    # path containing '[' or ']' finds nothing under -Path, and this one reports that as
+    # "adapter not restored".
+    $adapterDll = Get-ChildItem -LiteralPath $packagesDir -Recurse -Filter 'nanoFramework.TestAdapter.dll' -ErrorAction SilentlyContinue |
         Sort-Object FullName -Descending | Select-Object -First 1
 
     if (-not $adapterDll) {
@@ -279,7 +296,11 @@ function Get-SmartHomeMainWorktreeRoot {
         $commonDir = Join-Path $repoRoot $commonDir
     }
 
-    $resolved = Resolve-Path -Path $commonDir -ErrorAction SilentlyContinue
+    # -LiteralPath: git hands back this checkout's own path, brackets and all, and
+    # -Path would read them as wildcards and resolve nothing -- which this function
+    # reports as "git cannot answer for this checkout", so a linked worktree at a
+    # bracketed path would look like the main one.
+    $resolved = Resolve-Path -LiteralPath $commonDir -ErrorAction SilentlyContinue
     if (-not $resolved) {
         return $null
     }
@@ -347,7 +368,13 @@ function Invoke-GitCloneOrUpdate {
     $targetPath = Join-Path $targetRoot $name
     $repoUrl = "https://github.com/$Repository.git"
 
-    if ((Test-Path $targetPath) -and -not $Force) {
+    # -LiteralPath on every probe of $targetPath below: the sibling root is derived from
+    # the checkout, and -Path reads '[' and ']' as wildcard syntax. Under -Path a sibling
+    # repo that is cloned and current tests as absent, so the pin guard is skipped and
+    # `git clone` fails on a non-empty destination -- twice, because the cleanup probe is
+    # wrong the same way -- and the sync aborts on the first repository while
+    # Test-Setup.ps1 reports the same siblings present (issue #71).
+    if ((Test-Path -LiteralPath $targetPath) -and -not $Force) {
         $currentRef = git -C $targetPath rev-parse --abbrev-ref HEAD 2>$null
         if ($currentRef -eq 'HEAD') {
             $pinnedCommit = git -C $targetPath rev-parse --short HEAD 2>$null
@@ -357,13 +384,13 @@ function Invoke-GitCloneOrUpdate {
         }
     }
 
-    if (-not (Test-Path $targetPath)) {
+    if (-not (Test-Path -LiteralPath $targetPath)) {
         Write-Host "Cloning $Repository..." -ForegroundColor Cyan
         git clone --branch $Branch --single-branch $repoUrl $targetPath
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Branch '$Branch' not found for $Repository. Falling back to default branch."
-            if (Test-Path $targetPath) {
-                Remove-Item $targetPath -Recurse -Force
+            if (Test-Path -LiteralPath $targetPath) {
+                Remove-Item -LiteralPath $targetPath -Recurse -Force
             }
             git clone $repoUrl $targetPath
         }
