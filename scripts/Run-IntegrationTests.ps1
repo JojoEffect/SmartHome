@@ -674,6 +674,67 @@ function Wait-ForEcho {
     return $false
 }
 
+function Get-SubscriberLogLineCount {
+    # The watermark Wait-ForAnnounceWitnessed reads from. Lines rather than bytes, so the
+    # reader can Select-Object -Skip it directly; these logs are one line per message and
+    # a suite run produces thousands, not millions.
+    #
+    # A missing log is 0, not an error: the long-running subscriber is started by
+    # Start-SuiteBroker, and -NoBroker skips it. A watermark of 0 then means "read the
+    # whole file", which is the right answer when there is no file to have a position in.
+    param([string]$Port)
+
+    $log = Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog
+    return @(Get-Content -LiteralPath $log -ErrorAction SilentlyContinue).Count
+}
+
+function Wait-ForAnnounceWitnessed {
+    # Waits until the long-running homie/# log records $state=init for this device *after*
+    # the watermark -- i.e. until this boot is seen starting its announce.
+    #
+    # Why init and not ready: HomieClient.Announce() publishes $state=init before anything
+    # else and only transitions to the post-init state once the device info is out
+    # (src/common/Homie/V4/HomieClient.cs, Announce). Connect() calls Announce(State.Ready),
+    # so this holds for a first connect and not only for a re-announce. An init is therefore
+    # published exactly once per announce, by the instance doing it -- which is the per-boot
+    # signal a retained ready cannot give. See the comment in Wait-ForRetainedValue.
+    #
+    # Why the continuous log and not a snapshot: init is transient. The device is in it for
+    # milliseconds, and the next state overwrites it in the retained store, so a 3s snapshot
+    # would usually miss it entirely. The detached subscriber is connected throughout and
+    # records every message as it arrives.
+    #
+    # Read-only and race-free: the watermark is taken before the deploy, so an announce that
+    # lands while the deploy is still finishing is still counted. Nothing is published here.
+    param(
+        [string]$Port,
+        [string]$DeviceId,
+        [int]$TimeoutSeconds,
+        [int]$Watermark
+    )
+
+    $log = Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog
+    $topic = "homie/$DeviceId/`$state"
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+
+    while ((Get-Date) -lt $deadline) {
+        # Line-prefix match, not -like "*init*": a payload of 'init' on some other topic,
+        # or a device id that merely starts with this one, must not satisfy it. Log lines
+        # are "<topic> <0|1> <payload>", per Get-SmartHomeSubscriberArguments.
+        $hit = @(Get-Content -LiteralPath $log -ErrorAction SilentlyContinue |
+            Select-Object -Skip $Watermark |
+            Where-Object { $_ -eq "$topic 0 init" -or $_ -eq "$topic 1 init" }) |
+            Select-Object -First 1
+        if ($hit) {
+            return $true
+        }
+
+        Start-Sleep -Milliseconds 250
+    }
+
+    return $false
+}
+
 function Get-MosquittoTool {
     param([string]$Name)
 
@@ -730,6 +791,18 @@ $script:snapshotsTaken = 0
 # reason as the counter above: Stop-HomieCapture reads it on every window, and only the
 # conformance check ever assigns it.
 $script:currentPhase = $null
+
+# How many lines the long-running homie/# log held immediately before this test's deploy.
+# Everything after it is traffic from the image this test just flashed; everything before
+# it belongs to whatever was running on the device beforehand -- which, when the previous
+# suite run left HomieClientCheck flashed, is the *same* device id announcing on the same
+# broker. Wait-ForAnnounceWitnessed reads from here down, so an announce it witnesses is
+# necessarily this boot's.
+#
+# Taken in the run loop rather than inside a verdict function because it has to be read
+# before the deploy, and a verdict function only runs after one. Declared here for the
+# same StrictMode reason as the counter above.
+$script:subscriberLogWatermark = 0
 
 function Get-HomieRetainedSnapshot {
     # What a controller joining *now* would see: the broker's retained store.
@@ -1087,9 +1160,20 @@ function Wait-ForRetainedValue {
     # It is also what makes returning the snapshot sound. The device publishes its full
     # device info while in Init and only then transitions out, so $state arrives last: a
     # subscriber that saw $state *replayed* necessarily connected after everything before
-    # it was already in the store. $state arriving retained is, in effect, the "device has
-    # finished announcing" signal, and this turned it from an assumed invariant into an
-    # enforced one.
+    # it was already in the store.
+    #
+    # What the flag does NOT establish is *which boot* announced, and this comment used to
+    # claim it did -- "$state arriving retained is, in effect, the device has finished
+    # announcing signal". It is not. Retained state outlives the connection that published
+    # it: the previous instance's $state=ready sits in the store until its will fires, and
+    # the will fires on keepalive expiry, not on the reset that the deploy causes. So a
+    # snapshot taken early in a run can be handed the *old* boot's retained ready and read
+    # it as the new one's. That is #35: the host proceeded roughly 7s early, published five
+    # non-retained /set commands before the new instance had subscribed, and the broker
+    # dropped them with no trace.
+    #
+    # Callers that need "this boot announced" must witness it live -- see
+    # Wait-ForAnnounceWitnessed, which the conformance check now runs first.
     param(
         [string]$Port,
         [string]$Topic,
@@ -1291,11 +1375,44 @@ function Measure-HomieConformance {
 
     Start-ConformancePhase -Name 'announce'
     Write-Host ("Waiting up to {0}s for {1} to announce..." -f $Settings.SettleSeconds, $deviceId) -ForegroundColor Cyan
-    $ready = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected 'ready' -TimeoutSeconds $Settings.SettleSeconds
+
+    # Witness this boot announcing before believing any retained $state. A retained ready
+    # can be the previous instance's -- it outlives the connection that published it, and
+    # the will that would replace it fires on keepalive expiry rather than on the reset the
+    # deploy causes. Accepting one is how the host reached the /set phase roughly 7s early
+    # and published five non-retained commands into a window the new instance had not yet
+    # subscribed in (#35).
+    #
+    # Both waits share the one SettleSeconds budget, so this cannot make a healthy run take
+    # longer than it did before; on a healthy run the init lands within a second of boot and
+    # costs almost nothing.
+    $announceDeadline = (Get-Date).AddSeconds($Settings.SettleSeconds)
+    $witnessed = Wait-ForAnnounceWitnessed -Port $Port `
+                                           -DeviceId $deviceId `
+                                           -TimeoutSeconds $Settings.SettleSeconds `
+                                           -Watermark $script:subscriberLogWatermark
+    if (-not $witnessed) {
+        return @{
+            Outcome = 'NO-RESULT'
+            Detail  = "no `$state=init from $deviceId within $($Settings.SettleSeconds)s -- this boot was never seen announcing, so a retained `$state=ready could only be a previous instance's"
+        }
+    }
+
+    Write-Host "  announce witnessed live (`$state=init)." -ForegroundColor DarkGray
+
+    # Never below one snapshot. A slow boot can spend most of the budget before the witness
+    # lands, and a zero-second wait would report NO-RESULT against a device that had just
+    # announced perfectly well.
+    $readyBudget = [int][Math]::Ceiling(($announceDeadline - (Get-Date)).TotalSeconds)
+    if ($readyBudget -lt $SnapshotSettleSeconds) {
+        $readyBudget = $SnapshotSettleSeconds
+    }
+
+    $ready = Wait-ForRetainedValue -Port $Port -Topic "$root/`$state" -Expected 'ready' -TimeoutSeconds $readyBudget
     if (-not $ready.Ok) {
         return @{
             Outcome = 'NO-RESULT'
-            Detail  = "device never reached `$state=ready within $($Settings.SettleSeconds)s (saw '$($ready.Seen)')"
+            Detail  = "device announced but never reached a retained `$state=ready within $($Settings.SettleSeconds)s (saw '$($ready.Seen)')"
         }
     }
 
@@ -1946,6 +2063,12 @@ try {
         # capture failure arrives here as a terminating error, not an exit code.
         try {
             # ── Deploy ────────────────────────────────────────────────────────
+            # Where the long-running homie/# log stands *before* the flash, so a check
+            # that has to tell this boot's traffic from the previous image's can. It has
+            # to be read here: by the time a verdict function runs, the device has already
+            # been reset and may already have announced. See $script:subscriberLogWatermark.
+            $script:subscriberLogWatermark = Get-SubscriberLogLineCount -Port $mqttPort
+
             # No exit-code check: per the comment above, a failure arrives here as a
             # terminating error. One used to sit here and could never run.
             & $deployScript -Project (Get-TestProjectPath -TestName $testName) -Configuration $Configuration
