@@ -368,7 +368,13 @@ function Invoke-GitCloneOrUpdate {
     $targetPath = Join-Path $targetRoot $name
     $repoUrl = "https://github.com/$Repository.git"
 
-    if ((Test-Path $targetPath) -and -not $Force) {
+    # -LiteralPath on every probe of $targetPath below: the sibling root is derived from
+    # the checkout, and -Path reads '[' and ']' as wildcard syntax. Under -Path a sibling
+    # repo that is cloned and current tests as absent, so the pin guard is skipped and
+    # `git clone` fails on a non-empty destination -- twice, because the cleanup probe is
+    # wrong the same way -- and the sync aborts on the first repository while
+    # Test-Setup.ps1 reports the same siblings present (issue #71).
+    if ((Test-Path -LiteralPath $targetPath) -and -not $Force) {
         $currentRef = git -C $targetPath rev-parse --abbrev-ref HEAD 2>$null
         if ($currentRef -eq 'HEAD') {
             $pinnedCommit = git -C $targetPath rev-parse --short HEAD 2>$null
@@ -378,13 +384,13 @@ function Invoke-GitCloneOrUpdate {
         }
     }
 
-    if (-not (Test-Path $targetPath)) {
+    if (-not (Test-Path -LiteralPath $targetPath)) {
         Write-Host "Cloning $Repository..." -ForegroundColor Cyan
         git clone --branch $Branch --single-branch $repoUrl $targetPath
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Branch '$Branch' not found for $Repository. Falling back to default branch."
-            if (Test-Path $targetPath) {
-                Remove-Item $targetPath -Recurse -Force
+            if (Test-Path -LiteralPath $targetPath) {
+                Remove-Item -LiteralPath $targetPath -Recurse -Force
             }
             git clone $repoUrl $targetPath
         }
