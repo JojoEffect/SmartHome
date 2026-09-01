@@ -56,11 +56,26 @@ dot-source defines the catalog and the functions and runs nothing. Do not go bac
 functions out of it with the PowerShell AST — a test that reads its subject through a parser can
 drift from what actually runs, which is what issue #74 was about.
 
-The vocabulary is in `scripts\tests\TestRunner.ps1`: `Describe`, `It`, `Assert-Equal`
-(case-sensitive; pass `-IgnoreCase` where case is not part of the claim), `Assert-ArrayEqual`,
-`Assert-True`/`Assert-False`, `Assert-Null`/`Assert-NotNull`, `Assert-Match`, `Assert-Contains`,
-`Assert-Throws`, plus `New-TestDirectory` and `Set-TestFileContent` for fixtures. Every assertion
-takes `-Because`, which is what the failure message leads with.
+The vocabulary is in `scripts\tests\TestRunner.ps1`: `Describe`, `It`, `Assert-Equal`,
+`Assert-ArrayEqual`, `Assert-True`/`Assert-False`, `Assert-Null`/`Assert-NotNull`,
+`Assert-Match`, `Assert-Contains`, `Assert-Throws`, plus `New-TestDirectory` and
+`Set-TestFileContent` for fixtures. Every assertion takes `-Because`, which is what the failure
+message leads with.
+
+Two things about them worth knowing before writing a case:
+
+- **Comparisons are case-sensitive** (`Assert-Equal`, `Assert-ArrayEqual`, `Assert-Contains`);
+  the first and last take `-IgnoreCase`. `Assert-Match` is a regex and keeps `-match`'s own
+  case-insensitive default.
+- **`Assert-Equal` and `Assert-Match` refuse a collection** rather than comparing one, and say
+  so. PowerShell's `-eq` and `-match` *filter* a collection instead of returning a boolean, so
+  `@('a','b') -ceq 'a'` is `@('a')` — truthy — and an assertion built on that would pass
+  whenever the expected collection merely *contained* the actual value. Use `Assert-ArrayEqual`
+  for collections, and join at the call site for `Assert-Match`.
+
+A test file may stub a function the subject calls (`Get-SmartHomeDevEnvPath`, say) by defining
+it after the dot-source; command lookup walks the calling scope chain, so the stub wins inside
+that file or that `Describe` and nowhere else.
 
 ## Why not Pester
 

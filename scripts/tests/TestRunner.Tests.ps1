@@ -63,6 +63,26 @@ Describe 'Assert-Equal' {
         $message = Test-AssertionFails { Assert-Equal -Expected 1 -Actual 2 -Because 'the count is wrong' }
         Assert-Match -Pattern 'the count is wrong' -Actual $message
     }
+
+    It 'refuses a collection instead of quietly passing on one that contains the value' {
+        # The reason this refusal exists rather than a comparison: PowerShell's -eq filters
+        # a collection on the left, so @('a','b') -ceq 'a' is @('a') -- truthy -- and this
+        # assertion used to PASS for that claim while still failing for
+        # -Expected @('a','b') -Actual 'z'. Selectively wrong is worse than wrong.
+        $message = Test-AssertionFails { Assert-Equal -Expected @('a', 'b') -Actual 'a' }
+
+        Assert-NotNull -Value $message -Because 'this is the case that used to pass'
+        Assert-Match -Pattern 'Assert-ArrayEqual' -Actual $message -Because 'and it has to name the right tool'
+    }
+
+    It 'refuses a collection on either side' {
+        Assert-NotNull -Value (Test-AssertionFails { Assert-Equal -Expected 'a' -Actual @('a', 'b') })
+        Assert-NotNull -Value (Test-AssertionFails { Assert-Equal -Expected @() -Actual @() })
+    }
+
+    It 'still compares strings, which are enumerable but not collections' {
+        Assert-Null -Value (Test-AssertionFails { Assert-Equal -Expected 'abc' -Actual 'abc' })
+    }
 }
 
 Describe 'Assert-ArrayEqual' {
@@ -129,6 +149,15 @@ Describe 'Assert-Match' {
     It 'fails on $null rather than treating it as an empty match' {
         Assert-NotNull -Value (Test-AssertionFails { Assert-Match -Pattern '.*' -Actual $null })
     }
+
+    It 'refuses a collection rather than reporting no match on one that matched' {
+        # -match filters a collection too, so @('cat','dog') -notmatch 'cat' is @('dog') --
+        # truthy -- and this used to report "no match" for output that plainly matched.
+        $message = Test-AssertionFails { Assert-Match -Pattern 'cat' -Actual @('cat', 'dog') }
+
+        Assert-NotNull -Value $message
+        Assert-Match -Pattern 'Join it' -Actual $message -Because 'the message has to say what to do instead'
+    }
 }
 
 Describe 'Assert-Contains' {
@@ -138,6 +167,17 @@ Describe 'Assert-Contains' {
 
     It 'passes when the item is present' {
         Assert-Null -Value (Test-AssertionFails { Assert-Contains -Item 'b' -Collection @('a', 'b') })
+    }
+
+    It 'is case-sensitive, like the rest of the runner' {
+        # -notcontains is case-insensitive, so this used to accept 'localhost' as present in
+        # @('LOCALHOST') -- and the claims this assertion carries in Common.Tests.ps1 are
+        # about exact tokens: '127.0.0.1', '%t %r %p', a topic name.
+        Assert-NotNull -Value (Test-AssertionFails { Assert-Contains -Item 'localhost' -Collection @('LOCALHOST') })
+    }
+
+    It 'accepts a case difference under -IgnoreCase' {
+        Assert-Null -Value (Test-AssertionFails { Assert-Contains -Item 'localhost' -Collection @('LOCALHOST') -IgnoreCase })
     }
 }
 

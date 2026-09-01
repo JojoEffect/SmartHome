@@ -26,10 +26,18 @@
     reconsider the trade above -- not before.
 
 .NOTES
-    Assert-Equal compares strings case-SENSITIVELY. That is the stricter default and it
-    is what the subjects want: ConvertTo-HomieSnapshot merges on -ceq, so a test that
-    could not tell 'TRUE' from 'true' could not check it. Pass -IgnoreCase where case is
-    genuinely not part of the claim.
+    Comparisons here are case-SENSITIVE (Assert-Equal, Assert-ArrayEqual, Assert-Contains).
+    That is the stricter default and it is what the subjects want: ConvertTo-HomieSnapshot
+    merges on -ceq, so a test that could not tell 'TRUE' from 'true' could not check it.
+    Assert-Equal and Assert-Contains take -IgnoreCase where case is genuinely not part of
+    the claim. Assert-Match is a regex and follows -match's own case-insensitive default;
+    write (?-i) into the pattern where that matters.
+
+    Assert-Equal and Assert-Match refuse a collection operand rather than comparing one.
+    PowerShell's -eq and -match FILTER a collection instead of returning a boolean, so
+    @('a','b') -ceq 'a' is @('a') -- truthy -- and an Assert-Equal built on it would pass
+    whenever the expected collection merely contains the actual value. Assert-ArrayEqual
+    is the tool for collections; for Assert-Match, join at the call site.
 #>
 
 Set-StrictMode -Version Latest
@@ -90,6 +98,21 @@ function Format-TestValue {
     return "$Value"
 }
 
+function Test-IsTestCollection {
+    # Everything PowerShell's comparison operators treat as a collection rather than as a
+    # single value -- which is the distinction that matters to the assertions below, and
+    # which excludes strings even though they are IEnumerable.
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [AllowEmptyCollection()]
+        $Value
+    )
+
+    return ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string]))
+}
+
 function Assert-Fail {
     # Every assertion below ends here. The thrown payload is a hashtable rather than a
     # message string so It can tell an assertion apart from the subject blowing up, and
@@ -139,6 +162,18 @@ function Assert-Equal {
 
         [string]$Because
     )
+
+    # Refused rather than handled, because PowerShell's -eq FILTERS a collection on the
+    # left instead of comparing it: @('a','b') -ceq 'a' returns @('a'), which is truthy,
+    # so this assertion would silently pass whenever the expected collection merely
+    # *contains* the actual value -- and still fail when it does not, which is what makes
+    # it look like it works. Assert-ArrayEqual is the tool for collections.
+    foreach ($operand in @(@{ Name = 'Expected'; Value = $Expected }, @{ Name = 'Actual'; Value = $Actual })) {
+        if (Test-IsTestCollection -Value $operand['Value']) {
+            Assert-Fail -Message ("Assert-Equal compares single values, and -{0} is a {1}. Use Assert-ArrayEqual for collections." -f `
+                $operand['Name'], $operand['Value'].GetType().Name)
+        }
+    }
 
     if ($null -eq $Expected) {
         $same = ($null -eq $Actual)
@@ -278,6 +313,14 @@ function Assert-Match {
         [string]$Because
     )
 
+    # Same trap as Assert-Equal, in the other direction: -match on a collection filters it,
+    # so @('cat','dog') -notmatch 'cat' returns @('dog') -- truthy -- and this would report
+    # no match on output that plainly matched. Refused rather than joined, so the test says
+    # what it means: join the lines at the call site if the whole output is the claim.
+    if (Test-IsTestCollection -Value $Actual) {
+        Assert-Fail -Message ('Assert-Match compares one value, and -Actual is a {0}. Join it with -join, or pick the element the claim is about.' -f $Actual.GetType().Name)
+    }
+
     if ($null -eq $Actual -or $Actual -notmatch $Pattern) {
         $detail = "expected a match for /{0}/, got {1}" -f $Pattern, (Format-TestValue -Value $Actual)
         if ($Because) { $detail = "$Because -- $detail" }
@@ -297,10 +340,18 @@ function Assert-Contains {
         [AllowEmptyCollection()]
         $Collection,
 
+        [switch]$IgnoreCase,
+
         [string]$Because
     )
 
-    if (@($Collection) -notcontains $Item) {
+    # -cnotcontains, so this keeps the case-sensitive default the rest of the runner has.
+    # -notcontains would let 'localhost' be found in @('LOCALHOST'), which is exactly the
+    # kind of difference the claims using this assertion are about: topic names, payloads,
+    # and the '%t %r %p' format token.
+    $absent = if ($IgnoreCase) { @($Collection) -notcontains $Item } else { @($Collection) -cnotcontains $Item }
+
+    if ($absent) {
         $detail = "expected {0} among {1}" -f (Format-TestValue -Value $Item), (Format-TestValue -Value $Collection)
         if ($Because) { $detail = "$Because -- $detail" }
         Assert-Fail -Message $detail
