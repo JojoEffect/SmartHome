@@ -949,6 +949,17 @@ function Start-HomieCapture {
             # since reissued does not read as "still connecting".
             if ($null -eq (Get-SmartHomeRecordedProcess -Record $record)) {
                 $subscriberGone = $true
+
+                # Read once more before believing the classification above. It came from a
+                # read taken BEFORE the liveness probe, and the subscriber's last write --
+                # its whole retained replay, or the error explaining why there was none --
+                # can land in that gap. Reporting from the stale view would claim nothing
+                # was delivered into a window that is in fact full, which is the same kind
+                # of false diagnostic this wait exists to stop making. The process is gone,
+                # so this read is final rather than another poll.
+                $captured = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue)
+                $diagnostics = @($captured | Where-Object { $_ -match '\S' })
+                $connected = @($captured | Where-Object { $null -ne (ConvertFrom-HomieCaptureLine -Line $_) }).Count -gt 0
                 break
             }
 

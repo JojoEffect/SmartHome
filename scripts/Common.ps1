@@ -559,12 +559,21 @@ function Get-SmartHomeRecordedProcess {
         return $null
     }
 
-    if ($Record['Name'] -and $process.ProcessName -ne $Record['Name']) {
-        return $null
-    }
+    # Both comparisons inside the try, and that is not tidiness. Get-Process hands back an
+    # object whose name and start time are fetched lazily, so a process that exits in the
+    # gap between the lookup above and either read throws "Process has exited, so the
+    # requested information is not available" -- terminating under the callers'
+    # $ErrorActionPreference = 'Stop'. That gap is not hypothetical for a caller polling
+    # this in a loop precisely while the process is expected to die (Start-HomieCapture's
+    # connect wait), and a throw there escapes before that caller can hand back what it
+    # started, orphaning it. A process that vanished mid-check is exactly the "not running"
+    # this function reports; it must not be an error.
+    try {
+        if ($Record['Name'] -and $process.ProcessName -ne $Record['Name']) {
+            return $null
+        }
 
-    if ($Record['StartTime']) {
-        try {
+        if ($Record['StartTime']) {
             $recorded = [datetime]::Parse(
                 $Record['StartTime'],
                 [cultureinfo]::InvariantCulture,
@@ -574,9 +583,9 @@ function Get-SmartHomeRecordedProcess {
                 return $null
             }
         }
-        catch {
-            return $null
-        }
+    }
+    catch {
+        return $null
     }
 
     return $process
