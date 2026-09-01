@@ -46,16 +46,25 @@ Link the issue with `Closes #123` so it closes on merge.
 
 ## Testing, and what CI can and cannot do
 
-There are three kinds of test, kept deliberately apart (see `CLAUDE.md`):
+There are four kinds of test, kept deliberately apart (see `CLAUDE.md`):
 
 | | What it is | Runs in CI? |
 |---|---|---|
+| `scripts/tests` | Host-side PowerShell — the logic that decides what the integration suite reports | **Yes**, first, and it needs nothing installed |
 | `src/tests` | Unit tests — logic, no environment | **Yes**, on the nanoclr virtual device |
 | `src/integrationTests` | One app per external dependency: WiFi, broker, sensor | **No** — needs real hardware |
 | `src/devices` | The applications themselves | n/a |
 
-CI restores, builds all projects, and runs the unit tests against the **virtual device**
-(`nano.ci.runsettings`, `IsRealHardware=False`). Same IL, same CLR, no board.
+CI runs the host-side script tests, then restores, builds all projects, and runs the unit
+tests against the **virtual device** (`nano.ci.runsettings`, `IsRealHardware=False`). Same
+IL, same CLR, no board.
+
+A change under `scripts\` should come with a case in `scripts\tests` unless it genuinely
+needs a device to exercise:
+
+```powershell
+.\scripts\Run-ScriptTests.ps1
+```
 
 CI **cannot** run the integration suite. Those tests need a real ESP32 on a COM port, a
 real WiFi network and a real Mosquitto broker. Until a guarded self-hosted runner exists

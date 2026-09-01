@@ -36,6 +36,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # First, because it is the only step in this job that needs nothing installed --
+      # no MSBuild, no nanoclr, no packages\, no local.env.ps1 -- and it covers the
+      # host-side logic that decides what the integration suite reports. A broken
+      # scripts\ change fails here in seconds instead of after the nanoFramework setup.
+      #
+      # The runner is this repository's own (scripts\tests\TestRunner.ps1), deliberately
+      # not Pester: Pester 5 does not ship with Windows -- the in-box version is 3.4.0,
+      # whose dialect is incompatible -- so using it would mean an Install-Module step
+      # here and on every desk. See that file for the full reasoning.
+      - name: Run host-side script tests
+        run: .\scripts\Run-ScriptTests.ps1
+
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v3
 

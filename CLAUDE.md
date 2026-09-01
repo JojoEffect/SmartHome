@@ -54,6 +54,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Stop-DevEnv.ps1 [-KeepLog] [-IncludeOrphans]` | Stops whatever `Start-DevEnv.ps1` recorded for the configured port, verifying pid+name+start-time first so a recycled pid is never killed. No-op + exit 0 if nothing is running, so it's safe to call unconditionally. `-IncludeOrphans` also clears brokers/subscribers this repo started that no state file covers | No | `smarthome-dev-env` |
 | `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release] [-FullPad]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`) then flashes via `nanoff`, padding the image with 0xFF far enough to erase the previous one (see Deploy padding below). `-FullPad` after a Visual Studio deploy | **Yes** | `smarthome-deploy` |
 | `scripts\Run-Tests.ps1` | Builds `SmartHome.UnitTests` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** | `smarthome-test` |
+| `scripts\Run-ScriptTests.ps1 [-File <names>] [-Name <wildcard>] [-Detailed]` | The host-side script tests: `scripts\tests\*.Tests.ps1`, run by this repo's own `TestRunner.ps1`. ~100 cases in ~6s, needing nothing installed — no device, no broker, no `local.env`, no `packages\`, no Pester. A run that executed zero tests fails | No | `smarthome-script-tests` |
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
 | `scripts\Sync-NanoFrameworkRepos.ps1 [-Force]` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
 | `scripts\Restore-Packages.ps1` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style. Only *this* checkout's configs: worktrees live inside the main checkout, and `Get-SmartHomePackagesConfig` in `Common.ps1` is the one glob that says so, shared with `Test-Setup.ps1` | No | `smarthome-restore-packages` |
@@ -263,6 +264,9 @@ tools/
   DeviceDebugMonitor/     Host-side .NET console app (NOT nanoFramework) -- CLI device debugger,
                           see scripts\Watch-DeviceDebugOutput.ps1
 scripts/                  Dev-environment and agent helper scripts (see table above)
+  tests/                  Host-side tests for those scripts. TestRunner.ps1 is the
+                          Describe/It/Assert-* vocabulary (this repo's own, not Pester);
+                          <Subject>.Tests.ps1 is one file per subject
 SmartHome.sln
 ```
 
@@ -368,15 +372,28 @@ Anything that needs WiFi calls `NetworkHelper.ConnectToConfiguredNetwork()` from
 2026-08-20 and would not join the network on a clean boot; `WifiNetworkHelper.Reconnect()` waits
 for the interface instead of racing it.
 
-### Three kinds of test, deliberately kept apart
+### Four kinds of test, deliberately kept apart
 
 - **`src/tests`** — unit tests (`SmartHome.UnitTests`) driven by `vstest.console` and the nanoFramework
   test adapter. They run *on* hardware but test logic, not the physical environment.
 - **`src/integrationTests`** — one app per external dependency (WiFi, broker, sensor). Each is a
   full device app that boots, exercises exactly one concern, and reports a verdict. Run them via
   `scripts\Run-IntegrationTests.ps1`, not by deploying them by hand.
+- **`scripts/tests`** — the host-side half: the PowerShell that decides what the integration
+  suite reports. No device, no broker, no network, nothing installed. Run them via
+  `scripts\Run-ScriptTests.ps1`, which CI runs too — the only automated coverage this repository
+  has of the integration tooling itself, since the nanoFramework unit tests cannot reach a
+  PowerShell function. **Any change under `scripts\` should come with a case here** unless it
+  genuinely needs a device to exercise; before this existed, proving one meant a throwaway
+  harness that was deleted afterwards, four times in a week (issue #74).
 - **`src/devices`** — real applications. Nothing here should exist only to prove a dependency
   works; that's what `integrationTests` is for.
+
+`Run-IntegrationTests.ps1` is dot-sourceable for that reason: a guard near the bottom means a
+dot-source defines `$testCatalog` and the functions and runs nothing, so a test file reaches the
+shipped source directly. Keep everything above that guard a declaration — a `Test-Path` or an
+`Import-SmartHomeLocalEnv` drifting back to the top would run on every dot-source, and
+`RunIntegrationTests.Tests.ps1` asserts against exactly that.
 
 Those tests differ in which dependency they exercise, as above, and separately in *who decides
 the verdict*. The latter is declared per entry in `$testCatalog` in `Run-IntegrationTests.ps1`,
@@ -385,7 +402,7 @@ the outcome, and `OwnsBroker` says that function stops and starts the broker its
 what `-NoBroker` refuses. An entry that names no `Verdict` is device-decided. The run loop reads
 both generically (one invoke by name, one shared epilogue), so a fourth kind of check is a new
 function plus its catalog entry, with no branch or guard elsewhere to keep in step. The three
-that exist are still worth naming (not the same three as the locations above):
+that exist are still worth naming (a different axis from the locations above):
 
 - **`DeviceMarker`** — the device decides. The runner captures managed debug output and reads
   the test's own `[ITEST]` marker. WifiCheck, MqttCheck and Bmp280Check work this way, and
@@ -620,10 +637,15 @@ truth for process, so change both or neither.
 branching off a protected `main`, Conventional Commits enforced on PR titles only, and what CI
 can and cannot verify.
 
-The part worth knowing before you touch anything: **CI builds every project and runs the unit
-tests on the nanoclr virtual device, but it cannot run the integration suite** — that needs a
-real ESP32, a real network and a real broker. Hardware verification is a manual step, and the
-pull request should say what was run on hardware, or say plainly that nothing was.
+The part worth knowing before you touch anything: **CI runs the host-side script tests, builds
+every project and runs the unit tests on the nanoclr virtual device, but it cannot run the
+integration suite** — that needs a real ESP32, a real network and a real broker. Hardware
+verification is a manual step, and the pull request should say what was run on hardware, or say
+plainly that nothing was.
+
+A green CI is therefore not the same claim for every change. For a change under `scripts\`,
+`Run-ScriptTests.ps1` covers the desk-provable half and nothing else: the capture, the broker
+outage and the conformance verdicts are still only proved by a run on the device.
 
 ## Project skills
 
