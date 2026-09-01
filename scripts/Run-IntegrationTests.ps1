@@ -34,6 +34,11 @@
     *** HARDWARE: this flashes and runs code on the physical device on the configured
     COM port, once per test. Treat it exactly like Deploy-ToDevice.ps1. ***
 
+    Dot-sourcing this script does none of that: a guard below the function definitions
+    means `. .\scripts\Run-IntegrationTests.ps1` defines $testCatalog and the functions
+    and stops. That is what scripts\tests\RunIntegrationTests.Tests.ps1 uses to exercise
+    the host-side verdict logic at a desk (issue #74).
+
 .PARAMETER Tests
     Subset of tests to run, by name. Defaults to every entry of $testCatalog below,
     in dependency order -- WiFi first, since the MQTT checks can only fail
@@ -75,10 +80,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
-Import-SmartHomeLocalEnv
 
-$repoRoot = Get-SmartHomeRepoRoot
-$mqttPort = Get-OptionalEnvValue -Name 'SMARTHOME_MQTT_PORT' -DefaultValue '1883'
+# Dot-sourcing this script defines the catalog and the functions and does nothing else:
+# the run itself -- reading local.env, the pre-flight, the broker, the deploy loop -- sits
+# below the guard near the bottom of the file. That is what lets scripts\tests exercise the
+# host-side half of the suite (the half that decides every verdict) without a device, a
+# broker or a network, instead of each test file re-extracting these functions through the
+# PowerShell AST. See the guard itself for why it reads $MyInvocation rather than a switch.
+#
+# Consequence for anything added here: file-scope statements between this line and the
+# guard run on a dot-source too, so keep them to declarations. Anything that reads the
+# environment, touches the disk or talks to the device belongs below the guard.
 
 # The catalog is the single source of truth for what the suite runs: the -Tests
 # default and its validation both come from here, and each project's path follows
@@ -139,16 +151,6 @@ $testCatalog = [ordered]@{
     }
 }
 
-if (-not $Tests) {
-    $Tests = @($testCatalog.Keys)
-}
-
-$unknown = @($Tests | Where-Object { -not $testCatalog.Contains($_) })
-if ($unknown.Count -gt 0) {
-    Write-Error ("Unknown test(s): {0}. Known tests: {1}." -f ($unknown -join ', '), (@($testCatalog.Keys) -join ', '))
-    exit 1
-}
-
 # Validate the catalog before anything is built or flashed. Under
 # Set-StrictMode -Version Latest a missing key read as $settings.Foo throws
 # PropertyNotFoundException -- which surfaces 90s into a run as Outcome 'ERROR' with a
@@ -166,46 +168,68 @@ $requiredCatalogKeys = @{
     'Invoke-HomieConformanceCheck' = @('DeviceId', 'NodeId', 'SettleSeconds', 'CommandTimeoutSeconds', 'RecoverySeconds')
     'Invoke-BrokerOutageCheck'     = @('HeartbeatTopic', 'SettleSeconds', 'OutageSeconds', 'RecoverySeconds', 'EchoCommandTopic', 'EchoTopic', 'CommandTimeoutSeconds')
 }
-$knownVerdicts = (@($requiredCatalogKeys.Keys) | Sort-Object) -join ', '
 
-foreach ($catalogTestName in $Tests) {
-    $catalogEntry = $testCatalog[$catalogTestName]
+function Get-CatalogValidationError {
+    # The rules described above, as a function that *returns* the first violation instead
+    # of writing it and exiting. Two callers want different things from them: the run wants
+    # a message and exit 1 before the first build, and scripts\tests wants to assert that a
+    # deliberately malformed entry is caught -- which a bare `exit 1` at file scope makes
+    # impossible to check without running the suite.
+    #
+    # First violation, not all of them, because that is what the run reported before this
+    # was a function and a longer report is not what a one-line configuration mistake
+    # needs. $null means every named test exists and is completely declared.
+    param(
+        [Parameter(Mandatory = $true)]
+        $Catalog,
 
-    # Required of every entry, device-decided ones included, because it is read as
-    # $settings.OwnsBroker on every path -- and because leaving it out would default to
-    # whichever answer is quietly wrong for the next check that owns the broker.
-    if (-not $catalogEntry.Contains('OwnsBroker')) {
-        Write-Error ("Catalog entry '{0}' declares no OwnsBroker. Say `$true if its verdict function stops and starts the broker itself, `$false otherwise." -f $catalogTestName)
-        exit 1
+        [string[]]$Tests,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$DeviceDecidedKeys,
+
+        # NOT $RequiredKeys: PowerShell variable names are case-insensitive, so that
+        # spelling and the local $requiredKeys below are the same variable, and assigning
+        # the local would write a string[] into a [hashtable]-typed parameter -- which
+        # fails as a type conversion at the assignment, several lines from the cause.
+        [Parameter(Mandatory = $true)]
+        [hashtable]$RequiredCatalogKeys
+    )
+
+    $unknown = @($Tests | Where-Object { -not $Catalog.Contains($_) })
+    if ($unknown.Count -gt 0) {
+        return ("Unknown test(s): {0}. Known tests: {1}." -f ($unknown -join ', '), (@($Catalog.Keys) -join ', '))
     }
 
-    $requiredKeys = $deviceDecidedKeys
-    if ($catalogEntry.Contains('Verdict')) {
-        if (-not $requiredCatalogKeys.Contains($catalogEntry.Verdict)) {
-            Write-Error ("Catalog entry '{0}' names an unknown Verdict function '{1}'. Known: {2}." -f $catalogTestName, $catalogEntry.Verdict, $knownVerdicts)
-            exit 1
+    $knownVerdicts = (@($RequiredCatalogKeys.Keys) | Sort-Object) -join ', '
+
+    foreach ($catalogTestName in $Tests) {
+        $catalogEntry = $Catalog[$catalogTestName]
+
+        # Required of every entry, device-decided ones included, because it is read as
+        # $settings.OwnsBroker on every path -- and because leaving it out would default to
+        # whichever answer is quietly wrong for the next check that owns the broker.
+        if (-not $catalogEntry.Contains('OwnsBroker')) {
+            return ("Catalog entry '{0}' declares no OwnsBroker. Say `$true if its verdict function stops and starts the broker itself, `$false otherwise." -f $catalogTestName)
         }
 
-        $requiredKeys = $requiredCatalogKeys[$catalogEntry.Verdict]
+        $requiredKeys = $DeviceDecidedKeys
+        if ($catalogEntry.Contains('Verdict')) {
+            if (-not $RequiredCatalogKeys.Contains($catalogEntry.Verdict)) {
+                return ("Catalog entry '{0}' names an unknown Verdict function '{1}'. Known: {2}." -f $catalogTestName, $catalogEntry.Verdict, $knownVerdicts)
+            }
+
+            $requiredKeys = $RequiredCatalogKeys[$catalogEntry.Verdict]
+        }
+
+        $missingKeys = @($requiredKeys | Where-Object { -not $catalogEntry.Contains($_) })
+        if ($missingKeys.Count -gt 0) {
+            return ("Catalog entry '{0}' is missing required setting(s): {1}." -f $catalogTestName, ($missingKeys -join ', '))
+        }
     }
 
-    $missingKeys = @($requiredKeys | Where-Object { -not $catalogEntry.Contains($_) })
-    if ($missingKeys.Count -gt 0) {
-        Write-Error ("Catalog entry '{0}' is missing required setting(s): {1}." -f $catalogTestName, ($missingKeys -join ', '))
-        exit 1
-    }
+    return $null
 }
-
-if (-not $LogDirectory) {
-    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
-    $LogDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "smarthome-integration-$stamp"
-}
-New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null
-
-$deployScript   = Join-Path $PSScriptRoot 'Deploy-ToDevice.ps1'
-$watchScript    = Join-Path $PSScriptRoot 'Watch-DeviceDebugOutput.ps1'
-$startEnvScript = Join-Path $PSScriptRoot 'Start-DevEnv.ps1'
-$stopEnvScript  = Join-Path $PSScriptRoot 'Stop-DevEnv.ps1'
 
 function Get-TestProjectPath {
     param([string]$TestName)
@@ -1354,6 +1378,26 @@ function Write-ConformancePhaseBreakdown {
     }
 }
 
+# The lifecycle states the conformance check drives the device through: ready -> alert ->
+# ready -> sleeping -> ready, with the one transition the convention's own state machine
+# forbids asked for in the middle. alert may only return to ready (or disconnect), so
+# alert -> sleeping must be refused -- and a device that advertises it as done anyway is
+# the defect the Refused step measures.
+#
+# At file scope because two things need to agree about it and used not to:
+# Measure-HomieConformance walks it, and Get-ConformanceCaptureSeconds sizes the debug
+# capture from how many steps there are. The count was written as a literal 5 about 420
+# lines from the table, so adding a step left the capture short by one
+# CommandTimeoutSeconds -- 30s on the current catalog entry -- and took the device-side
+# log away on exactly the slow run worth reading (issue #83).
+$conformanceLifecycleSteps = @(
+    @{ Command = 'alert';    Expect = 'alert';    Refused = $false }
+    @{ Command = 'sleeping'; Expect = 'alert';    Refused = $true  }
+    @{ Command = 'ready';    Expect = 'ready';    Refused = $false }
+    @{ Command = 'sleeping'; Expect = 'sleeping'; Refused = $false }
+    @{ Command = 'ready';    Expect = 'ready';    Refused = $false }
+)
+
 function Get-ConformanceCaptureSeconds {
     # A ceiling for the debug capture that runs alongside the check, derived from the
     # check's own timeouts rather than guessed: the announce wait, the /set round trip,
@@ -1363,15 +1407,21 @@ function Get-ConformanceCaptureSeconds {
     # Deliberately loose. A capture that ends early takes the device-side evidence with
     # it exactly when the run was slow enough to be worth reading, and nothing waits out
     # this window -- Stop-DeviceDebugCapture closes it as soon as the check returns.
-    param([hashtable]$Settings)
+    param(
+        [hashtable]$Settings,
 
-    $lifecycleSteps = 5
+        # Defaulted from the step table rather than restated, which is the whole point:
+        # the two used to be separate spellings of the same number. A parameter rather
+        # than a direct read so scripts\tests can prove the budget actually moves with the
+        # count -- a test that only recomputed the formula would pass on a literal too.
+        [int]$LifecycleStepCount = $conformanceLifecycleSteps.Count
+    )
 
     # +2 rather than +1: the /set round trip and the out-of-format phase each poll for up
     # to CommandTimeoutSeconds on top of the lifecycle steps.
     return $Settings.SettleSeconds +
            $Settings.RecoverySeconds +
-           (($lifecycleSteps + 2) * $Settings.CommandTimeoutSeconds) +
+           (($LifecycleStepCount + 2) * $Settings.CommandTimeoutSeconds) +
            60
 }
 
@@ -1782,19 +1832,10 @@ function Measure-HomieConformance {
     # ── the lifecycle states a device can be driven into ─────────────────────
     Start-ConformancePhase -Name 'lifecycle'
     Write-Host "  driving `$state through alert, sleeping and a refused transition..." -ForegroundColor DarkGray
-    # ready -> alert -> ready -> sleeping -> ready, with the one transition the
-    # convention's own state machine forbids asked for in the middle. alert may only
-    # return to ready (or disconnect), so alert -> sleeping must be refused -- and a
-    # device that advertises it as done anyway is the defect the Refused step measures.
-    $lifecycleSteps = @(
-        @{ Command = 'alert';    Expect = 'alert';    Refused = $false }
-        @{ Command = 'sleeping'; Expect = 'alert';    Refused = $true  }
-        @{ Command = 'ready';    Expect = 'ready';    Refused = $false }
-        @{ Command = 'sleeping'; Expect = 'sleeping'; Refused = $false }
-        @{ Command = 'ready';    Expect = 'ready';    Refused = $false }
-    )
-
-    foreach ($step in $lifecycleSteps) {
+    # The table is at file scope ($conformanceLifecycleSteps, near
+    # Get-ConformanceCaptureSeconds), which sizes the debug capture from its length. It
+    # used to live here and the length was restated as a literal up there (issue #83).
+    foreach ($step in $conformanceLifecycleSteps) {
         if ($step.Refused) {
             # Nothing to wait for here -- the assertion is that nothing changed -- so one
             # capture window IS the measurement rather than a poll for it, and it carries
@@ -2040,6 +2081,53 @@ function Measure-HomieConformance {
         Detail  = "attributes, datatypes, retained flags, /set round-trip, refused out-of-format payloads, alert/sleeping, a refused transition and re-announce all conform" + $warningDetail
     }
 }
+
+# ── The run ───────────────────────────────────────────────────────────────────
+# Everything from here down happens only when this script is *run*. Dot-sourcing it
+# stops here with the catalog and the functions defined and nothing else done, which is
+# what scripts\tests needs: the functions below decide every verdict the suite reports,
+# they are the half of it a desk can exercise, and before this guard the only way to
+# reach them was to re-extract each one through the PowerShell AST -- a test reading its
+# subject through a parser, which can silently drift from what actually runs (issue #74).
+#
+# $MyInvocation.InvocationName is '.' for every spelling of a dot-source and the path or
+# '&' for every spelling of a run, so the safe answer is the default: a dot-source can
+# never start a suite that flashes the device. A -AsLibrary switch would invert that --
+# forget it and dot-sourcing deploys.
+#
+# `return`, not `exit`: at file scope `exit` in a dot-sourced script ends the *host*.
+if ($MyInvocation.InvocationName -eq '.') {
+    return
+}
+
+Import-SmartHomeLocalEnv
+
+$repoRoot = Get-SmartHomeRepoRoot
+$mqttPort = Get-OptionalEnvValue -Name 'SMARTHOME_MQTT_PORT' -DefaultValue '1883'
+
+if (-not $Tests) {
+    $Tests = @($testCatalog.Keys)
+}
+
+$catalogError = Get-CatalogValidationError -Catalog $testCatalog `
+                                           -Tests $Tests `
+                                           -DeviceDecidedKeys $deviceDecidedKeys `
+                                           -RequiredCatalogKeys $requiredCatalogKeys
+if ($catalogError) {
+    Write-Error $catalogError
+    exit 1
+}
+
+if (-not $LogDirectory) {
+    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $LogDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "smarthome-integration-$stamp"
+}
+New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null
+
+$deployScript   = Join-Path $PSScriptRoot 'Deploy-ToDevice.ps1'
+$watchScript    = Join-Path $PSScriptRoot 'Watch-DeviceDebugOutput.ps1'
+$startEnvScript = Join-Path $PSScriptRoot 'Start-DevEnv.ps1'
+$stopEnvScript  = Join-Path $PSScriptRoot 'Stop-DevEnv.ps1'
 
 # ── Pre-flight ────────────────────────────────────────────────────────────────
 $expectedBroker = Get-OptionalEnvValue -Name 'SMARTHOME_MQTT_BROKER' -DefaultValue 'localhost'
