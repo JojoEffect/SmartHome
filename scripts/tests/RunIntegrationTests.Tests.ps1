@@ -243,6 +243,12 @@ Describe 'Get-IntegrationTestMarkerName' {
     It 'resolves for every device-decided entry in the shipped catalog' {
         # Against this checkout, not a fixture. The pre-flight does exactly this before
         # the first flash, so a missing or unreadable project is a desk-speed failure.
+        #
+        # Asserted against what each project actually declares, not against
+        # "SmartHome.IntegrationTests.<key>". Pinning that spelling here would contradict
+        # the case above -- the function's whole contract is that the project decides --
+        # and would turn a deliberate assembly rename into a red desk suite pointing at
+        # the resolution logic instead of at the rename.
         $repoRoot = Split-Path -Parent $scriptsDir
 
         foreach ($testName in $testCatalog.Keys) {
@@ -250,9 +256,25 @@ Describe 'Get-IntegrationTestMarkerName' {
                 continue
             }
 
-            Assert-Equal -Expected "SmartHome.IntegrationTests.$testName" `
+            $declared = Get-NfProjectAssemblyName -ProjectPath (Join-Path $repoRoot (Get-TestProjectPath -TestName $testName))
+
+            Assert-Equal -Expected $declared `
                          -Actual (Get-IntegrationTestMarkerName -TestName $testName -RepoRoot $repoRoot) `
                          -Because "$testName's marker name comes from its own project"
+        }
+    }
+
+    It 'keeps every shipped test on the SmartHome.IntegrationTests.<name> convention' {
+        # A separate claim from the one above, on purpose: that one is about the function,
+        # this one is about the checkout. Failing it means an assembly was renamed, which
+        # is legitimate but deliberate -- so the message should say "convention", not
+        # "marker name".
+        $repoRoot = Split-Path -Parent $scriptsDir
+
+        foreach ($testName in $testCatalog.Keys) {
+            Assert-Equal -Expected "SmartHome.IntegrationTests.$testName" `
+                         -Actual (Get-NfProjectAssemblyName -ProjectPath (Join-Path $repoRoot (Get-TestProjectPath -TestName $testName))) `
+                         -Because "$testName's <AssemblyName> follows the repository's naming rule"
         }
     }
 }
@@ -328,9 +350,11 @@ Describe 'Get-DeviceMarkerVerdict' {
         Assert-Equal -Expected 'WRONG-TEST' -Actual $verdict.Outcome
     }
 
-    It 'reads a dotted assembly name as one name' {
-        # The regex takes the name as \S+, which is what lets it survive the move from
-        # 'WifiCheck' to 'SmartHome.IntegrationTests.WifiCheck'.
+    It 'finds a marker that is not at the start of its line' {
+        # The capture is a raw debug stream, so a marker can land after whatever the
+        # device wrote before it without a newline in between. Every case above already
+        # covers the dotted name; this one covers the leading text, which is the only
+        # thing here the anchorless pattern is doing.
         $verdict = Get-DeviceMarkerVerdict -CapturedLines @("noise [ITEST] $expected PASS: ok") `
                                            -ExpectedName $expected -CaptureSeconds 75
 

@@ -462,7 +462,9 @@ during the pre-flight. Until 2026-09-02 the runner compared the catalog key agai
 per-project `TestName` const — a third independent spelling of one name that nothing in the
 build reconciled, and whose drift surfaced as a `WRONG-TEST` verdict 90 seconds into a hardware
 run, in the same shape as a stale deploy (issue #20). `WRONG-TEST` still exists and now means
-only that: the app answering is not the one just flashed. The type has to come from the caller
+only that: the app answering is not the one just flashed — either because the flash failed, or
+because it succeeded but under-padded and left the old assembly where the CLR still finds it
+(Deploy padding above, and issue #46). The type has to come from the caller
 rather than `Assembly.GetExecutingAssembly()` because `IntegrationTest` ships both ways — as a
 `TestSupport` reference and as a linked source file — and would otherwise name `TestSupport`
 for some tests and the test itself for others.

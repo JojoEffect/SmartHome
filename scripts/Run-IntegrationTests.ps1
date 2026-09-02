@@ -310,10 +310,18 @@ function Get-DeviceMarkerVerdict {
     # own at runtime, and $ExpectedName was read off the project. So this can no longer
     # catch a naming slip -- it is only ever the app on the device not being the one
     # just flashed.
+    #
+    # Which has two causes, and the message names both because they send an investigation
+    # in opposite directions. A flash that failed is visible in nanoff's own output. A
+    # flash that succeeded but under-padded is not: nanoff erases only the new image's
+    # length and verifies its hash happily, while the CLR walks the whole deployment
+    # partition and can still find the previous test past the new image's end (see the
+    # Deploy padding section of CLAUDE.md, and issue #46). Saying only "the flash did not
+    # take" would send that one to check output that looks perfectly healthy.
     if ($reportedName -ne $ExpectedName) {
         return @{
             Outcome = 'WRONG-TEST'
-            Detail  = "device reported '$reportedName', not '$ExpectedName' -- the flash did not take, so this is a previous test still running"
+            Detail  = "device reported '$reportedName', not '$ExpectedName' -- a previous test is still answering, either because the flash did not take or because it left the old assembly in the deployment partition (check the deploy padding)"
         }
     }
 

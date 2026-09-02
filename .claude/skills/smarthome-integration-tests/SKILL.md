@@ -68,9 +68,12 @@ Outcomes other than PASS/FAIL:
   which means `Deploy-ToDevice.ps1`'s `-DeployAddress` is stale.
 - `ERROR` — deploy or capture itself failed; the message is the sub-script's own error.
 - `WRONG-TEST` — the device emitted a marker naming a different assembly than the one just
-  flashed, so the flash did not take and a previous test is still answering. Both names come
-  from one `<AssemblyName>` (the device reads its own at runtime, the runner reads the project's
-  in the pre-flight), so this can no longer mean a naming slip — that was issue #20.
+  flashed, so a previous test is still answering. Two causes, and they point opposite ways:
+  the flash failed (nanoff's own output says so), or it succeeded but under-padded and left the
+  old assembly in the deployment partition for the CLR to find (nanoff looks perfectly healthy —
+  see the Deploy padding notes, and issue #46). Both names come from one `<AssemblyName>` (the
+  device reads its own at runtime, the runner reads the project's in the pre-flight), so this
+  can no longer mean a naming slip — that was issue #20.
 - `RESTARTED` — BrokerOutage only. The device did publish again, but its heartbeat counter went
   backwards, so it recovered by rebooting rather than reconnecting.
 
