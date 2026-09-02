@@ -857,24 +857,6 @@ function Wait-ForAnnounceWitnessed {
     return $false
 }
 
-function Get-MosquittoTool {
-    param([string]$Name)
-
-    $dir = Get-RequiredEnvValue -Name 'SMARTHOME_MOSQUITTO_DIR'
-    $path = Join-Path $dir $Name
-
-    # Same guard and remediation Start-DevEnv.ps1 gives the same two binaries. Without
-    # it a wrong SMARTHOME_MOSQUITTO_DIR surfaced as a raw CommandNotFoundException --
-    # or, for the retained snapshot, as an empty read reported as a conformance FAIL,
-    # i.e. a machine-config problem blamed on the device.
-    if (-not (Test-Path $path)) {
-        Write-Error ("Not found: {0}`nCheck SMARTHOME_MOSQUITTO_DIR in local.env.ps1." -f $path)
-        exit 1
-    }
-
-    return $path
-}
-
 # How long a snapshot subscriber listens. Three seconds, and it stays three seconds --
 # a fixed value rather than a parameter, because there is nothing here for a caller to
 # choose. Two attempts at shortening it both broke the conformance check, and the
@@ -1007,15 +989,15 @@ function Start-HomieCapture {
         Start-Sleep -Milliseconds 50
     }
 
-    $sub = Get-MosquittoTool -Name 'mosquitto_sub.exe'
+    $sub = Get-SmartHomeMosquittoTool -Name 'mosquitto_sub.exe'
 
-    # Arguments come from Common.ps1, not from a second copy of them here. The parser
-    # depends on the exact '%t %r %p' layout, and that layout is chosen and explained in
-    # Get-SmartHomeSubscriberArguments -- spelling it out again meant a one-line change in
-    # the file that owns it would silently break this reader.
-    # Quoting idiom matches Start-DevEnv.ps1's subscriber launch.
-    $subscriberArgs = (Get-SmartHomeSubscriberArguments -Port $Port |
-        ForEach-Object { if ($_ -match '[\s/#]') { '"{0}"' -f $_ } else { $_ } }) -join ' '
+    # Arguments and their cmd.exe quoting both come from Common.ps1, not from a second
+    # copy of them here. The parser depends on the exact '%t %r %p' layout, and that layout
+    # is chosen and explained in Get-SmartHomeSubscriberArguments -- spelling it out again
+    # meant a one-line change in the file that owns it would silently break this reader.
+    # The rendering used to be duplicated character for character in Start-DevEnv.ps1 with
+    # only a comment saying so, which is issue #85's second item.
+    $subscriberArgs = Get-SmartHomeSubscriberArgumentString -Port $Port
     $command = '/c ""{0}" {1} > "{2}" 2>&1"' -f $sub, $subscriberArgs, $out
     $process = Start-Process -FilePath 'cmd.exe' -ArgumentList $command -PassThru -WindowStyle Hidden
 
@@ -1330,7 +1312,7 @@ function Publish-HomieCommand {
 
     # Non-retained, as the convention requires of a controller: "A Homie controller
     # publishes to the set command topic with non-retained messages only."
-    $pub = Get-MosquittoTool -Name 'mosquitto_pub.exe'
+    $pub = Get-SmartHomeMosquittoTool -Name 'mosquitto_pub.exe'
     # Host from Common.ps1, which owns the reasoning. Not a literal here: the broker
     # address is shared vocabulary, and a second spelling is one a future change to the
     # listener binding would miss.
@@ -1426,8 +1408,15 @@ function Wait-ForRetainedValue {
 # Start/stop rather than a scriptblock wrapper: the phases share $snapshot and the
 # failure list, and & { } would run them in a child scope where those assignments are
 # invisible to the phases that follow.
+#
+# Only the list is declared here. $script:currentPhase, which these two functions are the
+# sole writers of, is declared with $script:snapshotsTaken further up, because the reason
+# it has to exist before any conformance check runs belongs to a reader outside this
+# block: Save-SnapshotEvidence reads it on every window of every test, and under
+# Set-StrictMode -Version Latest an unset variable there is a terminating error inside a
+# finally. This block used to redeclare it, leaving one variable with two rationale
+# comments to reconcile (issue #85's fifth item).
 $script:conformancePhases = @()
-$script:currentPhase = $null
 
 function Start-ConformancePhase {
     param([Parameter(Mandatory = $true)][string]$Name)

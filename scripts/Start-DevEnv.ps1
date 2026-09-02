@@ -32,8 +32,10 @@
     The wrapper means the recorded subscriber pid is cmd's, so it is stopped as a
     process TREE rather than a single pid.
 
-    File names and the subscriber's argument list come from Common.ps1, which also
-    uses them to recognise leftover processes -- see the file-vocabulary section there.
+    File names, the subscriber's argument list and its cmd.exe quoting all come from
+    Common.ps1, which also uses the file names to recognise leftover processes -- see
+    the file-vocabulary section there. So does the mosquitto binary lookup, guard and
+    remediation message, which Run-IntegrationTests.ps1 reads from the same place.
 
 .PARAMETER NoSync
     Skip the companion-repo sync and go straight to the broker. Use when the siblings
@@ -79,17 +81,14 @@ if (-not $NoSync) {
 
 Import-SmartHomeLocalEnv
 
-$mosquittoDir = Get-RequiredEnvValue -Name 'SMARTHOME_MOSQUITTO_DIR'
 $mqttPort = Get-OptionalEnvValue -Name 'SMARTHOME_MQTT_PORT' -DefaultValue '1883'
-$mosquittoExe = Join-Path $mosquittoDir 'mosquitto.exe'
-$mosquittoSub = Join-Path $mosquittoDir 'mosquitto_sub.exe'
 
-foreach ($exe in @($mosquittoExe, $mosquittoSub)) {
-    if (-not (Test-Path $exe)) {
-        Write-Error ("Not found: {0}`nCheck SMARTHOME_MOSQUITTO_DIR in local.env.ps1." -f $exe)
-        exit 1
-    }
-}
+# Resolved and guarded here, before anything is started, rather than where each is first
+# run: both are needed by a healthy start, and a missing one is a machine-config fault
+# whose remediation is the same for either. Get-SmartHomeMosquittoTool owns that guard and
+# its message; Run-IntegrationTests.ps1 had a byte-identical copy of both until issue #85.
+$mosquittoExe = Get-SmartHomeMosquittoTool -Name 'mosquitto.exe'
+$mosquittoSub = Get-SmartHomeMosquittoTool -Name 'mosquitto_sub.exe'
 
 # ── Existing environment ──────────────────────────────────────────────────────
 # A state file alone doesn't mean anything is running: a Ctrl+C at the wrong
@@ -219,8 +218,7 @@ if ($Detached) {
     # cmd.exe does the redirect so this script doesn't have to (see header). The
     # outer pair of quotes is what cmd /c needs to keep the inner quoted paths
     # intact.
-    $subscriberArgs = (Get-SmartHomeSubscriberArguments -Port $mqttPort |
-        ForEach-Object { if ($_ -match '[\s/#]') { '"{0}"' -f $_ } else { $_ } }) -join ' '
+    $subscriberArgs = Get-SmartHomeSubscriberArgumentString -Port $mqttPort
     $subscriberCommand = '/c ""{0}" {1} > "{2}" 2> "{3}""' -f `
         $mosquittoSub, $subscriberArgs, $subscriberLog, $subscriberErrLog
 

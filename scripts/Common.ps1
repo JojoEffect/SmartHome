@@ -682,6 +682,55 @@ function Get-SmartHomeSubscriberArguments {
     return @('-h', $SmartHomeLocalBrokerHost, '-p', $Port, '-t', $SmartHomeHomieTopic, '-F', '%t %r %p')
 }
 
+function Get-SmartHomeSubscriberArgumentString {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Port
+    )
+
+    # The arguments above, rendered as one string for cmd.exe. Both scripts that start a
+    # subscriber redirect its output, and both do the redirect in cmd.exe rather than with
+    # Start-Process -RedirectStandardOutput (see Start-DevEnv.ps1's header for why), so
+    # both need the argument list flattened.
+    #
+    # Quoting is the part worth sharing. Only the values carrying whitespace, a slash or a
+    # '#' need it -- 'homie/#' is the one that does today -- and the rule lived character
+    # for character in both files, in the half that breaks first if the argument list ever
+    # grows a value needing different quoting.
+    return (Get-SmartHomeSubscriberArguments -Port $Port |
+        ForEach-Object { if ($_ -match '[\s/#]') { '"{0}"' -f $_ } else { $_ } }) -join ' '
+}
+
+function Get-SmartHomeMosquittoTool {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        # Defaulted from SMARTHOME_MOSQUITTO_DIR rather than read unconditionally, so a
+        # caller -- a test, above all -- can ask about a directory without the machine's
+        # own configuration deciding the answer.
+        [string]$Directory
+    )
+
+    if (-not $PSBoundParameters.ContainsKey('Directory')) {
+        $Directory = Get-RequiredEnvValue -Name 'SMARTHOME_MOSQUITTO_DIR'
+    }
+
+    $path = Join-Path $Directory $Name
+
+    # Without this guard a wrong SMARTHOME_MOSQUITTO_DIR surfaced as a raw
+    # CommandNotFoundException -- or, for Run-IntegrationTests.ps1's retained snapshot, as
+    # an empty read reported as a conformance FAIL, i.e. a machine-config problem blamed on
+    # the device. exit rather than throw, matching Get-RequiredEnvValue above: this is a
+    # setup fault, and every caller's answer to it is to stop.
+    if (-not (Test-Path $path)) {
+        Write-Error ("Not found: {0}`nCheck SMARTHOME_MOSQUITTO_DIR in local.env.ps1." -f $path)
+        exit 1
+    }
+
+    return $path
+}
+
 # ── Dev environment: state ────────────────────────────────────────────────────
 # Start-DevEnv.ps1 records what it spawned so Stop-DevEnv.ps1 (or the
 # integration-test runner) can shut it down from a different shell. Keyed by
