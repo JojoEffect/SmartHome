@@ -26,14 +26,21 @@ Useful switches:
 
 `scripts\` decides what the integration suite reports, and it is the half of the suite a desk can
 exercise: `Get-CatalogValidationError`, `ConvertFrom-HomieCaptureLine`, `ConvertTo-HomieSnapshot`,
-`Get-HomieLivePayloads`, `Wait-ForAnnounceWitnessed`, `Get-SubscriberLogLineCount`, plus
-`Common.ps1`'s path globs, dev-environment state and the deployment-geometry parse the deploy
-cross-checks its flash address against.
+`Get-HomieLivePayloads`, `Get-AttributeFailure`, `Get-ConformanceCaptureSeconds`,
+`Wait-ForAnnounceWitnessed`, `Get-SubscriberLogLineCount`, plus `Common.ps1`'s path globs,
+dev-environment state and the deployment-geometry parse the deploy cross-checks its flash
+address against.
 
 It does **not** cover anything that needs a broker, a subscriber process or the device —
 `Start-HomieCapture`'s connect wait, `Invoke-BrokerOutageCheck`, `Invoke-HomieConformanceCheck`.
 Those still need `Run-IntegrationTests.ps1` on real hardware. Running this suite is not a
 substitute for saying what was verified on hardware in a pull request.
+
+`Get-AttributeFailure` is the first *assertion* inside `Measure-HomieConformance` that is covered
+here — the conformance machinery around it, `Get-ConformanceCaptureSeconds` and the lifecycle
+table, already was. It was nested inside that function and closed over its snapshot until issue
+#84 gave it the snapshot as a parameter; the rest of the assertions still need a device, and the
+uncovered remainder is what #84 tracks.
 
 ## Adding a test
 
