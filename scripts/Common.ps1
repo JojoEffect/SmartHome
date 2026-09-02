@@ -234,6 +234,12 @@ function Get-SmartHomeReferencedPackage {
     # references to 29 distinct package versions, and every caller wants the set. The
     # restore's "already present" count is a count of packages, not of mentions.
     #
+    # -Config exists so a caller that already globbed can hand the list over instead of
+    # paying for a second walk. Test-Setup.ps1 does: it needs the *file* count for its
+    # "no packages.config found" row as well as the references, and one recursive pass
+    # over the main checkout costs ~2.4s (it covers packages\ and every linked worktree's
+    # source tree). Omit it and this globs for itself, which is what the restore does.
+    #
     # Always an array, for the reason spelled out on Get-SmartHomePackagesConfig, and
     # -ErrorAction reaches that function's enumeration through the scope chain.
     #
@@ -245,14 +251,21 @@ function Get-SmartHomeReferencedPackage {
     # callers assign first; the test file has a case for the empty-result half of this.
     param(
         [Parameter(Mandatory = $true)]
-        [string]$RepoRoot
+        [string]$RepoRoot,
+
+        [AllowEmptyCollection()]
+        $Config
     )
+
+    if ($null -eq $Config) {
+        $Config = Get-SmartHomePackagesConfig -RepoRoot $RepoRoot
+    }
 
     $packagesDir = Join-Path $RepoRoot 'packages'
     $seen = @{}
     $records = New-Object System.Collections.Generic.List[psobject]
 
-    foreach ($config in (Get-SmartHomePackagesConfig -RepoRoot $RepoRoot)) {
+    foreach ($config in $Config) {
         [xml]$xml = Get-Content -LiteralPath $config.FullName
 
         foreach ($package in $xml.SelectNodes('/packages/package')) {
@@ -297,9 +310,13 @@ function Get-SmartHomeUnreferencedPackageDir {
     # something other than what it says.
     #
     # Name matching is case-insensitive, which is what a hashtable gives by default and
-    # what NTFS gives anyway: the folder NuGet extracts and the id in packages.config
-    # differ in case often enough (nanoFramework.M2Mqtt vs nanoframework.m2mqtt in the
-    # cache) that a case-sensitive complement would call a restored package stale.
+    # what NTFS gives anyway. Folders Restore-Packages.ps1 creates always carry the
+    # packages.config casing, because it names the destination from this record -- but
+    # packages\ is also written by `nuget restore` and by Visual Studio, which take the
+    # casing from the package itself, and nothing guarantees the two agree. An ordinal
+    # complement would call such a folder stale and -Prune would delete a restored
+    # package. (The all-lowercase spelling, nanoframework.m2mqtt, is the *cache* layout
+    # under ~\.nuget\packages\<id>\ -- not something seen in packages\.)
     param(
         [Parameter(Mandatory = $true)]
         [string]$PackagesDir,
@@ -336,15 +353,28 @@ function Get-NanoFrameworkTestAdapterDir {
     # $null on every path it cannot resolve, because both callers already treat that as
     # "cannot run the unit tests" and say so. The warning is what distinguishes the three
     # reasons; Test-Setup.ps1 silences it and builds its own row from the same list.
+    #
+    # -ReferencedPackage for the same two reasons -Config exists on the function above,
+    # and one more that is not about speed: without it this globs the whole checkout for
+    # itself, and a *preflight* calling it cannot suppress an enumeration error inside
+    # that glob without also suppressing errors it wants. Test-Setup.ps1 passes the list
+    # it already read under -ErrorAction SilentlyContinue, so an unreadable subtree costs
+    # that run one row rather than the whole table.
     param(
         [Parameter(Mandatory = $true)]
-        [string]$RepoRoot
+        [string]$RepoRoot,
+
+        [AllowEmptyCollection()]
+        $ReferencedPackage
     )
 
-    # Assigned before it is filtered, never piped straight in -- see the note on
-    # Get-SmartHomeReferencedPackage for what piping it does to a Where-Object.
-    $referenced = Get-SmartHomeReferencedPackage -RepoRoot $RepoRoot
-    $testFramework = @($referenced | Where-Object { $_.Id -eq 'nanoFramework.TestFramework' })
+    if ($null -eq $ReferencedPackage) {
+        $ReferencedPackage = Get-SmartHomeReferencedPackage -RepoRoot $RepoRoot
+    }
+
+    # Filtered from a variable, never piped straight out of the function -- see the note
+    # on Get-SmartHomeReferencedPackage for what piping it does to a Where-Object.
+    $testFramework = @($ReferencedPackage | Where-Object { $_.Id -eq 'nanoFramework.TestFramework' })
 
     if ($testFramework.Count -eq 0) {
         Write-Warning "No packages.config in $RepoRoot references nanoFramework.TestFramework, so there is no adapter version to resolve."

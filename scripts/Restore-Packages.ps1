@@ -27,18 +27,23 @@
 
 .PARAMETER Prune
     Remove the packages\ folders nothing in this checkout references, one line per
-    removal. Supports -WhatIf, which is how to see the list without removing anything.
+    removal.
 
     Off by default: packages\ is not this script's to empty on a run someone asked for
     something else, and a stale folder costs disk rather than correctness now that
     Get-NanoFrameworkTestAdapterDir resolves by reference (issue #79).
+
+    -WhatIf lists what would be pruned. Note that PowerShell applies -WhatIf to the whole
+    script, not only to this switch, so such a run also restores nothing -- the output
+    says so rather than reporting copies it did not make.
 
 .EXAMPLE
     .\scripts\Restore-Packages.ps1
 
 .EXAMPLE
     .\scripts\Restore-Packages.ps1 -Prune -WhatIf
-    Lists the unreferenced packages\ folders without touching any of them.
+    Lists the unreferenced packages\ folders, writing nothing at all -- no removals and
+    no restores either.
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -90,8 +95,16 @@ foreach ($package in $referenced) {
     $cachePath = Join-Path $cacheRoot "$($package.Id.ToLowerInvariant())\$($package.Version)"
     if (Test-Path -LiteralPath $cachePath) {
         Copy-Item -LiteralPath $cachePath -Destination $package.Path -Recurse
-        Write-Host "  restored: $($package.Name)" -ForegroundColor Green
-        $copied++
+
+        # -WhatIf is declared for -Prune's sake but PowerShell applies it to the whole
+        # script, so under it the Copy-Item above wrote its own "What if:" line and copied
+        # nothing. Counting it here would report a restore that did not happen -- and did,
+        # until this guard: a -Prune -WhatIf run on an unrestored checkout announced 29
+        # packages restored over an empty packages\.
+        if (-not $WhatIfPreference) {
+            Write-Host "  restored: $($package.Name)" -ForegroundColor Green
+            $copied++
+        }
     }
     else {
         $missing.Add($package.Name)
@@ -99,7 +112,12 @@ foreach ($package in $referenced) {
 }
 
 Write-Host ""
-Write-Host "$alreadyPresent already present, $copied restored from local NuGet cache." -ForegroundColor Cyan
+if ($WhatIfPreference) {
+    Write-Host "$alreadyPresent already present; -WhatIf, so nothing was restored." -ForegroundColor Cyan
+}
+else {
+    Write-Host "$alreadyPresent already present, $copied restored from local NuGet cache." -ForegroundColor Cyan
+}
 
 # ── packages\ folders this checkout references no more ───────────────────────
 # The loop above only ever adds, and nothing else prunes: measured on the main checkout
@@ -155,7 +173,14 @@ Manager, which populates the cache this script reads from -- then re-run this sc
     exit 1
 }
 
-Write-Host "All referenced packages are available." -ForegroundColor Green
+if ($WhatIfPreference) {
+    # Not "all packages are available": under -WhatIf the copies were simulated, so this
+    # only means every reference was found in packages\ or in the local cache.
+    Write-Host "-WhatIf: every referenced package was located, and nothing was written." -ForegroundColor Green
+}
+else {
+    Write-Host "All referenced packages are available." -ForegroundColor Green
+}
 
 # Explicit success code: Initialize-Worktree.ps1 reads $LASTEXITCODE after invoking this
 # script, and without this it would carry whatever the last native command happened to

@@ -175,7 +175,8 @@ Describe 'Get-SmartHomeReferencedPackage' {
             '<packages></packages>'
         )
 
-        Assert-Equal -Expected 3 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $root).Count -Because 'the other three configs must still be read'
+        Assert-Equal -Expected 3 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $root).Count `
+                     -Because 'the three references in the two configs beside it must still be read'
     }
 
     It 'warns about a <package> missing an attribute and keeps the rest of the file' {
@@ -203,6 +204,26 @@ Describe 'Get-SmartHomeReferencedPackage' {
 
         Assert-NotNull -Value $found
         Assert-Equal -Expected 0 -Actual $found.Count
+    }
+
+    It 'reads the config list a caller hands it instead of globbing again' {
+        # Test-Setup.ps1 needs the file count as well as the references, and one recursive
+        # pass over the main checkout is ~2.4s. Proved by handing over *one* of the two
+        # in-checkout configs: a function that ignored -Config would still answer 3.
+        $root = New-ReferenceFixture -Name 'handed-configs'
+        $one = @(Get-ChildItem -LiteralPath (Join-Path $root 'src\common\Homie') -Filter 'packages.config' -File)
+
+        Assert-ArrayEqual -Expected @('nanoFramework.CoreLibrary.1.17.11', 'nanoFramework.M2Mqtt.5.1.221') `
+                          -Actual @(Get-SmartHomeReferencedPackage -RepoRoot $root -Config $one | ForEach-Object { $_.Name })
+    }
+
+    It 'globs for itself when -Config is omitted, and reads an empty list as empty' {
+        # The two halves of the default, so neither can quietly become the other: $null
+        # means "go and look", an empty array means "there was nothing".
+        $root = New-ReferenceFixture -Name 'config-default'
+
+        Assert-Equal -Expected 3 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $root).Count
+        Assert-Equal -Expected 0 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $root -Config @()).Count
     }
 
     It 'propagates -ErrorAction to the enumeration underneath it' {
@@ -370,6 +391,29 @@ Describe 'Get-NanoFrameworkTestAdapterDir' {
         $root = New-AdapterFixture -Restored @('3.0.9', '3.0.80') -Referenced @('3.0.9', '3.0.80')
 
         Assert-Null -Value (Get-NanoFrameworkTestAdapterDir -RepoRoot $root -WarningAction SilentlyContinue)
+    }
+
+    It 'resolves from a referenced list a caller hands it, without touching packages.config' {
+        # Test-Setup.ps1 passes the list it already read under -ErrorAction SilentlyContinue,
+        # so an unreadable subtree costs that preflight one row rather than the whole table.
+        # The fixture deliberately has NO packages.config at all: a function that globbed
+        # for itself would find no reference and return $null.
+        $root = New-AdapterFixture -Restored @('3.0.9', '3.0.80') -Name 'handed-references'
+        $handed = @([pscustomobject]@{
+            Id      = 'nanoFramework.TestFramework'
+            Version = '3.0.9'
+            Name    = 'nanoFramework.TestFramework.3.0.9'
+            Path    = (Join-Path $root 'packages\nanoFramework.TestFramework.3.0.9')
+        })
+
+        Assert-Match -Pattern '(?-i)nanoFramework\.TestFramework\.3\.0\.9\\' `
+                     -Actual (Get-NanoFrameworkTestAdapterDir -RepoRoot $root -ReferencedPackage $handed)
+    }
+
+    It 'reads a handed-over empty list as "nothing references it", not as "go and look"' {
+        $root = New-AdapterFixture -Restored @('3.0.80') -Referenced @('3.0.80') -Name 'handed-nothing'
+
+        Assert-Null -Value (Get-NanoFrameworkTestAdapterDir -RepoRoot $root -ReferencedPackage @() -WarningAction SilentlyContinue)
     }
 
     It 'ignores a restored version nothing references, rather than falling back to it' {

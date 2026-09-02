@@ -246,7 +246,11 @@ $configs = Get-SmartHomePackagesConfig -RepoRoot $repoRoot -ErrorAction Silently
 # difference was issue #78. The config count above is still read here because the "no
 # packages.config found" row below is about the files, not about what they reference --
 # a checkout full of empty configs is a different report from a checkout with none.
-$referenced = Get-SmartHomeReferencedPackage -RepoRoot $repoRoot -ErrorAction SilentlyContinue
+#
+# -Config hands over the glob this script already paid for, rather than making the helper
+# repeat it: one recursive pass over the main checkout is ~2.4s, and this preflight would
+# otherwise make three (here, and again inside the adapter resolver below).
+$referenced = Get-SmartHomeReferencedPackage -RepoRoot $repoRoot -Config $configs -ErrorAction SilentlyContinue
 
 foreach ($package in $referenced) {
     if (-not (Test-Path -LiteralPath $package.Path)) {
@@ -280,7 +284,14 @@ else {
 # -WarningAction SilentlyContinue: the resolver names its own reason on the warning
 # stream for Run-Tests.ps1's benefit, and a loose warning printed above this table is not
 # how a preflight reports. The row below says the same thing from the same list.
-$adapterDir = Get-NanoFrameworkTestAdapterDir -RepoRoot $repoRoot -WarningAction SilentlyContinue
+#
+# -ReferencedPackage, so this row cannot abort the run. Left to glob for itself the
+# resolver would re-walk the whole checkout, and an unreadable subtree in it -- a denied
+# folder, a junction loop, a packages\ path over MAX_PATH (issue #69) -- would raise a
+# non-terminating error that $ErrorActionPreference = 'Stop' turns terminating, killing
+# the preflight before it prints anything. The packages\ read above passes
+# -ErrorAction SilentlyContinue for exactly that reason; this reuses its result.
+$adapterDir = Get-NanoFrameworkTestAdapterDir -RepoRoot $repoRoot -ReferencedPackage $referenced -WarningAction SilentlyContinue
 if ($adapterDir) {
     Add-Result -Name 'nanoFramework test adapter' -Status 'OK' -Detail $adapterDir
 }
