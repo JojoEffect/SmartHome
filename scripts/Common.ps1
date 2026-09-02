@@ -1038,8 +1038,10 @@ function Stop-SmartHomeDevEnv {
 #   - It will NOT report how much of the partition is in use. Monitor_DeploymentMap,
 #     the command whose name promises exactly that, is a stub in the firmware that
 #     replies with an empty payload (Debugger.cpp), so nf-debugger's GetDeploymentMap()
-#     always hands back an empty list. Debugging_Deployment_Status reports the
-#     partition's start and length -- its geometry, not its contents.
+#     always hands back an empty list.
+#   - It WILL report the partition's geometry, through the flash sector map and not
+#     through Debugging_Deployment_Status -- which reads as the more direct question and
+#     answers with nothing usable on this ESP32. Geometry is not contents either way.
 #   - It will NOT let the region be read back. CheckPermission has no
 #     BLOCKTYPE_DEPLOYMENT case under AccessMemory_Read, so ReadMemory over the deploy
 #     partition comes back PermissionDenied. (Watch-DeviceDebugOutput.ps1 -DumpConfig

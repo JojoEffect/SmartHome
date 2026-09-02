@@ -106,8 +106,15 @@ pinned sibling checkouts rather than assumed:
 - `Monitor_DeploymentMap`, the command whose name promises the used extent, is a **stub** in
   the firmware — it replies with an empty payload (`Debugger.cpp`), so `nf-debugger`'s
   `GetDeploymentMap()` always hands back an empty list.
-- `Debugging_Deployment_Status` reports the partition's **start and length** — its geometry,
-  not how much of it is in use.
+- `Debugging_Deployment_Status` reads as the direct question and **does not work here**: on
+  this ESP32 it comes back with no usable geometry. Nothing in `nf-debugger`'s own ESP32 path
+  depends on it either — `DeploymentExecuteFull` is its only caller, and the ESP32 reports
+  `IncrementalDeployment`, so `DeploymentExecuteIncremental` is what actually runs. Measured on
+  the device on 2026-09-02, not reasoned about.
+- The **flash sector map** (`Monitor_FlashSectorMap`, a `Monitor_` command rather than a
+  `Debugging_` one) does answer, and its `c_MEMORY_USAGE_DEPLOYMENT` entry gives the partition's
+  start and size — its geometry, not how much of it is in use. `0x1E0000` / `1835008`, which
+  is exactly what `-DeployAddress` and `-DeployPartitionSize` had been carrying from a boot log.
 - `AccessMemory_Read` over the deploy partition is **refused**: `CheckPermission` lists no
   `BLOCKTYPE_DEPLOYMENT` case for reads. (`Watch-DeviceDebugOutput.ps1 -DumpConfig` reads the
   *config* partition, which is permitted — that is why that one works.)

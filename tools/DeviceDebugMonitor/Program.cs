@@ -20,6 +20,7 @@
 
 using nanoFramework.Tools.Debugger;
 using nanoFramework.Tools.Debugger.Extensions;
+using nanoFramework.Tools.Debugger.WireProtocol;
 
 // --until <text>: stop as soon as a line containing <text> arrives, instead of
 // sitting out the whole duration. The duration then acts as a timeout rather than a
@@ -144,19 +145,54 @@ if (!connected)
 if (eraseDeployment)
 {
     // The deploy partition's real geometry, straight from the device, rather than the
-    // hand-measured constants Deploy-ToDevice.ps1 carries. Debugging_Deployment_Status
-    // reports the partition, NOT how much of it is in use: the firmware walks the
-    // DEPLOYMENT block stream and sums its length (Debugger.cpp). There is no command
-    // that reports the used extent -- Monitor_DeploymentMap, the one that looks like it
+    // hand-measured constants Deploy-ToDevice.ps1 carries.
+    //
+    // From the flash sector map and NOT from Debugging_Deployment_Status, which looks
+    // like the more direct question and does not work here: on this ESP32 it answers
+    // with no usable geometry, and nothing in nf-debugger's own ESP32 path depends on
+    // it either -- DeploymentExecuteFull is the only caller, and the ESP32 reports
+    // IncrementalDeployment, so DeploymentExecuteIncremental (which reads this same
+    // sector map) is what actually runs. Measured on the device, not reasoned about.
+    //
+    // Either way it is the partition that is being reported, NOT how much of it is in
+    // use. Nothing reports that: Monitor_DeploymentMap, the command that looks like it
     // would, is a stub in the firmware that replies with an empty payload, and reading
     // the region back is refused outright (CheckPermission has no DEPLOYMENT case for
     // AccessMemory_Read). Erasing it is permitted, so this asks the device to make the
     // region blank rather than asking it what is in there.
-    var (_, storageStart, storageLength, statusOk) = device.DebugEngine.DeploymentGetStatusWithResult();
+    var sectorMap = device.DebugEngine.GetFlashSectorMap();
+    var deploymentSectors = (sectorMap ?? [])
+        .Where(s => (s.Flags & Commands.Monitor_FlashSectorMap.c_MEMORY_USAGE_MASK)
+                    == Commands.Monitor_FlashSectorMap.c_MEMORY_USAGE_DEPLOYMENT)
+        .OrderBy(s => s.StartAddress)
+        .ToList();
 
-    if (!statusOk || storageLength == 0)
+    if (deploymentSectors.Count == 0)
     {
-        Console.Error.WriteLine("Could not read the deployment partition's geometry from the device.");
+        Console.Error.WriteLine("The device's flash sector map lists no deployment region.");
+        return 1;
+    }
+
+    // Summed rather than "the first one": the map is a list of sector groups, and a
+    // target is free to describe its deployment area as several. Contiguity is checked
+    // rather than assumed -- a gap would make one length a lie about two regions, and
+    // erasing from the start of the first would then say nothing about the second.
+    uint storageStart = deploymentSectors[0].StartAddress;
+    uint storageLength = 0;
+    foreach (var sector in deploymentSectors)
+    {
+        if (sector.StartAddress != storageStart + storageLength)
+        {
+            Console.Error.WriteLine($"The device reports a deployment area in more than one piece (a gap before 0x{sector.StartAddress:X8}); this tool only handles a contiguous one.");
+            return 1;
+        }
+
+        storageLength += sector.NumBlocks * sector.BytesPerBlock;
+    }
+
+    if (storageLength == 0)
+    {
+        Console.Error.WriteLine("The device reports a deployment region of no size.");
         return 1;
     }
 
