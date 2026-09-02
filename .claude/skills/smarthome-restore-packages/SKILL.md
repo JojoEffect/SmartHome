@@ -26,10 +26,28 @@ populate the cache, then re-run this script.
 It restores only the `packages.config` files of the checkout it runs from. Linked worktrees sit
 *inside* the main checkout (`.claude\worktrees\<name>`), each a full copy with its own configs and
 its own `packages\`, so a plain recursive glob run from the main checkout would pull every
-worktree's referenced versions into it — including a version pinned in a worktree to chase a
-regression, which `Get-NanoFrameworkTestAdapterDir` could then pick as the test adapter. The glob
-lives in `Get-SmartHomePackagesConfig` (`scripts\Common.ps1`) and is shared with
-`Test-Setup.ps1`, so the two always agree about what this checkout needs.
+worktree's referenced versions into it. The glob lives in `Get-SmartHomePackagesConfig`
+(`scripts\Common.ps1`); the parse on top of it is `Get-SmartHomeReferencedPackage`, which
+`Test-Setup.ps1` and `Get-NanoFrameworkTestAdapterDir` read too, so all three agree about what
+this checkout references.
+
+## Pruning `packages\`
+
+The restore only ever *adds*, and nothing else cleaned that folder: every version bump left the
+previous version's folder behind indefinitely (61 folders against 29 references on the main
+checkout, 2026-09-01 — issue #79). Each run now ends with a one-line count of the folders nothing
+references.
+
+```powershell
+.\scripts\Restore-Packages.ps1 -Prune -WhatIf   # list them
+.\scripts\Restore-Packages.ps1 -Prune           # remove them
+```
+
+Pruning is safe to skip — since #79 the test adapter is resolved from the
+`nanoFramework.TestFramework` version this checkout *references*, not from whichever copy sorts
+highest under `packages\`, so a stale folder costs disk rather than correctness. It refuses to
+prune when the checkout references no packages at all, because the complement of an empty
+reference set is the entire folder.
 
 Run this any time you've hand-edited a `packages.config` (e.g. pinning/reverting a version to
 test a regression) or after switching to a branch with different package versions, before

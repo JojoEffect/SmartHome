@@ -98,23 +98,271 @@ Describe 'Get-SmartHomePackagesConfig' {
     }
 }
 
-Describe 'Get-NanoFrameworkTestAdapterDir' {
-    function New-AdapterFixture {
-        param([string[]]$Versions, [string]$Name = 'adapter')
+Describe 'Get-SmartHomeReferencedPackage' {
+    function New-ReferenceFixture {
+        # Written as text rather than built with an XmlDocument on purpose: what the
+        # subject has to survive is the *files on disk*, empty <packages> and a mangled
+        # <package> included, and a document model would refuse to produce some of them.
+        param([string]$Name = 'references')
 
         $root = New-TestDirectory -Name $Name
-        foreach ($version in $Versions) {
-            Set-TestFileContent -Path (Join-Path $root "packages\nanoFramework.TestFramework.$version\build\nanoFramework.TestAdapter.dll") -Content 'not a real dll'
-        }
+
+        Set-TestFileContent -Path (Join-Path $root 'src\common\Homie\packages.config') -Content @(
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<packages>'
+            '  <package id="nanoFramework.CoreLibrary" version="1.17.11" targetFramework="netnano1.0" />'
+            '  <package id="nanoFramework.M2Mqtt" version="5.1.221" targetFramework="netnano1.0" />'
+            '</packages>'
+        )
+
+        # Same CoreLibrary reference again, plus one of its own: the repository's 14
+        # configs carry 130 references to 29 distinct versions, so the overlap is the
+        # normal case rather than an edge one.
+        Set-TestFileContent -Path (Join-Path $root 'src\devices\RoomSensor\packages.config') -Content @(
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<packages>'
+            '  <package id="nanoFramework.CoreLibrary" version="1.17.11" targetFramework="netnano1.0" />'
+            '  <package id="nanoFramework.Hardware.Esp32" version="1.6.42" targetFramework="netnano1.0" />'
+            '</packages>'
+        )
+
+        # A linked worktree's reference, which belongs to another checkout entirely.
+        Set-TestFileContent -Path (Join-Path $root '.claude\worktrees\issue-99\src\devices\RoomSensor\packages.config') -Content @(
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<packages>'
+            '  <package id="nanoFramework.Iot.Device.Ads1115" version="1.2.999" targetFramework="netnano1.0" />'
+            '</packages>'
+        )
+
         return $root
     }
 
-    It 'returns $null when packages\ has not been restored' {
-        Assert-Null -Value (Get-NanoFrameworkTestAdapterDir -RepoRoot (New-TestDirectory -Name 'unrestored'))
+    It 'returns one record per distinct reference, across every config in the checkout' {
+        $referenced = Get-SmartHomeReferencedPackage -RepoRoot (New-ReferenceFixture)
+
+        Assert-ArrayEqual -Expected @('nanoFramework.CoreLibrary.1.17.11', 'nanoFramework.M2Mqtt.5.1.221', 'nanoFramework.Hardware.Esp32.1.6.42') `
+                          -Actual @($referenced | ForEach-Object { $_.Name }) `
+                          -Because 'CoreLibrary is referenced twice and must appear once'
+    }
+
+    It 'splits each reference into Id, Version and the packages\ path it would be restored to' {
+        $root = New-ReferenceFixture
+        $referenced = Get-SmartHomeReferencedPackage -RepoRoot $root
+        $m2mqtt = @($referenced | Where-Object { $_.Id -eq 'nanoFramework.M2Mqtt' })
+
+        Assert-Equal -Expected 1 -Actual $m2mqtt.Count
+        Assert-Equal -Expected '5.1.221' -Actual $m2mqtt[0].Version
+        Assert-Equal -Expected 'nanoFramework.M2Mqtt.5.1.221' -Actual $m2mqtt[0].Name
+        Assert-Equal -Expected (Join-Path $root 'packages\nanoFramework.M2Mqtt.5.1.221') -Actual $m2mqtt[0].Path
+    }
+
+    It 'answers for the checkout it was asked about, not for a worktree inside it' {
+        # Inherited from Get-SmartHomePackagesConfig rather than re-implemented, which is
+        # the reason both the restore and the preflight go through this one function
+        # (issue #68 fixed that asymmetry once; issue #79 stopped it recurring).
+        $referenced = Get-SmartHomeReferencedPackage -RepoRoot (New-ReferenceFixture)
+
+        Assert-Equal -Expected 0 -Actual @($referenced | Where-Object { $_.Id -eq 'nanoFramework.Iot.Device.Ads1115' }).Count
+    }
+
+    It 'reads a packages.config with no <package> children instead of throwing -- issue #78' {
+        # $xml.packages.package throws PropertyNotFoundStrict under Set-StrictMode on this
+        # file, which aborted the whole restore without naming it. SelectNodes returns an
+        # empty list, which is why every reader of these files now goes through here.
+        $root = New-ReferenceFixture -Name 'empty-config'
+        Set-TestFileContent -Path (Join-Path $root 'src\devices\OvenControl\packages.config') -Content @(
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<packages></packages>'
+        )
+
+        Assert-Equal -Expected 3 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $root).Count `
+                     -Because 'the three references in the two configs beside it must still be read'
+    }
+
+    It 'warns about a <package> missing an attribute and keeps the rest of the file' {
+        # Skipped rather than thrown on, but never silently: a dropped reference is a
+        # package that looks restored to the preflight and to the prune alike.
+        $root = New-ReferenceFixture -Name 'mangled-config'
+        Set-TestFileContent -Path (Join-Path $root 'src\devices\OvenControl\packages.config') -Content @(
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<packages>'
+            '  <package id="nanoFramework.Logging" targetFramework="netnano1.0" />'
+            '  <package id="nanoFramework.System.Text" version="1.2.54" targetFramework="netnano1.0" />'
+            '</packages>'
+        )
+
+        $WarningPreference = 'SilentlyContinue'
+        $referenced = Get-SmartHomeReferencedPackage -RepoRoot $root
+        $names = @($referenced | ForEach-Object { $_.Name })
+
+        Assert-Contains -Item 'nanoFramework.System.Text.1.2.54' -Collection $names
+        Assert-Equal -Expected 0 -Actual @($names | Where-Object { $_ -like 'nanoFramework.Logging*' }).Count
+    }
+
+    It 'returns something whose .Count is readable when nothing is referenced' {
+        $found = Get-SmartHomeReferencedPackage -RepoRoot (New-TestDirectory -Name 'no-references')
+
+        Assert-NotNull -Value $found
+        Assert-Equal -Expected 0 -Actual $found.Count
+    }
+
+    It 'reads the config list a caller hands it instead of globbing again' {
+        # Test-Setup.ps1 needs the file count as well as the references, and one recursive
+        # pass over the main checkout is ~2.4s. Proved by handing over *one* of the two
+        # in-checkout configs: a function that ignored -Config would still answer 3.
+        $root = New-ReferenceFixture -Name 'handed-configs'
+        $one = @(Get-ChildItem -LiteralPath (Join-Path $root 'src\common\Homie') -Filter 'packages.config' -File)
+
+        Assert-ArrayEqual -Expected @('nanoFramework.CoreLibrary.1.17.11', 'nanoFramework.M2Mqtt.5.1.221') `
+                          -Actual @(Get-SmartHomeReferencedPackage -RepoRoot $root -Config $one | ForEach-Object { $_.Name })
+    }
+
+    It 'globs for itself when -Config is omitted, and reads an empty list as empty' {
+        # The two halves of the default, so neither can quietly become the other: $null
+        # means "go and look", an empty array means "there was nothing".
+        $root = New-ReferenceFixture -Name 'config-default'
+
+        Assert-Equal -Expected 3 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $root).Count
+        Assert-Equal -Expected 0 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $root -Config @()).Count
+    }
+
+    It 'propagates -ErrorAction to the enumeration underneath it' {
+        # Restore-Packages.ps1 keeps the default and aborts; Test-Setup.ps1 would rather
+        # report a gap than stop. Both come from the pass-through, which reaches
+        # Get-SmartHomePackagesConfig through the scope chain rather than by being forwarded.
+        $missing = Join-Path (New-TestDirectory -Name 'gone-references') 'not-a-directory'
+
+        Assert-Throws -Body { Get-SmartHomeReferencedPackage -RepoRoot $missing } -Because 'the default must still abort'
+        Assert-Equal -Expected 0 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $missing -ErrorAction SilentlyContinue).Count
+    }
+}
+
+Describe 'Get-SmartHomeUnreferencedPackageDir' {
+    function New-PackagesDirFixture {
+        param([string[]]$Folders = @(), [string[]]$Files = @(), [string]$Name = 'packages-dir')
+
+        $root = New-TestDirectory -Name $Name
+        $packagesDir = Join-Path $root 'packages'
+        New-Item -ItemType Directory -Force -Path $packagesDir | Out-Null
+
+        foreach ($folder in $Folders) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $packagesDir $folder) | Out-Null
+        }
+        foreach ($file in $Files) {
+            Set-TestFileContent -Path (Join-Path $packagesDir $file) -Content 'not a package'
+        }
+
+        return $packagesDir
+    }
+
+    function New-ReferenceRecord {
+        param([string[]]$Name)
+        return @($Name | ForEach-Object { [pscustomobject]@{ Id = $_; Version = '1.0.0'; Name = $_; Path = "packages\$_" } })
+    }
+
+    It 'returns the folders the referenced set does not account for' {
+        # The shape issue #79 measured: an old version left behind beside the current one.
+        $packagesDir = New-PackagesDirFixture -Folders @('nanoFramework.M2Mqtt.5.1.146', 'nanoFramework.M2Mqtt.5.1.221', 'nanoFramework.CoreLibrary.1.17.11')
+        $unreferenced = Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir `
+                            -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.M2Mqtt.5.1.221', 'nanoFramework.CoreLibrary.1.17.11'))
+
+        Assert-ArrayEqual -Expected @('nanoFramework.M2Mqtt.5.1.146') -Actual @($unreferenced | ForEach-Object { $_.Name })
+    }
+
+    It 'returns nothing when every folder is referenced' {
+        $packagesDir = New-PackagesDirFixture -Folders @('nanoFramework.CoreLibrary.1.17.11')
+        $unreferenced = Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir `
+                            -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.CoreLibrary.1.17.11'))
+
+        Assert-Equal -Expected 0 -Actual $unreferenced.Count
+    }
+
+    It 'matches folder to reference without regard to case' {
+        # The cache spells ids lowercase and packages.config spells them mixed; NTFS does
+        # not care either. A case-sensitive complement would call a restored package stale
+        # and -Prune would then delete it.
+        $packagesDir = New-PackagesDirFixture -Folders @('nanoframework.m2mqtt.5.1.221')
+        $unreferenced = Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir `
+                            -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.M2Mqtt.5.1.221'))
+
+        Assert-Equal -Expected 0 -Actual $unreferenced.Count
+    }
+
+    It 'leaves loose files in packages\ alone' {
+        $packagesDir = New-PackagesDirFixture -Folders @('nanoFramework.CoreLibrary.1.17.11') -Files @('some.nupkg', 'repositories.config')
+        $unreferenced = Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir `
+                            -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.CoreLibrary.1.17.11'))
+
+        Assert-Equal -Expected 0 -Actual $unreferenced.Count -Because 'a .nupkg is not a stale package version'
+    }
+
+    It 'calls every folder unreferenced when the referenced set is empty' {
+        # True, and the reason Restore-Packages.ps1 refuses to prune on it: the complement
+        # of nothing is the whole folder, and a checkout that references nothing is broken
+        # rather than clean. Pinned here so that guard cannot be dropped as redundant.
+        $packagesDir = New-PackagesDirFixture -Folders @('nanoFramework.CoreLibrary.1.17.11', 'nanoFramework.M2Mqtt.5.1.221')
+
+        Assert-Equal -Expected 2 -Actual (Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir -ReferencedPackage @()).Count
+    }
+
+    It 'reports nothing, rather than throwing, when packages\ is not there at all' {
+        $absent = Join-Path (New-TestDirectory -Name 'no-packages-dir') 'packages'
+        $unreferenced = Get-SmartHomeUnreferencedPackageDir -PackagesDir $absent -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.CoreLibrary.1.17.11'))
+
+        Assert-NotNull -Value $unreferenced
+        Assert-Equal -Expected 0 -Actual $unreferenced.Count
+    }
+
+    It 'works under a checkout path containing brackets' {
+        $packagesDir = New-PackagesDirFixture -Folders @('nanoFramework.M2Mqtt.5.1.146') -Name 'packages [wip]'
+
+        Assert-Equal -Expected 1 -Actual (Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.M2Mqtt.5.1.221'))).Count
+    }
+}
+
+Describe 'Get-NanoFrameworkTestAdapterDir' {
+    function New-AdapterFixture {
+        # -Restored is what is on disk under packages\; -Referenced is what the checkout's
+        # own packages.config declares. Separating them is the whole point of issue #79:
+        # before it, only the first mattered.
+        param(
+            [string[]]$Restored = @(),
+            [string[]]$Referenced = @(),
+            [string]$Name = 'adapter'
+        )
+
+        $root = New-TestDirectory -Name $Name
+
+        foreach ($version in $Restored) {
+            Set-TestFileContent -Path (Join-Path $root "packages\nanoFramework.TestFramework.$version\build\nanoFramework.TestAdapter.dll") -Content 'not a real dll'
+        }
+
+        if ($Referenced.Count -gt 0) {
+            Set-TestFileContent -Path (Join-Path $root 'src\tests\Unit\packages.config') -Content @(
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<packages>'
+                @($Referenced | ForEach-Object { "  <package id=""nanoFramework.TestFramework"" version=""$_"" targetFramework=""netnano1.0"" />" })
+                '</packages>'
+            )
+        }
+
+        return $root
+    }
+
+    It 'returns $null when the referenced version has not been restored' {
+        $root = New-AdapterFixture -Referenced @('3.0.80')
+        Assert-Null -Value (Get-NanoFrameworkTestAdapterDir -RepoRoot $root -WarningAction SilentlyContinue)
+    }
+
+    It 'returns $null when nothing in the checkout references the test framework' {
+        # Not "pick whatever is there anyway": there is no version to demand, and
+        # Run-Tests.ps1 has nothing to run either.
+        $root = New-AdapterFixture -Restored @('3.0.80')
+        Assert-Null -Value (Get-NanoFrameworkTestAdapterDir -RepoRoot $root -WarningAction SilentlyContinue)
     }
 
     It 'returns the directory holding the adapter, not the file' {
-        $root = New-AdapterFixture -Versions @('3.0.80')
+        $root = New-AdapterFixture -Restored @('3.0.80') -Referenced @('3.0.80')
         $dir = Get-NanoFrameworkTestAdapterDir -RepoRoot $root
 
         Assert-NotNull -Value $dir
@@ -122,18 +370,59 @@ Describe 'Get-NanoFrameworkTestAdapterDir' {
     }
 
     It 'finds the adapter under a checkout path containing brackets' {
-        $root = New-AdapterFixture -Versions @('3.0.80') -Name 'adapter [wip]'
+        $root = New-AdapterFixture -Restored @('3.0.80') -Referenced @('3.0.80') -Name 'adapter [wip]'
         Assert-NotNull -Value (Get-NanoFrameworkTestAdapterDir -RepoRoot $root)
     }
 
-    It 'picks by descending path sort, which is not version order -- issue #79' {
-        # 3.0.9 wins over 3.0.80 because '9' sorts after '8' as text. This is the current
-        # behaviour, pinned here rather than endorsed: the adapter should be resolved from
-        # what the checkout's packages.config actually references, which is what #79 is
-        # for. When that lands, this case is the one that has to change with it.
-        $root = New-AdapterFixture -Versions @('3.0.9', '3.0.80')
+    It 'takes the referenced version over the one that sorts highest -- issue #79' {
+        # The case this issue exists for. Nothing prunes packages\, so a version bump
+        # leaves the previous folder behind, and '3.0.9' sorts above '3.0.80' as text --
+        # so the old descending-path-sort resolver ran the unit tests against an adapter
+        # this checkout does not reference. CLAUDE.md records what that class of mismatch
+        # costs: a green vstest run that executed nothing, unnoticed for three commits.
+        $root = New-AdapterFixture -Restored @('3.0.9', '3.0.80') -Referenced @('3.0.80')
 
-        Assert-Match -Pattern '3\.0\.9\\' -Actual (Get-NanoFrameworkTestAdapterDir -RepoRoot $root)
+        Assert-Match -Pattern '(?-i)nanoFramework\.TestFramework\.3\.0\.80\\' -Actual (Get-NanoFrameworkTestAdapterDir -RepoRoot $root)
+    }
+
+    It 'refuses to guess when the checkout references two test framework versions' {
+        # A real disagreement between projects, and picking one silently is the failure
+        # this issue is about. Restoring both does not make it resolvable.
+        $root = New-AdapterFixture -Restored @('3.0.9', '3.0.80') -Referenced @('3.0.9', '3.0.80')
+
+        Assert-Null -Value (Get-NanoFrameworkTestAdapterDir -RepoRoot $root -WarningAction SilentlyContinue)
+    }
+
+    It 'resolves from a referenced list a caller hands it, without touching packages.config' {
+        # Test-Setup.ps1 passes the list it already read under -ErrorAction SilentlyContinue,
+        # so an unreadable subtree costs that preflight one row rather than the whole table.
+        # The fixture deliberately has NO packages.config at all: a function that globbed
+        # for itself would find no reference and return $null.
+        $root = New-AdapterFixture -Restored @('3.0.9', '3.0.80') -Name 'handed-references'
+        $handed = @([pscustomobject]@{
+            Id      = 'nanoFramework.TestFramework'
+            Version = '3.0.9'
+            Name    = 'nanoFramework.TestFramework.3.0.9'
+            Path    = (Join-Path $root 'packages\nanoFramework.TestFramework.3.0.9')
+        })
+
+        Assert-Match -Pattern '(?-i)nanoFramework\.TestFramework\.3\.0\.9\\' `
+                     -Actual (Get-NanoFrameworkTestAdapterDir -RepoRoot $root -ReferencedPackage $handed)
+    }
+
+    It 'reads a handed-over empty list as "nothing references it", not as "go and look"' {
+        $root = New-AdapterFixture -Restored @('3.0.80') -Referenced @('3.0.80') -Name 'handed-nothing'
+
+        Assert-Null -Value (Get-NanoFrameworkTestAdapterDir -RepoRoot $root -ReferencedPackage @() -WarningAction SilentlyContinue)
+    }
+
+    It 'ignores a restored version nothing references, rather than falling back to it' {
+        # The fallback that would make this function useful again is exactly the one that
+        # makes it lie: 3.0.9 is present and is the only adapter on disk, and it is still
+        # not the adapter this checkout asked for.
+        $root = New-AdapterFixture -Restored @('3.0.9') -Referenced @('3.0.80')
+
+        Assert-Null -Value (Get-NanoFrameworkTestAdapterDir -RepoRoot $root -WarningAction SilentlyContinue)
     }
 }
 
