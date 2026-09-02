@@ -659,11 +659,14 @@ Describe 'Get-AttributeFailure' {
     }
 
     It 'asserts nothing further about a missing topic' {
-        # The early return. Without it the payload comparison would run against a null
-        # entry and report a second failure about a topic that is simply not there.
+        # The early return, and it is a crash guard rather than a tidier of messages:
+        # `Set-StrictMode -Version Latest` is on, so $Snapshot[$absent].Retained throws
+        # PropertyNotFoundException rather than reading as $null. Folding the return away
+        # to shorten the function would take a device missing one attribute and turn it
+        # into a conformance run that dies with no verdict at all.
         $failures = @(Get-AttributeFailure -Snapshot (ConvertTo-HomieSnapshot -Lines @()) -Topic 'homie/d/$homie' -Expected '4')
 
-        Assert-Equal -Expected 1 -Actual $failures.Count
+        Assert-ArrayEqual -Expected @('missing: homie/d/$homie') -Actual $failures
     }
 
     It 'reports an attribute the broker did not replay as retained' {

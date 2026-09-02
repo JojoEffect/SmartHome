@@ -1550,6 +1550,11 @@ function Get-AttributeFailure {
     # further is asserted about it, but a topic that is present can be both non-retained
     # and carrying the wrong payload, and a run reports everything that is wrong rather
     # than the first thing.
+    #
+    # The early return on a missing topic is load-bearing, not cosmetic: this file runs
+    # under Set-StrictMode -Version Latest, where $Snapshot[$absent].Retained throws
+    # PropertyNotFoundException instead of reading as $null. Without it, a device missing
+    # a single attribute takes the whole conformance run down with no verdict.
     param(
         [Parameter(Mandatory = $true)]
         [hashtable]$Snapshot,
