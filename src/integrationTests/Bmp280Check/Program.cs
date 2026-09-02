@@ -22,8 +22,6 @@ namespace SmartHome.IntegrationTests.Bmp280Check
     // networking assemblies, and this test is deliberately network-free.
     public class Program
     {
-        private const string TestName = "Bmp280Check";
-
         public static void Main()
         {
             try
@@ -32,7 +30,7 @@ namespace SmartHome.IntegrationTests.Bmp280Check
             }
             catch (Exception ex)
             {
-                IntegrationTest.Fail(TestName, ex.Message);
+                IntegrationTest.Fail(typeof(Program), ex.Message);
             }
         }
 
@@ -115,11 +113,11 @@ namespace SmartHome.IntegrationTests.Bmp280Check
 
                     if (readResult.TemperatureIsValid && readResult.PressureIsValid && readResult.HumidityIsValid)
                     {
-                        IntegrationTest.Pass(TestName, $"{readResult.Temperature.DegreesCelsius}°C, {readResult.Pressure.Hectopascals}hPa, {readResult.Humidity.Percent}%RH");
+                        IntegrationTest.Pass(typeof(Program), $"{readResult.Temperature.DegreesCelsius}°C, {readResult.Pressure.Hectopascals}hPa, {readResult.Humidity.Percent}%RH");
                     }
                     else
                     {
-                        IntegrationTest.Fail(TestName, $"invalid read (temperature: {readResult.TemperatureIsValid}, pressure: {readResult.PressureIsValid}, humidity: {readResult.HumidityIsValid}) -- check the I2C wiring and the BMP280 address");
+                        IntegrationTest.Fail(typeof(Program), $"invalid read (temperature: {readResult.TemperatureIsValid}, pressure: {readResult.PressureIsValid}, humidity: {readResult.HumidityIsValid}) -- check the I2C wiring and the BMP280 address");
                     }
                 }
 

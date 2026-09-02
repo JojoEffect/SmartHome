@@ -21,7 +21,6 @@ namespace SmartHome.IntegrationTests.MqttCheck
     // marker means "the round trip actually completed", not just "we connected".
     public class Program
     {
-        private const string TestName = "MqttCheck";
         private const string BrokerHost = "192.168.1.238";
         private const string TestTopic = "smarthome-test/echo";
 
@@ -56,7 +55,7 @@ namespace SmartHome.IntegrationTests.MqttCheck
             }
             catch (Exception ex)
             {
-                IntegrationTest.Fail(TestName, ex.Message);
+                IntegrationTest.Fail(typeof(Program), ex.Message);
             }
         }
 
@@ -68,7 +67,7 @@ namespace SmartHome.IntegrationTests.MqttCheck
 
             if (_receivedCount == 1)
             {
-                IntegrationTest.Pass(TestName, $"round-trip through {BrokerHost} on {TestTopic}");
+                IntegrationTest.Pass(typeof(Program), $"round-trip through {BrokerHost} on {TestTopic}");
             }
         }
     }

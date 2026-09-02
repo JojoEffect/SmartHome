@@ -190,6 +190,155 @@ Describe 'The shipped catalog' {
     }
 }
 
+Describe 'Get-IntegrationTestMarkerName' {
+    # The expected half of the [ITEST] name. Issue #20: it used to be the catalog key,
+    # compared against a TestName const spelled out again in each project's Program.cs,
+    # so a rename in one place was reported as a device-level WRONG-TEST verdict 90
+    # seconds into a hardware run. Both ends now read one <AssemblyName>.
+
+    function New-ProjectFixture {
+        param([string]$TestName, [string]$AssemblyName)
+
+        $root = New-TestDirectory -Name "marker-$TestName"
+        $projectPath = Join-Path $root "src\integrationTests\$TestName\$TestName.nfproj"
+
+        Set-TestFileContent -Path $projectPath -Content @(
+            '<Project>'
+            '  <PropertyGroup>'
+            "    <RootNamespace>SmartHome.IntegrationTests.$TestName</RootNamespace>"
+            "    <AssemblyName>$AssemblyName</AssemblyName>"
+            '  </PropertyGroup>'
+            '</Project>'
+        )
+
+        return $root
+    }
+
+    It 'reads the assembly name off the project, not the folder it is in' {
+        # The whole point: the marker name is whatever the built assembly will call
+        # itself, which since the SmartHome.* rename is not the project's own file name.
+        $root = New-ProjectFixture -TestName 'WifiCheck' -AssemblyName 'SmartHome.IntegrationTests.WifiCheck'
+
+        Assert-Equal -Expected 'SmartHome.IntegrationTests.WifiCheck' `
+                     -Actual (Get-IntegrationTestMarkerName -TestName 'WifiCheck' -RepoRoot $root)
+    }
+
+    It 'follows the project when its assembly name is nothing like the folder' {
+        # A rename that used to need a matching edit in Program.cs and produced a
+        # WRONG-TEST when it did not get one. Here it simply changes the answer.
+        $root = New-ProjectFixture -TestName 'WifiCheck' -AssemblyName 'Something.Else.Entirely'
+
+        Assert-Equal -Expected 'Something.Else.Entirely' `
+                     -Actual (Get-IntegrationTestMarkerName -TestName 'WifiCheck' -RepoRoot $root)
+    }
+
+    It 'throws naming the path when the test has no project' {
+        $root = New-TestDirectory -Name 'marker-empty'
+
+        $message = Assert-Throws -Body { Get-IntegrationTestMarkerName -TestName 'NoSuchCheck' -RepoRoot $root }
+        Assert-Match -Pattern 'NoSuchCheck' -Actual $message
+        Assert-Match -Pattern 'nfproj' -Actual $message -Because 'the message has to say which file was looked for'
+    }
+
+    It 'resolves for every device-decided entry in the shipped catalog' {
+        # Against this checkout, not a fixture. The pre-flight does exactly this before
+        # the first flash, so a missing or unreadable project is a desk-speed failure.
+        $repoRoot = Split-Path -Parent $scriptsDir
+
+        foreach ($testName in $testCatalog.Keys) {
+            if ($testCatalog[$testName].Contains('Verdict')) {
+                continue
+            }
+
+            Assert-Equal -Expected "SmartHome.IntegrationTests.$testName" `
+                         -Actual (Get-IntegrationTestMarkerName -TestName $testName -RepoRoot $repoRoot) `
+                         -Because "$testName's marker name comes from its own project"
+        }
+    }
+}
+
+Describe 'Get-DeviceMarkerVerdict' {
+    $expected = 'SmartHome.IntegrationTests.WifiCheck'
+
+    It 'reads PASS and the detail after the colon' {
+        $verdict = Get-DeviceMarkerVerdict -CapturedLines @(
+            'Program started'
+            "[ITEST] $expected PASS: connected to the configured WiFi network"
+        ) -ExpectedName $expected -CaptureSeconds 75
+
+        Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
+        Assert-Equal -Expected 'connected to the configured WiFi network' -Actual $verdict.Detail
+    }
+
+    It 'reads FAIL and its reason' {
+        $verdict = Get-DeviceMarkerVerdict -CapturedLines @("[ITEST] $expected FAIL: no network") `
+                                           -ExpectedName $expected -CaptureSeconds 75
+
+        Assert-Equal -Expected 'FAIL' -Actual $verdict.Outcome
+        Assert-Equal -Expected 'no network' -Actual $verdict.Detail
+    }
+
+    It 'falls back to the whole line when a PASS carries no detail' {
+        $verdict = Get-DeviceMarkerVerdict -CapturedLines @("[ITEST] $expected PASS") `
+                                           -ExpectedName $expected -CaptureSeconds 75
+
+        Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
+        Assert-Equal -Expected "[ITEST] $expected PASS" -Actual $verdict.Detail
+    }
+
+    It 'takes the first marker, so a later one cannot overturn the verdict' {
+        $verdict = Get-DeviceMarkerVerdict -CapturedLines @(
+            "[ITEST] $expected FAIL: first"
+            "[ITEST] $expected PASS: second"
+        ) -ExpectedName $expected -CaptureSeconds 75
+
+        Assert-Equal -Expected 'FAIL' -Actual $verdict.Outcome
+        Assert-Equal -Expected 'first' -Actual $verdict.Detail
+    }
+
+    It 'reports NO-RESULT with the window when nothing marked' {
+        $verdict = Get-DeviceMarkerVerdict -CapturedLines @('Program started', 'still booting') `
+                                           -ExpectedName $expected -CaptureSeconds 45
+
+        Assert-Equal -Expected 'NO-RESULT' -Actual $verdict.Outcome
+        Assert-Match -Pattern '45s' -Actual $verdict.Detail
+    }
+
+    It 'reports NO-RESULT for a capture that produced nothing at all' {
+        $verdict = Get-DeviceMarkerVerdict -CapturedLines @() -ExpectedName $expected -CaptureSeconds 45
+
+        Assert-Equal -Expected 'NO-RESULT' -Actual $verdict.Outcome
+    }
+
+    It 'reports WRONG-TEST naming both sides when another test is on the device' {
+        # The one outcome a healthy run never produces, which is why it is worth having a
+        # case: the only way to reach it now is a flash that did not take.
+        $verdict = Get-DeviceMarkerVerdict -CapturedLines @('[ITEST] SmartHome.IntegrationTests.MqttCheck PASS: round-trip') `
+                                           -ExpectedName $expected -CaptureSeconds 75
+
+        Assert-Equal -Expected 'WRONG-TEST' -Actual $verdict.Outcome
+        Assert-Match -Pattern 'MqttCheck' -Actual $verdict.Detail
+        Assert-Match -Pattern ([regex]::Escape($expected)) -Actual $verdict.Detail -Because 'the message has to say what was expected too'
+    }
+
+    It 'does not accept a name the expected one is merely a prefix of' {
+        $verdict = Get-DeviceMarkerVerdict -CapturedLines @("[ITEST] ${expected}2 PASS: nearly") `
+                                           -ExpectedName $expected -CaptureSeconds 75
+
+        Assert-Equal -Expected 'WRONG-TEST' -Actual $verdict.Outcome
+    }
+
+    It 'reads a dotted assembly name as one name' {
+        # The regex takes the name as \S+, which is what lets it survive the move from
+        # 'WifiCheck' to 'SmartHome.IntegrationTests.WifiCheck'.
+        $verdict = Get-DeviceMarkerVerdict -CapturedLines @("noise [ITEST] $expected PASS: ok") `
+                                           -ExpectedName $expected -CaptureSeconds 75
+
+        Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
+        Assert-Equal -Expected 'ok' -Actual $verdict.Detail
+    }
+}
+
 Describe 'The conformance lifecycle table' {
     $settings = @{ SettleSeconds = 90; RecoverySeconds = 90; CommandTimeoutSeconds = 30 }
 

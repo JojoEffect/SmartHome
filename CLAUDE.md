@@ -445,14 +445,29 @@ that exist are still worth naming (a different axis from the locations above):
 DeviceMarker tests report by writing a marker line to managed debug output:
 
 ```text
-[ITEST] <TestName> PASS: <detail>
-[ITEST] <TestName> FAIL: <reason>
+[ITEST] <AssemblyName> PASS: <detail>
+[ITEST] <AssemblyName> FAIL: <reason>
 ```
 
 `IntegrationTest.Pass/Fail` (in `src\integrationTests\TestSupport\IntegrationTest.cs`) emits
 these, and `Run-IntegrationTests.ps1` parses them. A device app never exits with a status code —
 these markers *are* the exit code. Emit one as soon as the outcome is known, before any idle
-loop. Adding a new integration test means: new project under `src\integrationTests`, emit the
+loop.
+
+**The name in the marker is nobody's to spell.** Both ends derive it from the project's
+`<AssemblyName>`: the device reads its own running assembly (`typeof(Program)` handed to
+`IntegrationTest.Pass/Fail`, which is why they take a `Type` and not a string), and the runner
+reads the same element off the `.nfproj` it just flashed, in `Get-IntegrationTestMarkerName`,
+during the pre-flight. Until 2026-09-02 the runner compared the catalog key against a
+per-project `TestName` const — a third independent spelling of one name that nothing in the
+build reconciled, and whose drift surfaced as a `WRONG-TEST` verdict 90 seconds into a hardware
+run, in the same shape as a stale deploy (issue #20). `WRONG-TEST` still exists and now means
+only that: the app answering is not the one just flashed. The type has to come from the caller
+rather than `Assembly.GetExecutingAssembly()` because `IntegrationTest` ships both ways — as a
+`TestSupport` reference and as a linked source file — and would otherwise name `TestSupport`
+for some tests and the test itself for others.
+
+Adding a new integration test means: new project under `src\integrationTests`, emit the
 marker, add it to `$testCatalog` in `Run-IntegrationTests.ps1`. A host-decided test emits no
 marker and instead adds a verdict function, names it in its entry's `Verdict`, and lists that
 function's required settings under the same name in `$requiredCatalogKeys` — which doubles as the
