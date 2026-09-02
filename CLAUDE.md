@@ -52,7 +52,7 @@ have a script yet, that's a gap worth closing rather than working around.
 |---|---|---|---|
 | `scripts\Start-DevEnv.ps1 [-NoSync] [-Detached]` | Syncs the sibling repos (unless `-NoSync`), then starts local Mosquitto (explicit `0.0.0.0` listener — a bare `-p` binds localhost-only on Mosquitto 2.x and silently can't be reached from a real device) and subscribes to `homie/#`. `-Detached` backgrounds both and returns | No | `smarthome-dev-env` |
 | `scripts\Stop-DevEnv.ps1 [-KeepLog] [-IncludeOrphans]` | Stops whatever `Start-DevEnv.ps1` recorded for the configured port, verifying pid+name+start-time first so a recycled pid is never killed. No-op + exit 0 if nothing is running, so it's safe to call unconditionally. `-IncludeOrphans` also clears brokers/subscribers this repo started that no state file covers | No | `smarthome-dev-env` |
-| `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release] [-FullPad]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`) then flashes via `nanoff`, padding the image with 0xFF far enough to erase the previous one (see Deploy padding below). `-FullPad` after a Visual Studio deploy | **Yes** | `smarthome-deploy` |
+| `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`), has the device erase whatever sits past the new image's end, then flashes via `nanoff` (see Clearing the deployment area below) | **Yes** | `smarthome-deploy` |
 | `scripts\Run-Tests.ps1` | Builds `SmartHome.UnitTests` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** | `smarthome-test` |
 | `scripts\Run-ScriptTests.ps1 [-File <names>] [-Name <wildcard>] [-Detailed]` | The host-side script tests: `scripts\tests\*.Tests.ps1`, run by this repo's own `TestRunner.ps1`. ~100 cases in ~6s, needing nothing installed — no device, no broker, no `local.env`, no `packages\`, no Pester. A run that executed zero tests fails | No | `smarthome-script-tests` |
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
@@ -87,32 +87,64 @@ If a new recurring unit of work shows up that isn't covered by an existing scrip
 `Write-Error` remediation) and give it a matching skill — that's the standing expectation for
 this repo, not a one-time cleanup.
 
-### Deploy padding
+### Clearing the deployment area
 
 `nanoff` erases and writes only the image file's own byte length, so a smaller app flashed
 after a larger one leaves the larger one's tail unerased past the new image's end — and the
 CLR finds it. It walks the *whole* deployment partition looking for assembly headers and, on
 a header that doesn't check out, moves to the next candidate rather than stopping
 (`ContiguousBlockAssemblies` in `nf-interpreter`'s `src/CLR/Startup/CLRStartup.cpp`). No
-amount of trailing blank flash terminates that scan; only overwriting the stale bytes does.
-`Deploy-ToDevice.ps1` therefore pads every image with 0xFF, and the invariant it has to hold
-is exactly "cover the footprint of the previous image".
+amount of trailing blank flash terminates that scan; only erasing the stale bytes does. So
+every deploy has to hold exactly one invariant: **nothing but erased flash past the end of
+the image being written**.
 
-It used to pad every image to a flat 400KB, which held that invariant by brute force. It now
-records the last flashed size per COM port (in `%TEMP%\smarthome-deploy-<port>.json`, written
-pessimistically before the flash and tightened after it) and pads to `max(this image, that
-record)` rounded up to a 4KB sector — same guarantee, roughly half the erase-and-verify
-footprint across a suite run. Anything the record can't vouch for — missing, corrupt, a
-different `-DeployAddress`, `-FullPad` — falls back to the flat 400KB, never to the bare
-image size, and never below a larger footprint the record does vouch for at this address
-(`-FullPad` distrusts how *tight* the record is, not its floor). An image bigger than the
-400KB fallback deploys fine but warns, because the fallback stops being a worst case the
-moment one exists.
+`Deploy-ToDevice.ps1` asks the device to hold it, immediately before the flash. Nothing on
+this machine has to know what is already on the device, so nothing can be wrong about it.
+Three attempts at that question, of which only the third works, all checked against the
+pinned sibling checkouts rather than assumed:
 
-The record only describes what *this script* flashed. Visual Studio's F5 deploy and the
-nanoFramework test adapter both write the deployment partition themselves, and erase only
-their own footprint too. `Run-Tests.ps1` clears the record for that reason; Visual Studio
-can't, so pass `-FullPad` on the first deploy after one.
+- `Monitor_DeploymentMap`, the command whose name promises the used extent, is a **stub** in
+  the firmware — it replies with an empty payload (`Debugger.cpp`), so `nf-debugger`'s
+  `GetDeploymentMap()` always hands back an empty list.
+- `Debugging_Deployment_Status` reads as the direct question and **does not work here**: on
+  this ESP32 it comes back with no usable geometry. Nothing in `nf-debugger`'s own ESP32 path
+  depends on it either — `DeploymentExecuteFull` is its only caller, and the ESP32 reports
+  `IncrementalDeployment`, so `DeploymentExecuteIncremental` is what actually runs. Measured on
+  the device on 2026-09-02, not reasoned about.
+- The **flash sector map** (`Monitor_FlashSectorMap`, a `Monitor_` command rather than a
+  `Debugging_` one) does answer, and its `c_MEMORY_USAGE_DEPLOYMENT` entry gives the partition's
+  start and size — its geometry, not how much of it is in use. `0x1E0000` / `1835008`, which
+  is exactly what `-DeployAddress` and `-DeployPartitionSize` had been carrying from a boot log.
+- `AccessMemory_Read` over the deploy partition is **refused**: `CheckPermission` lists no
+  `BLOCKTYPE_DEPLOYMENT` case for reads. (`Watch-DeviceDebugOutput.ps1 -DumpConfig` reads the
+  *config* partition, which is permitted — that is why that one works.)
+- `AccessMemory_Erase` **does** list it, and the firmware skips the erase when the region from
+  the given address to the end of the partition is already blank
+  (`Esp32FlashDriver_IsBlockErased`). Same command Visual Studio's own deploy issues before it
+  writes (`DeploymentExecute` in `nf-debugger`'s `WireProtocol/Engine.cs`).
+
+So the device is told to erase rather than asked what is there, through
+`DeviceDebugMonitor --erase-deployment <keep-bytes>` and `Clear-SmartHomeDeviceDeployment` in
+`Common.ps1`. On ESP32 an erase that *is* needed takes the whole partition with it
+(`Esp32FlashDriver_EraseBlock` ignores the address), so the device has no app between that
+call and the flash — which is why it runs immediately before, not as a tidy-up step.
+
+That call also returns the partition's real geometry, and the deploy **refuses to flash** when
+the device's start address disagrees with `-DeployAddress`. That mismatch is the failure that
+cost a whole debugging session: `nanoff`'s own default address landed in the *factory*
+partition on this device's layout, every deploy silently never ran, and `nanoff` reported
+success either way. A reported partition *length* that disagrees with `-DeployPartitionSize`
+is a warning, and the device's value wins.
+
+Until 2026-09-02 the script guessed instead, padding each image with 0xFF as far as a
+per-COM-port record of what *it* last flashed (issue #46). The record could only ever describe
+this script's own flashes — Visual Studio's F5 deploy and the nanoFramework test adapter write
+the same partition over the debugger connection and erase only their own footprint too — so
+`Run-Tests.ps1` had to invalidate it, Visual Studio could not, and a `-FullPad` switch existed
+for the case only a human could notice. Record, switch and `Run-Tests.ps1`'s call are all gone.
+The 0xFF pad survives as the fallback for one case: the device could not be reached at all (VS
+holding the debugger connection is the usual reason), where the image is padded to the whole
+partition and the flash goes ahead with a warning.
 
 ## First-time setup
 
@@ -142,6 +174,11 @@ stops the run at its first line, ahead of any build, flash or broker start.
 ### Required local tools
 
 - [nanoFramework VS extension](https://marketplace.visualstudio.com/items?itemName=nanoframework.nanoFramework-VS2022-Extension)
+- [.NET SDK](https://dotnet.microsoft.com/download) — not just the runtime.
+  `tools\DeviceDebugMonitor` is a net8.0 project, and it is built by every debug capture
+  *and* by every deploy (which now has the device clear its deployment area first). A
+  machine that installed `nanoff` as a global tool has only the runtime, so this does not
+  come for free with the line below it
 - `nanoff` CLI: `dotnet tool install -g nanoff`
 - [Mosquitto](https://mosquitto.org/download/)
 - Git on PATH
@@ -463,8 +500,8 @@ per-project `TestName` const — a third independent spelling of one name that n
 build reconciled, and whose drift surfaced as a `WRONG-TEST` verdict 90 seconds into a hardware
 run, in the same shape as a stale deploy (issue #20). `WRONG-TEST` still exists and now means
 only that: the app answering is not the one just flashed — either because the flash failed, or
-because it succeeded but under-padded and left the old assembly where the CLR still finds it
-(Deploy padding above, and issue #46). The type has to come from the caller
+because it succeeded but left the old assembly where the CLR still finds it (Clearing the
+deployment area above, which is what #46 closed). The type has to come from the caller
 rather than `Assembly.GetExecutingAssembly()` because `IntegrationTest` ships both ways — as a
 `TestSupport` reference and as a linked source file — and would otherwise name `TestSupport`
 for some tests and the test itself for others.

@@ -27,7 +27,8 @@ Useful switches:
 `scripts\` decides what the integration suite reports, and it is the half of the suite a desk can
 exercise: `Get-CatalogValidationError`, `ConvertFrom-HomieCaptureLine`, `ConvertTo-HomieSnapshot`,
 `Get-HomieLivePayloads`, `Wait-ForAnnounceWitnessed`, `Get-SubscriberLogLineCount`, plus
-`Common.ps1`'s path globs, dev-environment state and the deploy-padding record.
+`Common.ps1`'s path globs, dev-environment state and the deployment-geometry parse the deploy
+cross-checks its flash address against.
 
 It does **not** cover anything that needs a broker, a subscriber process or the device —
 `Start-HomieCapture`'s connect wait, `Invoke-BrokerOutageCheck`, `Invoke-HomieConformanceCheck`.

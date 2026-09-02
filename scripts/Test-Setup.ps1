@@ -171,7 +171,7 @@ else {
 
 # ----------------------------------------------------------------------- tools --
 
-foreach ($tool in @('git', 'nanoff', 'gh')) {
+foreach ($tool in @('git', 'nanoff', 'gh', 'dotnet')) {
     $source = Test-OnPath $tool
     if ($source) {
         Add-Result -Name $tool -Status 'OK' -Detail $source
@@ -181,6 +181,11 @@ foreach ($tool in @('git', 'nanoff', 'gh')) {
             'git'    { 'Install Git and put it on PATH' }
             'nanoff' { 'dotnet tool install -g nanoff' }
             'gh'     { 'Install the GitHub CLI (https://cli.github.com/)' }
+            # Listed since #46. tools\DeviceDebugMonitor is a net8.0 project that both the
+            # debug capture and every deploy now build, and a machine that installed nanoff
+            # as a global tool has only the RUNTIME -- which is why this cannot be inferred
+            # from nanoff being present.
+            'dotnet' { 'Install the .NET SDK (https://dotnet.microsoft.com/download)' }
         }
         Add-Result -Name $tool -Status 'FAIL' -Detail 'not on PATH' -Fix $fix
     }

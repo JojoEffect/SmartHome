@@ -20,16 +20,17 @@ Scripts you own (each has a matching `.claude/skills/smarthome-*` skill too):
 - Don't rewrite `Start-DevEnv.ps1`'s child launches to use `-RedirectStandardOutput`: that forces
   handle inheritance and makes piping the script's output hang forever. The ShellExecute +
   `log_dest file` + `cmd.exe` wrapper arrangement is deliberate and commented in the script.
-- `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug|Release] [-DeployAddress <hex>] [-FullPad]`
-  — build + flash. `-FullPad` pads the flat 400KB worst case instead of sizing the 0xFF pad
-  from the per-COM-port record of the last flash — use it on the first deploy after someone
-  has deployed from Visual Studio, which writes the deployment partition behind this script's
-  back. `-DeployAddress` defaults to this device's current real `deploy` partition
+- `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug|Release] [-DeployAddress <hex>]`
+  — build + flash. Before the flash it has the device erase anything past the new image's end,
+  over the debugger connection, so a Visual Studio deploy or a hardware unit-test run in between
+  needs no switch and nothing remembered. If it warns that it could not clear the deployment
+  area, Visual Studio is usually holding that connection; the flash still goes ahead, padded to
+  the whole partition. `-DeployAddress` defaults to this device's current real `deploy` partition
   offset (`0x1E0000`) — `nanoff`'s own hardcoded default (`0x1B0000`) landed inside the
-  **factory** partition instead and silently produced a deploy the CLR could never load. If a
-  deploy "succeeds" but the device never does anything afterward, verify with
-  `Watch-DeviceDebugOutput.ps1` before assuming it's an application bug — check for
-  `CLR_E_WRONG_TYPE` / zero-assembly resolution, which means this address is stale again.
+  **factory** partition instead and silently produced a deploy the CLR could never load. The
+  script now cross-checks that address against what the device reports and refuses to flash on a
+  mismatch, so a stale address surfaces as a refusal rather than as a device that boots and does
+  nothing.
 - `scripts\Run-Tests.ps1` — build + run the `SmartHome.UnitTests` unit suite on hardware.
 - `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` — the whole `src\integrationTests`
   suite in one call: starts a detached broker, then per test deploys, captures managed debug

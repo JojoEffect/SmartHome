@@ -313,15 +313,18 @@ function Get-DeviceMarkerVerdict {
     #
     # Which has two causes, and the message names both because they send an investigation
     # in opposite directions. A flash that failed is visible in nanoff's own output. A
-    # flash that succeeded but under-padded is not: nanoff erases only the new image's
+    # deployment area that was never cleared is not: nanoff erases only the new image's
     # length and verifies its hash happily, while the CLR walks the whole deployment
     # partition and can still find the previous test past the new image's end (see the
-    # Deploy padding section of CLAUDE.md, and issue #46). Saying only "the flash did not
-    # take" would send that one to check output that looks perfectly healthy.
+    # Clearing the deployment area section of CLAUDE.md, and issue #46). Since #46 the
+    # deploy has the device erase that itself and warns when it could not, so the second
+    # cause now leaves a trace in the deploy output -- a warning, not a failure. Saying
+    # only "the flash did not take" would still send that one to check nanoff output that
+    # looks perfectly healthy.
     if ($reportedName -ne $ExpectedName) {
         return @{
             Outcome = 'WRONG-TEST'
-            Detail  = "device reported '$reportedName', not '$ExpectedName' -- a previous test is still answering, either because the flash did not take or because it left the old assembly in the deployment partition (check the deploy padding)"
+            Detail  = "device reported '$reportedName', not '$ExpectedName' -- a previous test is still answering, either because the flash did not take or because the deployment area was not cleared before it (check the deploy output for a warning about clearing it)"
         }
     }
 

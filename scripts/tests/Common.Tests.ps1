@@ -612,115 +612,108 @@ Describe 'Dev-env state' {
     }
 }
 
-Describe 'Deploy state' {
-    # The record Deploy-ToDevice.ps1 pads from. Its contract is "the number of bytes from
-    # the deploy address the next flash must overwrite", and every rejection below costs
-    # one full-size deploy -- the behaviour the script had before the record existed --
-    # so the safe direction is $null. A synthetic port, for the reason above.
-    $comPort = 'COM-TEST-74'
+Describe 'Deployment geometry' {
+    # The one desk-provable piece of the deployment-area handling. Everything around it
+    # -- the erase itself, whether the device answers at all -- needs a device; this is
+    # the seam that was split out so at least the parsing can be pinned where CI runs.
+    #
+    # What it parses is DeviceDebugMonitor's --erase-deployment output. Deploy-ToDevice.ps1
+    # compares Start against its own -DeployAddress and refuses the flash when they
+    # disagree, so a parse that quietly produced the wrong number would be worse than one
+    # that produced none: it would stop a healthy deploy, or wave through the wrong-address
+    # flash the check exists to catch.
 
-    function Save-RawDeployState {
-        param([hashtable]$State)
-        $State | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Get-SmartHomeDeployStatePath -ComPort $comPort) -Encoding utf8
+    It 'reads the start and length out of the monitor line' {
+        $geometry = Read-SmartHomeDeploymentGeometry -Output @(
+            'Watching for a nanoFramework device on COM3...'
+            'Found device: ESP32. Connecting debug engine...'
+            'DEPLOYMENT start=0x001E0000 length=1835008'
+            'DEPLOYMENT blank-past=143360'
+        )
+
+        Assert-NotNull -Value $geometry
+        Assert-Equal -Expected 1966080 -Actual $geometry['Start'] -Because '0x1E0000'
+        Assert-Equal -Expected 1835008 -Actual $geometry['Length']
     }
 
-    It 'builds a path that cannot escape the temp directory' {
-        # The port comes from local.env.ps1, so something like \\.\COM10 would otherwise
-        # point the record somewhere else entirely.
-        $path = Get-SmartHomeDeployStatePath -ComPort '\\.\COM10'
+    It 'hands back numbers the caller can do arithmetic with' {
+        # Deploy-ToDevice.ps1 compares these against [Convert]::ToInt64($DeployAddress, 16)
+        # and against a byte count, so a string that merely prints the same would compare
+        # unequal and refuse every deploy.
+        $geometry = Read-SmartHomeDeploymentGeometry -Output @('DEPLOYMENT start=0x1E0000 length=1835008')
 
-        # '\\.\COM10' scrubs to '__._COM10': both backslashes and the leading one before
-        # COM10 become underscores, and the dot survives because it is legal in a name.
-        Assert-Equal -Expected ([System.IO.Path]::GetTempPath().TrimEnd('\')) -Actual (Split-Path -Parent $path)
-        Assert-Equal -Expected 'smarthome-deploy-__._COM10.json' -Actual (Split-Path -Leaf $path)
+        Assert-True -Condition ($geometry['Start'] -is [long])
+        Assert-True -Condition ($geometry['Length'] -is [long])
+        Assert-Equal -Expected 3801088 -Actual ($geometry['Start'] + $geometry['Length'])
     }
 
-    It 'keeps * unscrubbed, because the all-ports glob is built from this one rule' {
-        Assert-Match -Pattern '\*' -Actual (Get-SmartHomeDeployStatePath -ComPort '*')
-    }
+    It 'takes the address with or without leading zeroes, in either case' {
+        foreach ($rendering in '0x1E0000', '0x001e0000', '0X001E0000') {
+            $geometry = Read-SmartHomeDeploymentGeometry -Output @("DEPLOYMENT start=$rendering length=1835008")
 
-    It 'round-trips a saved record' {
-        Save-SmartHomeDeployState -ComPort $comPort -DeployAddress '0x1B000' -StaleBytes 409600 -Image 'RoomSensor.bin'
-
-        try {
-            $state = Get-SmartHomeDeployState -ComPort $comPort
-
-            Assert-NotNull -Value $state
-            Assert-Equal -Expected '0x1B000' -Actual $state['DeployAddress']
-            Assert-Equal -Expected 409600 -Actual $state['StaleBytes']
-            Assert-Equal -Expected 'RoomSensor.bin' -Actual $state['Image']
-        }
-        finally {
-            Clear-SmartHomeDeployState -ComPort $comPort
-        }
-    }
-
-    It 'returns $null when there is no record' {
-        Clear-SmartHomeDeployState -ComPort $comPort
-        Assert-Null -Value (Get-SmartHomeDeployState -ComPort $comPort)
-    }
-
-    It 'rejects a record from another schema version' {
-        Save-RawDeployState -State @{ Version = 99; ComPort = $comPort; DeployAddress = '0x1B000'; StaleBytes = 4096 }
-        try { Assert-Null -Value (Get-SmartHomeDeployState -ComPort $comPort) }
-        finally { Clear-SmartHomeDeployState -ComPort $comPort }
-    }
-
-    It 'rejects a record written for a different port' {
-        Save-RawDeployState -State @{ Version = 1; ComPort = 'COM9'; DeployAddress = '0x1B000'; StaleBytes = 4096 }
-        try { Assert-Null -Value (Get-SmartHomeDeployState -ComPort $comPort) }
-        finally { Clear-SmartHomeDeployState -ComPort $comPort }
-    }
-
-    It 'rejects a record with no deploy address' {
-        # The record only vouches for a footprint at the address it was written for.
-        Save-RawDeployState -State @{ Version = 1; ComPort = $comPort; DeployAddress = '   '; StaleBytes = 4096 }
-        try { Assert-Null -Value (Get-SmartHomeDeployState -ComPort $comPort) }
-        finally { Clear-SmartHomeDeployState -ComPort $comPort }
-    }
-
-    It 'rejects a negative or unparseable StaleBytes' {
-        foreach ($bad in @(-1, 'lots')) {
-            Save-RawDeployState -State @{ Version = 1; ComPort = $comPort; DeployAddress = '0x1B000'; StaleBytes = $bad }
-            try { Assert-Null -Value (Get-SmartHomeDeployState -ComPort $comPort) -Because "StaleBytes = $bad" }
-            finally { Clear-SmartHomeDeployState -ComPort $comPort }
+            Assert-NotNull -Value $geometry -Because $rendering
+            Assert-Equal -Expected 1966080 -Actual $geometry['Start'] -Because $rendering
         }
     }
 
-    It 'hands back StaleBytes as an int the caller can do arithmetic with' {
-        # ConvertFrom-Json returns Int32, Int64 or Double depending on the literal, and
-        # the padding decision multiplies and rounds this.
-        Save-RawDeployState -State @{ Version = 1; ComPort = $comPort; DeployAddress = '0x1B000'; StaleBytes = 4096.0 }
+    It 'returns $null when the line is not there' {
+        # The monitor prints this before it does anything that can fail, so its absence
+        # means the device never answered -- and the caller already has an exit code
+        # saying so. Failing here instead would turn one clear failure into two.
+        Assert-Null -Value (Read-SmartHomeDeploymentGeometry -Output @(
+            'Watching for a nanoFramework device on COM3...'
+            'No nanoFramework device found on COM3 after 15s.'
+        ))
+    }
 
-        try {
-            $state = Get-SmartHomeDeployState -ComPort $comPort
+    It 'returns $null for no output at all' {
+        Assert-Null -Value (Read-SmartHomeDeploymentGeometry -Output @())
+        Assert-Null -Value (Read-SmartHomeDeploymentGeometry -Output $null)
+    }
 
-            Assert-NotNull -Value $state
-            Assert-True -Condition ($state['StaleBytes'] -is [int])
-            Assert-Equal -Expected 8192 -Actual ($state['StaleBytes'] * 2)
+    It 'ignores a line that only looks like the geometry line' {
+        foreach ($bad in @(
+            'DEPLOYMENT start=0x1E0000'                       # no length
+            'DEPLOYMENT length=1835008'                       # no start
+            'DEPLOYMENT start=1E0000 length=1835008'          # no 0x, so not the format
+            'DEPLOYMENT start=0xZZZZ length=1835008'          # not hex
+            'DEPLOYMENT start=0x1E0000 length=nonsense'
+            'DEPLOYMENT start=0x1E0000 length=0'              # a partition of no size
+            'the DEPLOYMENT start=0x1E0000 length=1835008'    # prose that quotes the line
+        )) {
+            Assert-Null -Value (Read-SmartHomeDeploymentGeometry -Output @($bad)) -Because $bad
         }
-        finally {
-            Clear-SmartHomeDeployState -ComPort $comPort
-        }
     }
 
-    It 'ignores an unreadable record instead of throwing' {
-        Set-TestFileContent -Path (Get-SmartHomeDeployStatePath -ComPort $comPort) -Content '{ not json'
+    It 'takes the first geometry line and ignores the rest' {
+        # One call, one device, one partition. A second line would mean the monitor
+        # printed something this parser does not understand, and guessing which of two
+        # answers is right is worse than taking the one the tool documents itself as
+        # printing before anything else.
+        $geometry = Read-SmartHomeDeploymentGeometry -Output @(
+            'DEPLOYMENT start=0x1E0000 length=1835008'
+            'DEPLOYMENT start=0x1B0000 length=409600'
+        )
 
-        $WarningPreference = 'SilentlyContinue'
-        try { Assert-Null -Value (Get-SmartHomeDeployState -ComPort $comPort) }
-        finally { Clear-SmartHomeDeployState -ComPort $comPort }
+        Assert-Equal -Expected 1966080 -Actual $geometry['Start']
     }
 
-    It 'clearing a record that is not there is a no-op, not an error' {
-        Clear-SmartHomeDeployState -ComPort $comPort
-        Clear-SmartHomeDeployState -ComPort $comPort
-        Assert-Null -Value (Get-SmartHomeDeployState -ComPort $comPort)
-    }
+    It 'skips blank lines rather than tripping over them' {
+        # dotnet run interleaves its own blank lines with the tool's output.
+        $geometry = Read-SmartHomeDeploymentGeometry -Output @('', '   ', $null, 'DEPLOYMENT start=0x1E0000 length=1835008')
 
-    # Not covered here: Clear-SmartHomeDeployState with no -ComPort. It globs every
-    # record in the real temp directory, which on a developer's machine includes the one
-    # for the device actually attached -- clearing it would silently cost that machine's
-    # next deploy its tight pad. The directory is hardcoded inside the function, so there
-    # is no way to point that branch at a fixture without changing it.
+        Assert-NotNull -Value $geometry
+    }
+}
+
+Describe 'Device monitor project' {
+    It 'resolves the monitor project inside this checkout' {
+        # Not a fixture: the point of the check is that the real project is where the
+        # deploy and the debug capture both expect it, in whichever worktree this is.
+        $projectPath = Get-SmartHomeDeviceMonitorProject
+
+        Assert-True -Condition (Test-Path -LiteralPath $projectPath)
+        Assert-Equal -Expected 'DeviceDebugMonitor.csproj' -Actual (Split-Path -Leaf $projectPath)
+        Assert-Equal -Expected (Get-SmartHomeRepoRoot) -Actual (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $projectPath)))
+    }
 }
