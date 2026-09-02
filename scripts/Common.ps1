@@ -1146,12 +1146,7 @@ function Clear-SmartHomeDeviceDeployment {
         [string]$ComPort,
 
         [Parameter(Mandatory = $true)]
-        [int]$KeepBytes,
-
-        # The monitor is a host-side tool that does not change between calls, so a
-        # caller that already built it (Run-IntegrationTests.ps1 builds once up front)
-        # can skip the build.
-        [switch]$NoBuild
+        [int]$KeepBytes
     )
 
     try {
@@ -1161,11 +1156,14 @@ function Clear-SmartHomeDeviceDeployment {
         return @{ Ok = $false; Detail = $_.Exception.Message }
     }
 
-    if (-not $NoBuild) {
-        dotnet build $projectPath --nologo -v quiet | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            return @{ Ok = $false; Detail = "DeviceDebugMonitor failed to build (exit code $LASTEXITCODE)." }
-        }
+    # Built every call rather than once per session. An up-to-date build is a ~2s no-op,
+    # and the alternative -- a switch the caller has to remember to pass -- is the shape
+    # of bookkeeping this whole change exists to delete. Issue #19 is the version worth
+    # having: resolve the built exe once and invoke it directly, for this and for the
+    # captures, rather than paying dotnet's project evaluation every time.
+    dotnet build $projectPath --nologo -v quiet | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        return @{ Ok = $false; Detail = "DeviceDebugMonitor failed to build (exit code $LASTEXITCODE)." }
     }
 
     # stdout captured, stderr deliberately left to flow to the console: piping a native
