@@ -88,14 +88,6 @@ if (-not (Test-Path $runSettings)) {
     exit 1
 }
 
-# Nothing to invalidate here any more. On real hardware the nanoFramework test adapter
-# puts the test assemblies on the device itself, over the debugger's WireProtocol
-# connection rather than through Deploy-ToDevice.ps1, and erases only its own footprint
-# doing it (DeploymentExecuteFull in nf-debugger's WireProtocol\Engine.cs erases exactly
-# the assemblies' combined length). That used to leave a stale padding record behind, so
-# this script dropped it; since #46 the next deploy asks the device what is actually
-# there instead of consulting a record, and a flash from any source is covered.
-
 # ── Locate vstest.console and the nanoFramework test adapter ─────────────────
 $vstest = Get-VsTestPath
 $vstestCmd = Get-Command $vstest -ErrorAction SilentlyContinue

@@ -15,8 +15,9 @@
 // --erase-deployment <keep-bytes>: not a capture at all. Reports the deploy
 // partition's real geometry, and makes sure nothing but erased flash lies past the
 // first <keep-bytes> bytes of it. That is what lets Deploy-ToDevice.ps1 flash a bare
-// image instead of guessing how far to pad it -- see the "Deploy padding" section of
-// CLAUDE.md.
+// image instead of guessing how far to pad it -- see the "Clearing the deployment
+// area" section of CLAUDE.md. It stops the CLR and leaves it stopped, so the device
+// runs nothing again until it is flashed or reset.
 
 using nanoFramework.Tools.Debugger;
 using nanoFramework.Tools.Debugger.Extensions;
@@ -109,33 +110,42 @@ Console.WriteLine($"Found device: {device.Description}. Connecting debug engine.
 var matched = new ManualResetEventSlim(false);
 var seen = new System.Text.StringBuilder();
 
-device.DebugEngine!.OnMessage += (message, text) =>
+// Not subscribed in --erase-deployment mode. That mode's stdout is a contract -- the
+// caller parses `DEPLOYMENT start=...` with an anchored pattern -- and the device is
+// still running its app between Connect and the pause below. Console.Write emits no
+// trailing newline, so one Debug.WriteLine landing in that window would prefix the
+// geometry line and make it unparseable, which reads downstream as a device that
+// reported no geometry rather than as output that got mixed together.
+if (!eraseDeployment)
 {
-    Console.Write(text);
-
-    if (until is null || matched.IsSet)
+    device.DebugEngine!.OnMessage += (message, text) =>
     {
-        return;
-    }
+        Console.Write(text);
 
-    lock (seen)
-    {
-        seen.Append(text);
-        if (seen.ToString().Contains(until))
+        if (until is null || matched.IsSet)
         {
-            matched.Set();
+            return;
         }
 
-        // Keep the buffer bounded; anything older than a couple of lines cannot
-        // start a match that isn't already complete.
-        if (seen.Length > 4096)
+        lock (seen)
         {
-            seen.Remove(0, seen.Length - 1024);
-        }
-    }
-};
+            seen.Append(text);
+            if (seen.ToString().Contains(until))
+            {
+                matched.Set();
+            }
 
-bool connected = device.DebugEngine.Connect(5000, force: true, requestCapabilities: true);
+            // Keep the buffer bounded; anything older than a couple of lines cannot
+            // start a match that isn't already complete.
+            if (seen.Length > 4096)
+            {
+                seen.Remove(0, seen.Length - 1024);
+            }
+        }
+    };
+}
+
+bool connected = device.DebugEngine!.Connect(5000, force: true, requestCapabilities: true);
 if (!connected)
 {
     Console.Error.WriteLine("Failed to connect debug engine to the device.");
@@ -207,12 +217,26 @@ if (eraseDeployment)
         return 1;
     }
 
+    // Nothing lies past an image that fills the partition, so there is nothing to erase
+    // -- and asking anyway would be actively dangerous. EraseMemory(start + length, 0)
+    // addresses one byte past the region, and CheckPermission lists BLOCKTYPE_CONFIG
+    // alongside BLOCKTYPE_DEPLOYMENT under AccessMemory_Erase, so on a layout where
+    // config abuts deploy that call resolves into the config partition and takes the
+    // device's WiFi profiles and certificates with it. Handled here rather than left to
+    // the caller: Deploy-ToDevice.ps1's own fit check is `-gt` too, by design -- an image
+    // that exactly fills the partition is a legal deploy.
+    if (eraseKeepBytes == storageLength)
+    {
+        Console.WriteLine($"DEPLOYMENT blank-past={eraseKeepBytes}");
+        return 0;
+    }
+
     // Same sequence VS's own deploy uses before it erases (DeploymentExecute in
     // nf-debugger's WireProtocol\Engine.cs): stop the CLR first. It executes assemblies
     // straight out of this memory-mapped flash, so erasing under a running app is not
     // something to find out about halfway through.
     var executionState = device.DebugEngine.GetExecutionMode();
-    if (executionState == nanoFramework.Tools.Debugger.WireProtocol.Commands.DebuggingExecutionChangeConditions.State.Unknown)
+    if (executionState == Commands.DebuggingExecutionChangeConditions.State.Unknown)
     {
         Console.Error.WriteLine("Could not read the device's execution state.");
         return 1;
@@ -236,11 +260,17 @@ if (eraseDeployment)
         (uint)(storageStart + eraseKeepBytes),
         (uint)(storageLength - eraseKeepBytes));
 
-    if (!eraseOk || eraseError != nanoFramework.Tools.Debugger.WireProtocol.AccessMemoryErrorCodes.NoError)
+    if (!eraseOk || eraseError != AccessMemoryErrorCodes.NoError)
     {
         Console.Error.WriteLine($"Erase of the deployment partition past {eraseKeepBytes} bytes failed: {eraseError}.");
         return 1;
     }
+
+    // The CLR was stopped above and is deliberately left that way -- resuming one whose
+    // assemblies have just been erased is not something to do on a hunch. Said out loud
+    // because the caller that flashes next resets the device anyway, so it is only a
+    // hand-run of this mode that is left looking at a device doing nothing.
+    Console.WriteLine("The CLR is left stopped; flash the device or reset it to run again.");
 
     // Deliberately not "erased": the device does not report which of the two happened,
     // and both leave the caller with the same guarantee. Claiming an erase that did not

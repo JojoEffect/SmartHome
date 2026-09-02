@@ -69,9 +69,11 @@ Outcomes other than PASS/FAIL:
 - `ERROR` — deploy or capture itself failed; the message is the sub-script's own error.
 - `WRONG-TEST` — the device emitted a marker naming a different assembly than the one just
   flashed, so a previous test is still answering. Two causes, and they point opposite ways:
-  the flash failed (nanoff's own output says so), or it succeeded but under-padded and left the
-  old assembly in the deployment partition for the CLR to find (nanoff looks perfectly healthy —
-  see the Deploy padding notes, and issue #46). Both names come from one `<AssemblyName>` (the
+  the flash failed (nanoff's own output says so), or it succeeded onto a deployment area that
+  was never cleared, leaving the old assembly there for the CLR to find (nanoff looks perfectly
+  healthy — see the Clearing the deployment area notes, and issue #46). Since #46 the deploy has
+  the device erase that itself, and **warns** when it could not, so check the deploy output for
+  that warning before anything else. Both names come from one `<AssemblyName>` (the
   device reads its own at runtime, the runner reads the project's in the pre-flight), so this
   can no longer mean a naming slip — that was issue #20.
 - `RESTARTED` — BrokerOutage only. The device did publish again, but its heartbeat counter went

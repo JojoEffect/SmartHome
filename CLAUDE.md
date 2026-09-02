@@ -174,6 +174,11 @@ stops the run at its first line, ahead of any build, flash or broker start.
 ### Required local tools
 
 - [nanoFramework VS extension](https://marketplace.visualstudio.com/items?itemName=nanoframework.nanoFramework-VS2022-Extension)
+- [.NET SDK](https://dotnet.microsoft.com/download) — not just the runtime.
+  `tools\DeviceDebugMonitor` is a net8.0 project, and it is built by every debug capture
+  *and* by every deploy (which now has the device clear its deployment area first). A
+  machine that installed `nanoff` as a global tool has only the runtime, so this does not
+  come for free with the line below it
 - `nanoff` CLI: `dotnet tool install -g nanoff`
 - [Mosquitto](https://mosquitto.org/download/)
 - Git on PATH

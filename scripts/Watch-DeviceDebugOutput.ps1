@@ -64,11 +64,16 @@ $ErrorActionPreference = 'Stop'
 Import-SmartHomeLocalEnv
 
 $comPort = Get-RequiredEnvValue -Name 'SMARTHOME_COM_PORT'
-$repoRoot = Get-SmartHomeRepoRoot
-$toolProject = Join-Path $repoRoot 'tools\DeviceDebugMonitor\DeviceDebugMonitor.csproj'
 
-if (-not (Test-Path $toolProject)) {
-    Write-Error "DeviceDebugMonitor project not found: $toolProject"
+# Resolved through Common.ps1 rather than rebuilt here: the deployment erase reaches the
+# same project, and a second copy of the path had already drifted -- this one tested it
+# with a bare -Path, which reads [ and ] as wildcards and finds nothing in a checkout
+# whose path contains either (issue #80).
+try {
+    $toolProject = Get-SmartHomeDeviceMonitorProject
+}
+catch {
+    Write-Error $_.Exception.Message
     exit 1
 }
 

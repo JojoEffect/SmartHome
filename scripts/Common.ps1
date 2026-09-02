@@ -1056,6 +1056,7 @@ function Stop-SmartHomeDevEnv {
 #
 # So there is no state file here any more, and nothing to invalidate: a flash from any
 # source is handled by the erase immediately before the next one.
+
 # Case-insensitive about the rendering and strict about the shape: the number is
 # produced by a C# format string in another file, and this has no business failing a
 # deploy over how that file spells its hex prefix -- but it does have business refusing
@@ -1156,33 +1157,67 @@ function Clear-SmartHomeDeviceDeployment {
         return @{ Ok = $false; Detail = $_.Exception.Message }
     }
 
-    # Built every call rather than once per session. An up-to-date build is a ~2s no-op,
-    # and the alternative -- a switch the caller has to remember to pass -- is the shape
-    # of bookkeeping this whole change exists to delete. Issue #19 is the version worth
-    # having: resolve the built exe once and invoke it directly, for this and for the
-    # captures, rather than paying dotnet's project evaluation every time.
-    dotnet build $projectPath --nologo -v quiet | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        return @{ Ok = $false; Detail = "DeviceDebugMonitor failed to build (exit code $LASTEXITCODE)." }
+    # Both dotnet calls inside one try. Not defensive habit: the caller runs under
+    # $ErrorActionPreference = 'Stop', so a machine with no .NET SDK -- which is every
+    # machine that installed nanoff as a global tool and nothing else, since a global
+    # tool needs only the runtime -- would otherwise abort the deploy on a
+    # CommandNotFoundException instead of taking the padding fallback. A host that
+    # cannot run this is exactly the case the fallback exists for, same as a device that
+    # will not answer, and this function promises its caller a result rather than a throw.
+    $output = $null
+    $exitCode = 0
+    try {
+        # Built every call rather than once per session. An up-to-date build is a ~2s
+        # no-op, and the alternative -- a switch the caller has to remember to pass -- is
+        # the shape of bookkeeping this whole change exists to delete. Issue #19 is the
+        # version worth having: resolve the built exe once and invoke it directly, for
+        # this and for the captures, rather than paying dotnet's project evaluation
+        # every time.
+        dotnet build $projectPath --nologo -v quiet | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            return @{ Ok = $false; Detail = "DeviceDebugMonitor failed to build (exit code $LASTEXITCODE)." }
+        }
+
+        # stdout captured, stderr deliberately left to flow to the console: piping a
+        # native tool through 2>&1 in Windows PowerShell 5.1 wraps its ordinary stderr in
+        # a NativeCommandError and sets $? to false, which is how a healthy tool gets
+        # read as a failed one.
+        $output = dotnet run --project $projectPath --no-build -- $ComPort '--erase-deployment' $KeepBytes
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        return @{ Ok = $false; Detail = "Could not run DeviceDebugMonitor ($($_.Exception.Message))" }
     }
 
-    # stdout captured, stderr deliberately left to flow to the console: piping a native
-    # tool through 2>&1 in Windows PowerShell 5.1 wraps its ordinary stderr in a
-    # NativeCommandError and sets $? to false, which is how a healthy tool gets read as
-    # a failed one.
-    $output = dotnet run --project $projectPath --no-build -- $ComPort '--erase-deployment' $KeepBytes
-    $exitCode = $LASTEXITCODE
-
-    $result = @{ Ok = ($exitCode -eq 0) }
-
     $geometry = Read-SmartHomeDeploymentGeometry -Output $output
+
+    # Ok means the device confirmed the invariant, not merely that a process exited 0.
+    # The confirmation line is the one thing only the erase path prints -- every other
+    # mode of this binary also ends in exit 0, the ordinary capture included -- so
+    # requiring it is what stops a mis-dispatched run reading as a successful erase.
+    $confirmed = @($output) -contains "DEPLOYMENT blank-past=$KeepBytes"
+
+    $result = @{ Ok = ($exitCode -eq 0 -and $confirmed) }
+
     if ($null -ne $geometry) {
         $result['Start'] = $geometry['Start']
         $result['Length'] = $geometry['Length']
     }
+    elseif ($exitCode -eq 0) {
+        # Exit 0 with no geometry line means the output was readable enough to succeed
+        # and not readable enough to cross-check the flash address against. Said out
+        # loud: silently skipping that check is how a stale -DeployAddress gets back to
+        # being invisible, which is the failure it was added for.
+        Write-Warning "DeviceDebugMonitor reported no deployment geometry, so the flash address cannot be cross-checked against the device."
+    }
 
     if (-not $result['Ok']) {
-        $result['Detail'] = "DeviceDebugMonitor --erase-deployment exit code $exitCode"
+        $result['Detail'] = if ($exitCode -ne 0) {
+            "DeviceDebugMonitor --erase-deployment exit code $exitCode"
+        }
+        else {
+            'DeviceDebugMonitor exited 0 without confirming the deployment area is clear'
+        }
     }
 
     return $result

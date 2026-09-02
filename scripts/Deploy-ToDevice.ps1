@@ -153,10 +153,25 @@ if (-not (Test-Path $deployImage)) {
 
 $imageBytes = [System.IO.File]::ReadAllBytes($deployImage)
 
-# Ahead of the erase, deliberately: the erase takes the device's current app with it,
-# so an image that was never going to fit has to be refused while the device still has
-# something to run. Against the constant, because the device's own figure only arrives
-# with the erase -- the check below repeats this against that one.
+# Everything that can be checked without the device is checked here, ahead of the
+# erase, deliberately: the erase takes the device's current app with it, so a deploy
+# that was never going to work has to be refused while the device still has something
+# to run.
+#
+# -DeployAddress first, because parsing it is where this script would otherwise throw a
+# raw FormatException in the host's language -- and it would do so below, after the
+# erase, leaving an empty device and no mention of the parameter at fault.
+$deployAddressValue = 0L
+try {
+    $deployAddressValue = [Convert]::ToInt64($DeployAddress, 16)
+}
+catch {
+    Write-Error "-DeployAddress '$DeployAddress' is not a hexadecimal address (expected something like 0x1E0000)."
+    exit 1
+}
+
+# Against the constant, because the device's own figure only arrives with the erase --
+# the check below repeats this against that one.
 if ($imageBytes.Length -gt $DeployPartitionSize) {
     Write-Error @"
 Deploy image ($($imageBytes.Length) bytes) does not fit the deploy partition ($DeployPartitionSize bytes).
@@ -192,7 +207,7 @@ if ($erase.Contains('Start')) {
     # before it touches anything, so a failed erase still carries a usable answer, and a
     # wrong flash address is worth refusing either way.
     $reportedAddress = '0x{0:X}' -f $erase['Start']
-    if ([Convert]::ToInt64($DeployAddress, 16) -ne $erase['Start']) {
+    if ($deployAddressValue -ne $erase['Start']) {
         Write-Error @"
 The device reports its deploy partition at $reportedAddress, but -DeployAddress is $DeployAddress.
 Flashing at the wrong address writes into a partition the CLR never scans, and nanoff
@@ -221,7 +236,10 @@ Nothing was flashed; the device may already have been erased. Pass the real size
 }
 
 $flashImage = $deployImage
-$paddedImage = $null
+
+# Named whether or not this run writes one -- the cleanup after the flash is
+# unconditional, and needs the path either way.
+$paddedImage = Join-Path $binDir ($projectName + '.padded.bin')
 
 if ($erase.Ok) {
     Write-Host "  Deployment area past $($imageBytes.Length) bytes is erased; flashing the image as built." -ForegroundColor DarkGray
@@ -236,7 +254,6 @@ else {
     # device booting somebody else's assemblies.
     Write-Warning ("Could not clear the deployment area ({0}). Padding the image to the full partition instead -- slower, same guarantee." -f $erase.Detail)
 
-    $paddedImage = Join-Path $binDir ($projectName + '.padded.bin')
     $padded = New-Object byte[] $partitionSize
 
     # Fill with 0xFF by doubling an already-filled prefix rather than looping over
@@ -261,12 +278,14 @@ else {
 nanoff --deploy --serialport $comPort --image "$flashImage" --address $DeployAddress
 $nanoffExit = $LASTEXITCODE
 
-if ($null -ne $paddedImage) {
-    # nanoff has read the image by now, so the padded copy is dead weight in bin\Debug.
-    # Leaving it also puts a stale .padded.bin next to a freshly built .bin, which is the
-    # same shape as the stale-deployment problem the padding exists to fix.
-    Remove-Item -Path $paddedImage -Force -ErrorAction SilentlyContinue
-}
+# nanoff has read the image by now, so the padded copy is dead weight in bin\Debug.
+# Leaving it also puts a stale .padded.bin next to a freshly built .bin, which is the
+# same shape as the stale-deployment problem the padding exists to fix. Unconditional,
+# and not only when this run wrote one: the erase path is the common one now, and a run
+# killed between the write and this line -- or any deploy from before the erase existed
+# -- would otherwise leave one there for good, since MSBuild's Clean does not know about
+# a file it never produced.
+Remove-Item -LiteralPath $paddedImage -Force -ErrorAction SilentlyContinue
 
 if ($nanoffExit -ne 0) {
     Write-Error "nanoff deploy failed (exit code $nanoffExit)."
