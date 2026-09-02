@@ -634,3 +634,116 @@ Describe 'The announce witness' {
         Assert-False -Condition (Wait-ForAnnounceWitnessed -Port '1883' -DeviceId 'd' -TimeoutSeconds 1 -Watermark 0)
     }
 }
+
+Describe 'Get-AttributeFailure' {
+    # The conformance check's attribute assertion. It was a nested function closing over
+    # Measure-HomieConformance's $snapshot until #84, so none of this could be asserted
+    # without a broker, a device and a 90s suite run -- in the verdict function with two
+    # prior defects that passed while lying (#34, #36).
+    #
+    # Snapshots are built with the real ConvertTo-HomieSnapshot rather than by hand, so a
+    # change to the entry shape breaks these cases instead of leaving them asserting
+    # against a shape the capture no longer produces.
+
+    It 'reports nothing for a retained attribute carrying the expected payload' {
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$homie 1 4')
+
+        Assert-ArrayEqual -Expected @() -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$homie' -Expected '4')
+    }
+
+    It 'reports a topic the store never held' {
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$name 1 Office')
+
+        Assert-ArrayEqual -Expected @('missing: homie/d/$homie') `
+                          -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$homie' -Expected '4')
+    }
+
+    It 'asserts nothing further about a missing topic' {
+        # The early return. Without it the payload comparison would run against a null
+        # entry and report a second failure about a topic that is simply not there.
+        $failures = @(Get-AttributeFailure -Snapshot (ConvertTo-HomieSnapshot -Lines @()) -Topic 'homie/d/$homie' -Expected '4')
+
+        Assert-Equal -Expected 1 -Actual $failures.Count
+    }
+
+    It 'reports an attribute the broker did not replay as retained' {
+        # Homie requires every attribute retained. The flag is only set on a replay from
+        # the store, so a live-only delivery is exactly what a non-retained attribute
+        # looks like here.
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$homie 0 4')
+
+        Assert-ArrayEqual -Expected @('not retained: homie/d/$homie') `
+                          -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$homie' -Expected '4')
+    }
+
+    It 'reports the payload it saw and the one it wanted' {
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$homie 1 3')
+
+        Assert-ArrayEqual -Expected @("homie/d/`$homie is '3', expected '4'") `
+                          -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$homie' -Expected '4')
+    }
+
+    It 'reports both faults of one attribute rather than the first' {
+        # One run reports everything that is wrong: an attribute can be non-retained and
+        # carry the wrong value, and stopping at the flag would hide the value until the
+        # next 90s hardware run.
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$homie 0 3')
+
+        Assert-ArrayEqual -Expected @('not retained: homie/d/$homie', "homie/d/`$homie is '3', expected '4'") `
+                          -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$homie' -Expected '4')
+    }
+
+    It 'skips the payload comparison for -AnyValue' {
+        # $name and $type are the device's to choose, so only presence and the retain
+        # flag are the convention's business.
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$name 1 whatever the device likes')
+
+        Assert-ArrayEqual -Expected @() -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$name' -AnyValue)
+    }
+
+    It 'still asserts the retain flag for -AnyValue' {
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$name 0 Office')
+
+        Assert-ArrayEqual -Expected @('not retained: homie/d/$name') `
+                          -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$name' -AnyValue)
+    }
+
+    It 'still reports a missing topic for -AnyValue' {
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$homie 1 4')
+
+        Assert-ArrayEqual -Expected @('missing: homie/d/$name') `
+                          -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$name' -AnyValue)
+    }
+
+    It 'reads the snapshot it was passed, not one the caller happens to have in scope' {
+        # The case #84 is about. Until then the function was nested inside
+        # Measure-HomieConformance and closed over a $snapshot the /set round-trip
+        # reassigns further down that same scope: every call happened before the
+        # reassignment, so the assertions were right by position rather than by
+        # construction.
+        #
+        # The local $snapshot below is the trap, and it deliberately holds the topic that
+        # would make this case pass. PowerShell variable names are case-insensitive, so a
+        # $snapshot written inside the function binds to the -Snapshot parameter and this
+        # case cannot be fooled that way -- but a parameter renamed while the body still
+        # says $Snapshot resolves to a caller's variable instead, silently, and that is
+        # what the trap catches. Checked by deleting the parameter outright: this is the
+        # case that then fails.
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$homie 1 4')
+        $other = ConvertTo-HomieSnapshot -Lines @('homie/d/$name 1 Office')
+
+        Assert-ArrayEqual -Expected @('missing: homie/d/$homie') `
+                          -Actual @(Get-AttributeFailure -Snapshot $other -Topic 'homie/d/$homie' -Expected '4')
+    }
+
+    It 'appends nothing to a caller collecting a clean attribute with +=' {
+        # How every call site uses it. An empty array unrolls to nothing, so a clean
+        # attribute must not grow the failure list -- a single $null slipping in would
+        # be counted as a conformance failure with no message.
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$homie 1 4')
+        $collected = @()
+        $collected += Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$homie' -Expected '4'
+
+        Assert-Equal -Expected 0 -Actual $collected.Count
+    }
+}

@@ -896,7 +896,7 @@ function Get-MosquittoTool {
 #
 # Wait-ForRetainedValue now detects a mid-announce snapshot by its retain flag and retries,
 # so for that path the window is no longer the only defence. It still is for the callers
-# that read a snapshot without a flag guard -- Test-Attribute and the /set verification --
+# that read a snapshot without a flag guard -- Get-AttributeFailure and the /set verification --
 # which is why it stays at three.
 #
 # With the IPv6 timeout gone from Get-SmartHomeSubscriberArguments these are three seconds
@@ -940,7 +940,7 @@ function Get-HomieRetainedSnapshot {
     #
     # Both retained and live deliveries come back, flag intact. What the flag *means* is
     # the caller's decision, and the four callers deliberately differ: Wait-ForRetainedValue
-    # requires it when it hands the snapshot on, Test-Attribute reports it as data, the
+    # requires it when it hands the snapshot on, Get-AttributeFailure reports it as data, the
     # $retained=false check needs unretained messages to be present at all, and the /set
     # verification ignores it because a live echo is equally good evidence the command was
     # applied. Do not filter here.
@@ -1251,7 +1251,7 @@ function ConvertTo-HomieSnapshot {
     # message with DupFlag set, up to MqttSettings.MaximumAttemptsRetry (3). So a snapshot
     # can hold a live duplicate of a value the broker also replayed from its store,
     # arriving after the replayed copy. Overwriting on payload equality threw away the
-    # retain flag that replay had just proved, and Test-Attribute reported "not retained"
+    # retain flag that replay had just proved, and Get-AttributeFailure reported "not retained"
     # for three attributes of 53 that plainly were.
     #
     # Measured, not guessed: a 40s capture of one re-announce holds a retransmitted tail
@@ -1532,6 +1532,57 @@ function Add-ConformanceWarning {
     Write-Warning $Message
 }
 
+function Get-AttributeFailure {
+    # One retained attribute, checked against the snapshot it is supposed to be in, as a
+    # function that *returns* what is wrong with it rather than appending to a list it can
+    # only see from an enclosing scope.
+    #
+    # It lived inside Measure-HomieConformance until #84, closing over that scope's
+    # $snapshot -- which the /set round-trip further down reassigns. Every call happened
+    # before that reassignment, so no assertion was ever measured against the wrong store;
+    # but that was a property of where in a 500-line function the calls happened to be
+    # written, not of anything the code said. Taking the snapshot as a parameter makes
+    # every call name the store it asserts against, and is what lets scripts\tests reach
+    # the assertions of the verdict function with the worst record in this file -- two
+    # separate defects where the conformance check passed while lying (#34, #36).
+    #
+    # Returns zero, one or two strings. A missing topic is reported alone and nothing
+    # further is asserted about it, but a topic that is present can be both non-retained
+    # and carrying the wrong payload, and a run reports everything that is wrong rather
+    # than the first thing.
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Snapshot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Topic,
+
+        [string]$Expected,
+
+        # For an attribute whose value is the device's to choose ($name, $type). Presence
+        # and the retain flag are still asserted; only the payload comparison is skipped.
+        [switch]$AnyValue
+    )
+
+    if (-not $Snapshot.Contains($Topic)) {
+        return "missing: $Topic"
+    }
+
+    $failures = @()
+
+    if (-not $Snapshot[$Topic].Retained) {
+        $failures += "not retained: $Topic"
+    }
+
+    if (-not $AnyValue -and $Snapshot[$Topic].Payload -ne $Expected) {
+        $failures += "$Topic is '$($Snapshot[$Topic].Payload)', expected '$Expected'"
+    }
+
+    # An empty array unrolls to nothing, so a clean attribute contributes nothing to the
+    # caller's `+=` -- which is why no call site needs a count check.
+    return $failures
+}
+
 function Invoke-HomieConformanceCheck {
     # The verdict function the catalog names for HomieClientCheck: everything the
     # conformance measurement needs around it, so the run loop needs to know none of it.
@@ -1642,30 +1693,13 @@ function Measure-HomieConformance {
     $snapshot = $ready.Snapshot
     Write-Host ("  retained store holds {0} topics" -f $snapshot.Count) -ForegroundColor DarkGray
 
-    function Test-Attribute {
-        param([string]$Topic, [string]$Expected, [switch]$AnyValue)
-
-        if (-not $snapshot.Contains($Topic)) {
-            $script:conformanceFailures += "missing: $Topic"
-            return
-        }
-
-        if (-not $snapshot[$Topic].Retained) {
-            $script:conformanceFailures += "not retained: $Topic"
-        }
-
-        if (-not $AnyValue -and $snapshot[$Topic].Payload -ne $Expected) {
-            $script:conformanceFailures += "$Topic is '$($snapshot[$Topic].Payload)', expected '$Expected'"
-        }
-    }
-
     Start-ConformancePhase -Name 'attributes'
 
     # ── mandatory device attributes ──────────────────────────────────────────
-    Test-Attribute -Topic "$root/`$homie" -Expected '4'
-    Test-Attribute -Topic "$root/`$name" -AnyValue
-    Test-Attribute -Topic "$root/`$state" -Expected 'ready'
-    Test-Attribute -Topic "$root/`$nodes" -Expected $nodeId
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$root/`$homie" -Expected '4'
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$root/`$name" -AnyValue
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$root/`$state" -Expected 'ready'
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$root/`$nodes" -Expected $nodeId
     # $extensions is asserted from the LIVE log, not the retained store. The spec says
     # it "MUST be sent, even if it is just an empty string", but MQTT defines a
     # zero-length retained payload as a delete of the retained message -- so an empty
@@ -1677,9 +1711,9 @@ function Measure-HomieConformance {
     }
 
     # ── node attributes ──────────────────────────────────────────────────────
-    Test-Attribute -Topic "$node/`$name" -AnyValue
-    Test-Attribute -Topic "$node/`$type" -AnyValue
-    Test-Attribute -Topic "$node/`$properties" -AnyValue
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/`$name" -AnyValue
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/`$type" -AnyValue
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/`$properties" -AnyValue
 
     # ── one property per datatype, with its declared metadata ────────────────
     $expectedTypes = @{
@@ -1694,25 +1728,25 @@ function Measure-HomieConformance {
     }
 
     foreach ($property in $expectedTypes.Keys) {
-        Test-Attribute -Topic "$node/$property/`$name" -AnyValue
-        Test-Attribute -Topic "$node/$property/`$datatype" -Expected $expectedTypes[$property]
+        $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/$property/`$name" -AnyValue
+        $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/$property/`$datatype" -Expected $expectedTypes[$property]
     }
 
-    Test-Attribute -Topic "$node/integer-value/`$settable" -Expected 'true'
-    Test-Attribute -Topic "$node/integer-value/`$format" -Expected '0:100'
-    Test-Attribute -Topic "$node/enum-value/`$format" -Expected 'low,medium,high'
-    Test-Attribute -Topic "$node/color-value/`$format" -Expected 'rgb'
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/integer-value/`$settable" -Expected 'true'
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/integer-value/`$format" -Expected '0:100'
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/enum-value/`$format" -Expected 'low,medium,high'
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/color-value/`$format" -Expected 'rgb'
     # Built by HomieClientCheck from the State enum rather than spelled out there, so
     # that the vocabulary a controller is offered cannot drift from the vocabulary
     # $state is published in. This assertion is what notices if that derivation breaks.
-    Test-Attribute -Topic "$node/lifecycle/`$format" -Expected 'ready,alert,sleeping'
-    Test-Attribute -Topic "$node/lifecycle/`$settable" -Expected 'true'
-    Test-Attribute -Topic "$node/integer-value/`$unit" -Expected '#'
-    Test-Attribute -Topic "$node/float-value/`$unit" -AnyValue
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/lifecycle/`$format" -Expected 'ready,alert,sleeping'
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/lifecycle/`$settable" -Expected 'true'
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/integer-value/`$unit" -Expected '#'
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/float-value/`$unit" -AnyValue
 
     # ── $retained=false is honoured, not just declared ───────────────────────
-    Test-Attribute -Topic "$node/counter/`$retained" -Expected 'false'
-    Test-Attribute -Topic "$node/counter/`$settable" -Expected 'false'
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/counter/`$retained" -Expected 'false'
+    $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/counter/`$settable" -Expected 'false'
     # The counter publishes every 2s, so a LIVE message can easily land inside the
     # snapshot window. Absence would be the wrong assertion; what matters is that the
     # broker never marks it retained.
