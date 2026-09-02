@@ -21,12 +21,30 @@
       3. Reports anything not found in either place -- this script does not hit the
          network, by design, so it's safe to call unattended from other scripts.
 
+    It then reports, in one line, how many folders in packages\ no packages.config in
+    this checkout references -- the restore only ever added to that folder, so a version
+    bump left the previous version behind indefinitely. -Prune removes them.
+
+.PARAMETER Prune
+    Remove the packages\ folders nothing in this checkout references, one line per
+    removal. Supports -WhatIf, which is how to see the list without removing anything.
+
+    Off by default: packages\ is not this script's to empty on a run someone asked for
+    something else, and a stale folder costs disk rather than correctness now that
+    Get-NanoFrameworkTestAdapterDir resolves by reference (issue #79).
+
 .EXAMPLE
     .\scripts\Restore-Packages.ps1
+
+.EXAMPLE
+    .\scripts\Restore-Packages.ps1 -Prune -WhatIf
+    Lists the unreferenced packages\ folders without touching any of them.
 #>
 
-[CmdletBinding()]
-param()
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [switch]$Prune
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -51,43 +69,78 @@ if (-not (Test-Path -LiteralPath $packagesDir)) {
     New-Item -ItemType Directory -Path $packagesDir | Out-Null
 }
 
-# This checkout's configs only -- see Get-SmartHomePackagesConfig for why a worktree's
-# must not be restored into the checkout the script was run from.
-$configs = Get-SmartHomePackagesConfig -RepoRoot $repoRoot
+# This checkout's references only -- see Get-SmartHomePackagesConfig for why a worktree's
+# must not be restored into the checkout the script was run from, and
+# Get-SmartHomeReferencedPackage for why the preflight reads the same list through the
+# same parser.
+$referenced = Get-SmartHomeReferencedPackage -RepoRoot $repoRoot
 
-Write-Host "Restoring packages referenced by $($configs.Count) packages.config file(s)..." -ForegroundColor Cyan
+Write-Host "Restoring $($referenced.Count) package(s) referenced by this checkout..." -ForegroundColor Cyan
 
 $copied = 0
 $alreadyPresent = 0
 $missing = New-Object System.Collections.Generic.List[string]
 
-foreach ($config in $configs) {
-    [xml]$xml = Get-Content -LiteralPath $config.FullName
-    foreach ($package in $xml.packages.package) {
-        $id = $package.id
-        $version = $package.version
-        $destName = "$id.$version"
-        $destPath = Join-Path $packagesDir $destName
+foreach ($package in $referenced) {
+    if (Test-Path -LiteralPath $package.Path) {
+        $alreadyPresent++
+        continue
+    }
 
-        if (Test-Path -LiteralPath $destPath) {
-            $alreadyPresent++
-            continue
-        }
-
-        $cachePath = Join-Path $cacheRoot "$($id.ToLowerInvariant())\$version"
-        if (Test-Path -LiteralPath $cachePath) {
-            Copy-Item -LiteralPath $cachePath -Destination $destPath -Recurse
-            Write-Host "  restored: $destName" -ForegroundColor Green
-            $copied++
-        }
-        elseif (-not $missing.Contains($destName)) {
-            $missing.Add($destName)
-        }
+    $cachePath = Join-Path $cacheRoot "$($package.Id.ToLowerInvariant())\$($package.Version)"
+    if (Test-Path -LiteralPath $cachePath) {
+        Copy-Item -LiteralPath $cachePath -Destination $package.Path -Recurse
+        Write-Host "  restored: $($package.Name)" -ForegroundColor Green
+        $copied++
+    }
+    else {
+        $missing.Add($package.Name)
     }
 }
 
 Write-Host ""
 Write-Host "$alreadyPresent already present, $copied restored from local NuGet cache." -ForegroundColor Cyan
+
+# ── packages\ folders this checkout references no more ───────────────────────
+# The loop above only ever adds, and nothing else prunes: measured on the main checkout
+# on 2026-09-01, 61 folders against 29 references (issue #79). Reported unconditionally
+# because it is one line and the folder is otherwise invisible; removed only on -Prune,
+# because this script is called unattended by Initialize-Worktree.ps1, which asked for a
+# checkout to be filled in and not for anything to be deleted.
+$unreferenced = Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir -ReferencedPackage $referenced
+
+if ($unreferenced.Count -eq 0) {
+    Write-Host "packages\ carries nothing this checkout no longer references." -ForegroundColor DarkGray
+}
+elseif (-not $Prune) {
+    Write-Host "$($unreferenced.Count) folder(s) in packages\ are referenced by nothing in this checkout; -Prune removes them (-Prune -WhatIf lists them)." -ForegroundColor Yellow
+}
+else {
+    # The complement of an empty set is the whole folder. A checkout that references
+    # nothing is a broken or partial one -- Test-Setup.ps1 reports it as such -- and
+    # emptying packages\ on the strength of it would read as this script having done its
+    # job. Refused rather than warned, because the removal is not reversible.
+    if ($referenced.Count -eq 0) {
+        Write-Error @"
+Refusing to prune: this checkout references no packages at all, so all
+$($unreferenced.Count) folder(s) in packages\ would be removed. That is a broken or
+partial checkout rather than an empty reference set -- run .\scripts\Test-Setup.ps1.
+"@
+        exit 1
+    }
+
+    Write-Host ""
+    $pruned = 0
+    foreach ($folder in $unreferenced) {
+        if ($PSCmdlet.ShouldProcess($folder.FullName, 'Remove unreferenced package folder')) {
+            Remove-Item -LiteralPath $folder.FullName -Recurse -Force
+            Write-Host "  pruned: $($folder.Name)" -ForegroundColor Yellow
+            $pruned++
+        }
+    }
+
+    Write-Host "$pruned of $($unreferenced.Count) unreferenced folder(s) removed from packages\." -ForegroundColor Cyan
+}
 
 if ($missing.Count -gt 0) {
     Write-Host ""
@@ -104,7 +157,8 @@ Manager, which populates the cache this script reads from -- then re-run this sc
 
 Write-Host "All referenced packages are available." -ForegroundColor Green
 
-# Explicit success code: callers (and Run-IntegrationTests.ps1 / Start-DevEnv.ps1) read
-# $LASTEXITCODE after invoking this script, and without this it would carry whatever the
-# last native command happened to leave behind.
+# Explicit success code: Initialize-Worktree.ps1 reads $LASTEXITCODE after invoking this
+# script, and without this it would carry whatever the last native command happened to
+# leave behind. (This comment used to name Run-IntegrationTests.ps1 and Start-DevEnv.ps1
+# as the callers; neither has invoked this script for some time.)
 exit 0

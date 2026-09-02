@@ -203,20 +203,174 @@ function Get-SmartHomePackagesConfig {
         })
 }
 
-function Get-NanoFrameworkTestAdapterDir {
+function Get-SmartHomeReferencedPackage {
+    # Every <package> this checkout references, once each, as a record the callers can
+    # act on: Id, Version, the packages\ folder Name NuGet extracts it to, and the Path
+    # that folder would have. Four things read this list and they have to agree about
+    # what a reference *is*:
+    #
+    #   Restore-Packages.ps1  what to copy in from the local NuGet cache;
+    #   Restore-Packages.ps1  and, by complement, which packages\ folders nothing
+    #                         references any more (-Prune);
+    #   Test-Setup.ps1        what to check is restored;
+    #   Get-NanoFrameworkTestAdapterDir below, which needs one specific version.
+    #
+    # The restore and the preflight computed this separately until issue #79, differing
+    # only in the XML access -- and that difference was itself a bug (issue #78): the
+    # property form $xml.packages.package THROWS under Set-StrictMode -Version Latest on
+    # a packages.config whose <packages> has no <package> children, because the property
+    # does not exist on that object. The preflight had already been given XPath for
+    # exactly that reason; the restore still aborted, without naming the file. SelectNodes
+    # returns an empty list instead, so this reads every config the same way.
+    #
+    # GetAttribute rather than $package.id for the same class of reason one level down: a
+    # <package> missing either attribute is malformed, and under Set-StrictMode reading it
+    # as a property throws where GetAttribute returns ''. Warned about and skipped rather
+    # than thrown on -- one hand-mangled entry should not cost the other 28 their restore
+    # -- but never silently, because a skipped reference is a package that then looks
+    # restored to everything downstream.
+    #
+    # Distinct by folder name: this repository's 14 packages.config files carry 130
+    # references to 29 distinct package versions, and every caller wants the set. The
+    # restore's "already present" count is a count of packages, not of mentions.
+    #
+    # Always an array, for the reason spelled out on Get-SmartHomePackagesConfig, and
+    # -ErrorAction reaches that function's enumeration through the scope chain.
+    #
+    # Assign the result before piping it. The leading comma that makes .Count readable on
+    # an empty result also survives into a pipeline: `Get-SmartHomeReferencedPackage ... |
+    # Where-Object { $_.Id -eq 'x' }` hands the scriptblock the whole array as ONE item,
+    # where $_.Id is member enumeration over every record -- truthy whenever any of them
+    # matches, so the filter passes everything through and reads as if it had worked. Both
+    # callers assign first; the test file has a case for the empty-result half of this.
     param(
         [Parameter(Mandatory = $true)]
         [string]$RepoRoot
     )
 
     $packagesDir = Join-Path $RepoRoot 'packages'
+    $seen = @{}
+    $records = New-Object System.Collections.Generic.List[psobject]
+
+    foreach ($config in (Get-SmartHomePackagesConfig -RepoRoot $RepoRoot)) {
+        [xml]$xml = Get-Content -LiteralPath $config.FullName
+
+        foreach ($package in $xml.SelectNodes('/packages/package')) {
+            $id = $package.GetAttribute('id')
+            $version = $package.GetAttribute('version')
+
+            if ([string]::IsNullOrWhiteSpace($id) -or [string]::IsNullOrWhiteSpace($version)) {
+                Write-Warning "Skipping a <package> with no id or no version in $($config.FullName)."
+                continue
+            }
+
+            $name = "$id.$version"
+            if ($seen.ContainsKey($name)) { continue }
+            $seen[$name] = $true
+
+            $records.Add([pscustomobject]@{
+                Id      = $id
+                Version = $version
+                Name    = $name
+                Path    = (Join-Path $packagesDir $name)
+            })
+        }
+    }
+
+    return ,@($records)
+}
+
+function Get-SmartHomeUnreferencedPackageDir {
+    # The folders in packages\ that no reference accounts for -- what Restore-Packages.ps1
+    # reports, and removes under -Prune. The restore only ever added to that folder and
+    # nothing else pruned it, so every version bump left the previous version behind:
+    # measured on the main checkout on 2026-09-01, 61 folders against 29 references
+    # (issue #79).
+    #
+    # Takes the referenced records rather than a repo root, for two reasons. The caller
+    # already has them -- recomputing would walk every packages.config a second time to
+    # reach the same answer -- and a function whose destructive half depends only on its
+    # arguments can be proved at a desk, which the block this replaced could not.
+    #
+    # Directories only. NuGet leaves loose files in packages\ (a .nupkg, a lock file) and
+    # they are nobody's stale package version; a prune that swept them up would be doing
+    # something other than what it says.
+    #
+    # Name matching is case-insensitive, which is what a hashtable gives by default and
+    # what NTFS gives anyway: the folder NuGet extracts and the id in packages.config
+    # differ in case often enough (nanoFramework.M2Mqtt vs nanoframework.m2mqtt in the
+    # cache) that a case-sensitive complement would call a restored package stale.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PackagesDir,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        $ReferencedPackage
+    )
+
+    if (-not (Test-Path -LiteralPath $PackagesDir)) {
+        return ,@()
+    }
+
+    $referencedNames = @{}
+    foreach ($package in $ReferencedPackage) { $referencedNames[$package.Name] = $true }
+
+    return ,@(Get-ChildItem -LiteralPath $PackagesDir -Directory |
+        Where-Object { -not $referencedNames.ContainsKey($_.Name) })
+}
+
+function Get-NanoFrameworkTestAdapterDir {
+    # The adapter vstest.console loads to run SmartHome.UnitTests, resolved from the
+    # version this checkout *references* rather than from whatever is on disk.
+    #
+    # It used to take the highest-sorting nanoFramework.TestAdapter.dll anywhere under
+    # packages\, which is a text sort and therefore not a version order: with 3.0.9 and
+    # 3.0.80 both restored, 3.0.9 won. Nothing prunes packages\, so a version bump leaves
+    # the old folder behind and the run silently uses an adapter this checkout does not
+    # reference (issue #79). CLAUDE.md records what that class of mismatch costs -- the
+    # NFUnitTest rename produced a green vstest run that executed nothing and went
+    # unnoticed for three commits -- so the failure mode to avoid is "picked something",
+    # not "picked nothing".
+    #
+    # $null on every path it cannot resolve, because both callers already treat that as
+    # "cannot run the unit tests" and say so. The warning is what distinguishes the three
+    # reasons; Test-Setup.ps1 silences it and builds its own row from the same list.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    # Assigned before it is filtered, never piped straight in -- see the note on
+    # Get-SmartHomeReferencedPackage for what piping it does to a Where-Object.
+    $referenced = Get-SmartHomeReferencedPackage -RepoRoot $RepoRoot
+    $testFramework = @($referenced | Where-Object { $_.Id -eq 'nanoFramework.TestFramework' })
+
+    if ($testFramework.Count -eq 0) {
+        Write-Warning "No packages.config in $RepoRoot references nanoFramework.TestFramework, so there is no adapter version to resolve."
+        return $null
+    }
+
+    if ($testFramework.Count -gt 1) {
+        Write-Warning ("This checkout references {0} nanoFramework.TestFramework versions ({1}). Pin one before running the unit tests -- picking between them is what issue #79 was about." -f `
+            $testFramework.Count, (@($testFramework | ForEach-Object { $_.Version }) -join ', '))
+        return $null
+    }
+
     # -LiteralPath for the same reason as Get-SmartHomePackagesConfig above: a checkout
     # path containing '[' or ']' finds nothing under -Path, and this one reports that as
-    # "adapter not restored".
-    $adapterDll = Get-ChildItem -LiteralPath $packagesDir -Recurse -Filter 'nanoFramework.TestAdapter.dll' -ErrorAction SilentlyContinue |
-        Sort-Object FullName -Descending | Select-Object -First 1
+    # "adapter not restored". SilentlyContinue covers the folder simply not being there,
+    # which is the ordinary unrestored case and not an error worth two messages.
+    #
+    # Sorted before the pick so a package that ships the adapter under more than one
+    # target framework resolves the same way twice. Both are the referenced version, so
+    # unlike the sort this replaced, which of them wins is not a correctness question.
+    $adapterDll = Get-ChildItem -LiteralPath $testFramework[0].Path -Recurse -Filter 'nanoFramework.TestAdapter.dll' -ErrorAction SilentlyContinue |
+        Sort-Object FullName | Select-Object -First 1
 
     if (-not $adapterDll) {
+        Write-Warning ("nanoFramework.TestFramework {0} is referenced but its adapter is not in {1}. Run .\scripts\Restore-Packages.ps1." -f `
+            $testFramework[0].Version, $testFramework[0].Path)
         return $null
     }
 

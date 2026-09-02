@@ -241,17 +241,16 @@ $missingPackages = New-Object System.Collections.Generic.List[string]
 # subtree the enumerator cannot read costs this one row, not the whole run.
 $configs = Get-SmartHomePackagesConfig -RepoRoot $repoRoot -ErrorAction SilentlyContinue
 
-foreach ($configFile in $configs) {
-    [xml]$xml = Get-Content -LiteralPath $configFile.FullName
+# The parse itself moved into Get-SmartHomeReferencedPackage, which the restore now reads
+# too: the two used to walk these files separately and differ in the XML access, and that
+# difference was issue #78. The config count above is still read here because the "no
+# packages.config found" row below is about the files, not about what they reference --
+# a checkout full of empty configs is a different report from a checkout with none.
+$referenced = Get-SmartHomeReferencedPackage -RepoRoot $repoRoot -ErrorAction SilentlyContinue
 
-    # XPath rather than $xml.packages.package: under Set-StrictMode -Version Latest the
-    # property access throws on a packages.config with no <package> children, which
-    # would abort the whole preflight. SelectNodes just returns an empty list.
-    foreach ($package in $xml.SelectNodes('/packages/package')) {
-        $name = "$($package.id).$($package.version)"
-        if (-not (Test-Path -LiteralPath (Join-Path $packagesDir $name)) -and -not $missingPackages.Contains($name)) {
-            $missingPackages.Add($name)
-        }
+foreach ($package in $referenced) {
+    if (-not (Test-Path -LiteralPath $package.Path)) {
+        $missingPackages.Add($package.Name)
     }
 }
 
@@ -277,7 +276,11 @@ else {
 # The unit-test adapter lives inside packages\, so this only means anything once the
 # restore above is clean -- but naming it separately saves guessing when Run-Tests.ps1
 # is the thing that failed.
-$adapterDir = Get-NanoFrameworkTestAdapterDir -RepoRoot $repoRoot
+#
+# -WarningAction SilentlyContinue: the resolver names its own reason on the warning
+# stream for Run-Tests.ps1's benefit, and a loose warning printed above this table is not
+# how a preflight reports. The row below says the same thing from the same list.
+$adapterDir = Get-NanoFrameworkTestAdapterDir -RepoRoot $repoRoot -WarningAction SilentlyContinue
 if ($adapterDir) {
     Add-Result -Name 'nanoFramework test adapter' -Status 'OK' -Detail $adapterDir
 }
@@ -287,8 +290,19 @@ else {
         $adapterFix = '.\scripts\Initialize-Worktree.ps1 -- Run-Tests.ps1 cannot run without it'
     }
 
-    Add-Result -Name 'nanoFramework test adapter' -Status 'FAIL' -Detail 'nanoFramework.TestAdapter.dll not in packages\' `
-               -Fix $adapterFix
+    # Since issue #79 the adapter is resolved from the version this checkout references,
+    # not from whatever sorts highest under packages\, so "not restored" is only one of
+    # three ways this can fail -- and the other two are not fixed by restoring anything.
+    $testFrameworkVersions = @($referenced | Where-Object { $_.Id -eq 'nanoFramework.TestFramework' } | ForEach-Object { $_.Version })
+    if ($testFrameworkVersions.Count -eq 1) {
+        $adapterDetail = "nanoFramework.TestFramework $($testFrameworkVersions[0]) referenced, its adapter not in packages\"
+    }
+    else {
+        $adapterDetail = "$($testFrameworkVersions.Count) nanoFramework.TestFramework version(s) referenced by this checkout, so no adapter version to resolve"
+        $adapterFix = 'Pin exactly one nanoFramework.TestFramework version across this checkout''s packages.config files'
+    }
+
+    Add-Result -Name 'nanoFramework test adapter' -Status 'FAIL' -Detail $adapterDetail -Fix $adapterFix
 }
 
 # -------------------------------------------------------------- sibling repos --

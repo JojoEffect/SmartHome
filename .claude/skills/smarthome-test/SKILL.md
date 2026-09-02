@@ -6,7 +6,8 @@ description: Run the SmartHome unit test suite (SmartHome.UnitTests) on real ESP
 # SmartHome hardware unit test run
 
 Run `scripts\Run-Tests.ps1` — builds `SmartHome.UnitTests` and runs it via `vstest.console` + the
-nanoFramework test adapter (auto-discovered under `packages\nanoFramework.TestFramework.*\`).
+nanoFramework test adapter, taken from the `packages\nanoFramework.TestFramework.<version>\` this
+checkout's own `packages.config` files reference.
 
 ```powershell
 .\scripts\Run-Tests.ps1
@@ -22,5 +23,9 @@ not the physical environment. The WiFi/broker/sensor end-to-end checks live in
 
 If it fails with `vstest.console not found`, Visual Studio (or its Build Tools) isn't installed —
 tests can still run from VS's own Test Explorer as a fallback. If it fails with the nanoFramework
-test adapter not found, run `smarthome-restore-packages` first — the adapter comes from the
-`nanoFramework.TestFramework` package.
+test adapter not found, the warning above the error names which of the three reasons it is:
+the referenced version is not restored (run `smarthome-restore-packages`), nothing in the
+checkout references `nanoFramework.TestFramework` at all, or two projects reference different
+versions and there is nothing to pick between them. It resolves by reference rather than by
+taking the highest-sorting copy under `packages\`, because that sort is textual — `3.0.9` beat
+`3.0.80` — and would run the suite against an adapter this checkout does not reference (#79).
