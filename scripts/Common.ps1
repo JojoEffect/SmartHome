@@ -1015,159 +1015,175 @@ function Stop-SmartHomeDevEnv {
     return $stoppedSomething
 }
 
-# ── Deploy state ──────────────────────────────────────────────────────────────
-# Deploy-ToDevice.ps1 pads every image with 0xFF before flashing it, because nanoff
-# erases and writes only the image file's own byte length -- so a smaller app
-# deployed after a larger one leaves the larger one's tail sitting unerased past
-# the new image's end. That tail is not ignored: the CLR walks the WHOLE deployment
+# ── Device deployment area ────────────────────────────────────────────────────
+# nanoff erases and writes only the image file's own byte length, so a smaller app
+# flashed after a larger one leaves the larger one's tail sitting unerased past the
+# new image's end. That tail is not ignored: the CLR walks the WHOLE deployment
 # partition looking for assembly headers, and on a header that doesn't check out it
 # `continue`s to the next candidate rather than stopping (ContiguousBlockAssemblies
 # in nf-interpreter's src\CLR\Startup\CLRStartup.cpp, whose stream Length is the
 # full block range). So no amount of trailing blank flash terminates the scan --
-# the only thing that keeps stale assemblies out is overwriting them.
+# the only thing that keeps stale assemblies out is erasing them.
 #
-# The invariant is therefore exactly "cover the footprint of the previous image",
-# and the previous image's size is the one fact needed to pad to less than a flat
-# worst case. It is recorded here, keyed by COM port.
+# Deploy-ToDevice.ps1 used to guess how far that reached, from a per-COM-port record
+# of what IT last flashed, and pad the image with 0xFF that far. The guess could only
+# ever describe this script's own flashes: Visual Studio's F5 deploy and the
+# nanoFramework test adapter write the same partition over the debugger's WireProtocol
+# connection and erase only their own footprint too, and nothing made the record notice
+# (issue #46). So the device is asked instead.
 #
-# Deliberately NOT another -Kind on Get-SmartHomeDevEnvPath: that function's -Port
-# is an MQTT port, and one parameter meaning two different kinds of port depending
-# on -Kind is exactly the ambiguity its callers should not have to hold. This
-# shares the temp directory and $SmartHomeTempFilePrefix, not the signature.
+# What the device will and will not answer, all of it checked against the pinned
+# sibling checkouts rather than assumed:
 #
-# StaleBytes is the contract: "the number of bytes from the deploy address that the
-# next flash must overwrite for no leftover assembly data to survive it". It is
-# written pessimistically -- the full padded length -- BEFORE a flash, so an
-# interrupted or failed write still leaves a record covering everything nanoff may
-# have put down, and tightened to the image's own length only once nanoff reports
-# success, at which point everything between the image's end and the padded length
-# is known to be 0xFF.
+#   - It will NOT report how much of the partition is in use. Monitor_DeploymentMap,
+#     the command whose name promises exactly that, is a stub in the firmware that
+#     replies with an empty payload (Debugger.cpp), so nf-debugger's GetDeploymentMap()
+#     always hands back an empty list. Debugging_Deployment_Status reports the
+#     partition's start and length -- its geometry, not its contents.
+#   - It will NOT let the region be read back. CheckPermission has no
+#     BLOCKTYPE_DEPLOYMENT case under AccessMemory_Read, so ReadMemory over the deploy
+#     partition comes back PermissionDenied. (Watch-DeviceDebugOutput.ps1 -DumpConfig
+#     reads the CONFIG partition, which is permitted -- that is why that one works.)
+#   - It WILL erase it. AccessMemory_Erase does list BLOCKTYPE_DEPLOYMENT, and the
+#     firmware skips the erase entirely when the region from the given address to the
+#     end of the partition is already blank (Esp32FlashDriver_IsBlockErased). That is
+#     the exact invariant the padding existed to hold, decided by the device rather
+#     than by a record on this machine, and it is the same command Visual Studio's own
+#     deploy issues before it writes (DeploymentExecute in nf-debugger's
+#     WireProtocol\Engine.cs).
 #
-# Anything that flashes the device WITHOUT going through Deploy-ToDevice.ps1 --
-# Visual Studio's F5 deploy, the nanoFramework test adapter -- invalidates the
-# record, because it writes assemblies this script never saw. Such a path must call
-# Clear-SmartHomeDeployState; the next deploy then falls back to the flat
-# worst-case pad, which is what the script did unconditionally before any of this.
-$SmartHomeDeployStateVersion = 1
+# So there is no state file here any more, and nothing to invalidate: a flash from any
+# source is handled by the erase immediately before the next one.
+# Case-insensitive about the rendering and strict about the shape: the number is
+# produced by a C# format string in another file, and this has no business failing a
+# deploy over how that file spells its hex prefix -- but it does have business refusing
+# a line that is missing half the answer.
+$SmartHomeDeploymentGeometryPattern = '^DEPLOYMENT\s+start=0[xX]([0-9A-Fa-f]+)\s+length=(\d+)\s*$'
 
-function Get-SmartHomeDeployStatePath {
+function Read-SmartHomeDeploymentGeometry {
+    <#
+        Pulls the deploy partition's start and length out of DeviceDebugMonitor's
+        --erase-deployment output. Split out from the invocation below so the parsing
+        is provable at a desk: everything around it needs a device.
+
+        Returns $null rather than throwing when the line is absent or malformed -- the
+        caller has an exit code that already says whether the erase worked, and a
+        geometry it could not read is a reason to skip the cross-check, not to fail a
+        deploy that the device reported as fine.
+    #>
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$ComPort
+        [string[]]$Output
     )
 
-    # 'COM3' needs no escaping, but the port comes from local.env.ps1 and something
-    # like \\.\COM10 would otherwise build a path pointing somewhere else entirely.
-    # '*' survives the scrub on purpose, so Clear-SmartHomeDeployState can build the
-    # all-ports glob from this one naming rule instead of restating it.
-    $safePort = ($ComPort -replace '[^A-Za-z0-9._*-]', '_')
-    return (Join-Path ([System.IO.Path]::GetTempPath()) "$SmartHomeTempFilePrefix-deploy-$safePort.json")
+    if ($null -eq $Output) {
+        return $null
+    }
+
+    foreach ($line in $Output) {
+        if ([string]::IsNullOrWhiteSpace([string]$line)) {
+            continue
+        }
+
+        $match = [regex]::Match([string]$line, $SmartHomeDeploymentGeometryPattern)
+        if (-not $match.Success) {
+            continue
+        }
+
+        # Parsed as UInt32 and handed back as [long]: a start address of 0x1E0000 fits
+        # an int, but the address space it comes from does not, and the caller compares
+        # this against a -DeployAddress string it parses the same way.
+        $start = 0
+        $length = 0
+        if (-not [uint32]::TryParse($match.Groups[1].Value, [System.Globalization.NumberStyles]::HexNumber, [cultureinfo]::InvariantCulture, [ref]$start)) {
+            continue
+        }
+        if (-not [uint32]::TryParse($match.Groups[2].Value, [ref]$length) -or $length -eq 0) {
+            continue
+        }
+
+        return @{
+            Start  = [long]$start
+            Length = [long]$length
+        }
+    }
+
+    return $null
 }
 
-function Get-SmartHomeDeployState {
-    # Returns the record only when every field is present and sane; $null otherwise.
-    # Every rejection here costs one full-size deploy -- the behaviour this script
-    # had before the record existed -- so the failure direction is the safe one, and
-    # nothing about a bad record should ever reach the flashing decision.
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$ComPort
-    )
+function Get-SmartHomeDeviceMonitorProject {
+    # tools\DeviceDebugMonitor is a host-side .NET app, NOT a nanoFramework project --
+    # it is the CLI equivalent of VS's debugger extension, and both the debug capture
+    # and the deployment erase go through it.
+    $projectPath = Join-Path (Get-SmartHomeRepoRoot) 'tools\DeviceDebugMonitor\DeviceDebugMonitor.csproj'
 
-    $stateFile = Get-SmartHomeDeployStatePath -ComPort $ComPort
-    if (-not (Test-Path $stateFile)) {
-        return $null
+    if (-not (Test-Path -LiteralPath $projectPath)) {
+        throw "DeviceDebugMonitor project not found: $projectPath"
     }
 
-    try {
-        $state = ConvertTo-SmartHomeHashtable -InputObject (Get-Content $stateFile -Raw | ConvertFrom-Json)
-    }
-    catch {
-        Write-Warning "Ignoring unreadable deploy-state file: $stateFile"
-        return $null
-    }
-
-    if ($null -eq $state -or -not ($state -is [System.Collections.IDictionary])) {
-        return $null
-    }
-
-    if ($state['Version'] -ne $SmartHomeDeployStateVersion) {
-        return $null
-    }
-
-    if ($state['ComPort'] -ne $ComPort) {
-        return $null
-    }
-
-    if ([string]::IsNullOrWhiteSpace([string]$state['DeployAddress'])) {
-        return $null
-    }
-
-    # Parsed rather than type-checked: ConvertFrom-Json hands back Int32, Int64 or
-    # Double depending on the literal, and the caller does arithmetic with this.
-    $staleBytes = 0
-    if (-not [int]::TryParse([string]$state['StaleBytes'], [ref]$staleBytes) -or $staleBytes -lt 0) {
-        return $null
-    }
-    $state['StaleBytes'] = $staleBytes
-
-    return $state
+    return $projectPath
 }
 
-function Save-SmartHomeDeployState {
+function Clear-SmartHomeDeviceDeployment {
+    <#
+        Asks the device to make everything past the first -KeepBytes bytes of its
+        deployment partition erased flash, so the caller can flash a bare image of
+        that length and be certain nothing older survives past its end.
+
+        Returns a hashtable: Ok, plus Start/Length when the device reported its
+        geometry and Detail when it did not work. Never throws for a device that would
+        not answer -- the caller decides what an unreachable device costs, and for a
+        deploy that is a slower fallback rather than a refusal.
+
+        On ESP32 an erase that IS needed takes the whole partition with it
+        (Esp32FlashDriver_EraseBlock ignores the address), so the device has no app at
+        all between this call and the flash that follows. Call it immediately before
+        the flash, not as a tidy-up step.
+    #>
     param(
         [Parameter(Mandatory = $true)]
         [string]$ComPort,
 
         [Parameter(Mandatory = $true)]
-        [string]$DeployAddress,
+        [int]$KeepBytes,
 
-        [Parameter(Mandatory = $true)]
-        [int]$StaleBytes,
-
-        # Purely for humans reading the file while working out what is on a device.
-        [string]$Image = ''
+        # The monitor is a host-side tool that does not change between calls, so a
+        # caller that already built it (Run-IntegrationTests.ps1 builds once up front)
+        # can skip the build.
+        [switch]$NoBuild
     )
 
-    # Deliberately returns nothing, same as Save-SmartHomeDevEnvState: callers only
-    # care that the record landed, and a returned path would leak into their output.
-    @{
-        Version       = $SmartHomeDeployStateVersion
-        ComPort       = $ComPort
-        DeployAddress = $DeployAddress
-        StaleBytes    = $StaleBytes
-        Image         = $Image
-        UpdatedUtc    = (Get-Date).ToUniversalTime().ToString('o')
-    } | ConvertTo-Json -Depth 3 |
-        Set-Content -Path (Get-SmartHomeDeployStatePath -ComPort $ComPort) -Encoding utf8
-}
-
-function Clear-SmartHomeDeployState {
-    # Without -ComPort, clears every port's record. That is the right default for the
-    # callers that need it: the nanoFramework test adapter picks its own device when
-    # nano.runsettings leaves RealHardwarePort empty, so which port it flashed is not
-    # knowable here. Clearing one record too many costs one full-size deploy.
-    param(
-        [string]$ComPort
-    )
-
-    # A clear that quietly did not happen is the one failure this whole mechanism has
-    # to avoid: it leaves a record SMALLER than what is actually on the device, and the
-    # next deploy pads to it. So a missing file is fine (nothing to clear) but a removal
-    # that fails is not swallowed -- callers run under $ErrorActionPreference = 'Stop'
-    # and should stop rather than flash against a record they were told was gone.
-    if ($ComPort) {
-        $stateFile = Get-SmartHomeDeployStatePath -ComPort $ComPort
-        if (Test-Path -LiteralPath $stateFile) {
-            Remove-Item -LiteralPath $stateFile -Force
-        }
-        return
+    try {
+        $projectPath = Get-SmartHomeDeviceMonitorProject
+    }
+    catch {
+        return @{ Ok = $false; Detail = $_.Exception.Message }
     }
 
-    # -LiteralPath on the directory plus -Filter, not a wildcard -Path: Get-ChildItem
-    # reads [ and ] in a -Path as wildcard metacharacters, so a temp directory whose
-    # name contains either would match nothing at all and clear silently.
-    $pattern = Split-Path (Get-SmartHomeDeployStatePath -ComPort '*') -Leaf
-    Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Filter $pattern -File -ErrorAction SilentlyContinue |
-        Remove-Item -Force
+    if (-not $NoBuild) {
+        dotnet build $projectPath --nologo -v quiet | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            return @{ Ok = $false; Detail = "DeviceDebugMonitor failed to build (exit code $LASTEXITCODE)." }
+        }
+    }
+
+    # stdout captured, stderr deliberately left to flow to the console: piping a native
+    # tool through 2>&1 in Windows PowerShell 5.1 wraps its ordinary stderr in a
+    # NativeCommandError and sets $? to false, which is how a healthy tool gets read as
+    # a failed one.
+    $output = dotnet run --project $projectPath --no-build -- $ComPort '--erase-deployment' $KeepBytes
+    $exitCode = $LASTEXITCODE
+
+    $result = @{ Ok = ($exitCode -eq 0) }
+
+    $geometry = Read-SmartHomeDeploymentGeometry -Output $output
+    if ($null -ne $geometry) {
+        $result['Start'] = $geometry['Start']
+        $result['Length'] = $geometry['Length']
+    }
+
+    if (-not $result['Ok']) {
+        $result['Detail'] = "DeviceDebugMonitor --erase-deployment exit code $exitCode"
+    }
+
+    return $result
 }

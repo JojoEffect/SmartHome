@@ -11,6 +11,12 @@
 // right after a fresh nanoff flash (which already hardware-resets the device) --
 // rebooting again on top of that double-triggers execution and can leave native
 // peripherals (e.g. WiFi) in a busy state a single clean boot wouldn't hit.
+//
+// --erase-deployment <keep-bytes>: not a capture at all. Reports the deploy
+// partition's real geometry, and makes sure nothing but erased flash lies past the
+// first <keep-bytes> bytes of it. That is what lets Deploy-ToDevice.ps1 flash a bare
+// image instead of guessing how far to pad it -- see the "Deploy padding" section of
+// CLAUDE.md.
 
 using nanoFramework.Tools.Debugger;
 using nanoFramework.Tools.Debugger.Extensions;
@@ -26,18 +32,35 @@ if (untilIndex >= 0 && untilIndex + 1 < args.Length)
     until = args[untilIndex + 1];
 }
 
+// --erase-deployment <keep-bytes>: how many bytes from the start of the deploy
+// partition the caller is about to write itself. Everything past them has to be
+// erased flash for the CLR not to find a previous, larger app's tail there.
+long eraseKeepBytes = -1;
+var eraseIndex = Array.IndexOf(args, "--erase-deployment");
+if (eraseIndex >= 0)
+{
+    if (eraseIndex + 1 >= args.Length || !long.TryParse(args[eraseIndex + 1], out eraseKeepBytes) || eraseKeepBytes < 0)
+    {
+        Console.Error.WriteLine("--erase-deployment needs a non-negative byte count.");
+        return 1;
+    }
+}
+
 var positional = args
     .Where((a, i) => a != "--no-reboot"
                      && a != "--dump-config"
                      && a != "--until"
-                     && !(untilIndex >= 0 && i == untilIndex + 1))
+                     && a != "--erase-deployment"
+                     && !(untilIndex >= 0 && i == untilIndex + 1)
+                     && !(eraseIndex >= 0 && i == eraseIndex + 1))
     .ToArray();
 bool noReboot = args.Contains("--no-reboot");
 bool dumpConfig = args.Contains("--dump-config");
+bool eraseDeployment = eraseIndex >= 0;
 
 if (positional.Length < 1)
 {
-    Console.Error.WriteLine("Usage: DeviceDebugMonitor <COM port> [duration seconds] [--no-reboot] [--dump-config]");
+    Console.Error.WriteLine("Usage: DeviceDebugMonitor <COM port> [duration seconds] [--no-reboot] [--dump-config] [--erase-deployment <keep-bytes>]");
     return 1;
 }
 
@@ -116,6 +139,78 @@ if (!connected)
 {
     Console.Error.WriteLine("Failed to connect debug engine to the device.");
     return 1;
+}
+
+if (eraseDeployment)
+{
+    // The deploy partition's real geometry, straight from the device, rather than the
+    // hand-measured constants Deploy-ToDevice.ps1 carries. Debugging_Deployment_Status
+    // reports the partition, NOT how much of it is in use: the firmware walks the
+    // DEPLOYMENT block stream and sums its length (Debugger.cpp). There is no command
+    // that reports the used extent -- Monitor_DeploymentMap, the one that looks like it
+    // would, is a stub in the firmware that replies with an empty payload, and reading
+    // the region back is refused outright (CheckPermission has no DEPLOYMENT case for
+    // AccessMemory_Read). Erasing it is permitted, so this asks the device to make the
+    // region blank rather than asking it what is in there.
+    var (_, storageStart, storageLength, statusOk) = device.DebugEngine.DeploymentGetStatusWithResult();
+
+    if (!statusOk || storageLength == 0)
+    {
+        Console.Error.WriteLine("Could not read the deployment partition's geometry from the device.");
+        return 1;
+    }
+
+    // One machine-readable line, so the caller can cross-check its own flash address
+    // against what the device says -- a mismatch there is the failure that made every
+    // nanoff deploy silently never run (see -DeployAddress in Deploy-ToDevice.ps1).
+    Console.WriteLine($"DEPLOYMENT start=0x{storageStart:X8} length={storageLength}");
+
+    if (eraseKeepBytes > storageLength)
+    {
+        Console.Error.WriteLine($"Asked to keep {eraseKeepBytes} bytes, but the deployment partition is only {storageLength}.");
+        return 1;
+    }
+
+    // Same sequence VS's own deploy uses before it erases (DeploymentExecute in
+    // nf-debugger's WireProtocol\Engine.cs): stop the CLR first. It executes assemblies
+    // straight out of this memory-mapped flash, so erasing under a running app is not
+    // something to find out about halfway through.
+    var executionState = device.DebugEngine.GetExecutionMode();
+    if (executionState == nanoFramework.Tools.Debugger.WireProtocol.Commands.DebuggingExecutionChangeConditions.State.Unknown)
+    {
+        Console.Error.WriteLine("Could not read the device's execution state.");
+        return 1;
+    }
+
+    if (!executionState.IsDeviceInStoppedState() && !device.DebugEngine.PauseExecution())
+    {
+        Console.Error.WriteLine("Could not stop the CLR before erasing the deployment partition.");
+        return 1;
+    }
+
+    // The firmware short-circuits when the region is already blank (IsBlockErased runs
+    // from this address to the end of the partition), so this costs a round trip and
+    // nothing else on a device whose current app is at least as big as the next one.
+    // When it is NOT blank, ESP32 erases the WHOLE partition rather than the tail --
+    // Esp32FlashDriver_EraseBlock ignores the address and calls esp_partition_erase_range
+    // over the whole thing -- so the device is left with no app at all until the caller's
+    // flash lands. That is the caller's problem to sequence, and it is why this runs
+    // immediately before the flash rather than at some tidy-up point.
+    var (eraseError, eraseOk) = device.DebugEngine.EraseMemory(
+        (uint)(storageStart + eraseKeepBytes),
+        (uint)(storageLength - eraseKeepBytes));
+
+    if (!eraseOk || eraseError != nanoFramework.Tools.Debugger.WireProtocol.AccessMemoryErrorCodes.NoError)
+    {
+        Console.Error.WriteLine($"Erase of the deployment partition past {eraseKeepBytes} bytes failed: {eraseError}.");
+        return 1;
+    }
+
+    // Deliberately not "erased": the device does not report which of the two happened,
+    // and both leave the caller with the same guarantee. Claiming an erase that did not
+    // happen would be the more useful-sounding, less true line.
+    Console.WriteLine($"DEPLOYMENT blank-past={eraseKeepBytes}");
+    return 0;
 }
 
 if (dumpConfig)
