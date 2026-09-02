@@ -67,8 +67,13 @@ Outcomes other than PASS/FAIL:
   where the CLR could load it. Check the log for `CLR_E_WRONG_TYPE` / zero-assembly resolution,
   which means `Deploy-ToDevice.ps1`'s `-DeployAddress` is stale.
 - `ERROR` — deploy or capture itself failed; the message is the sub-script's own error.
-- `WRONG-TEST` — the device emitted a marker naming a different test: a stale deploy, or that
-  project's `TestName` constant doesn't match its project name.
+- `WRONG-TEST` — the device emitted a marker naming a different assembly than the one just
+  flashed, so a previous test is still answering. Two causes, and they point opposite ways:
+  the flash failed (nanoff's own output says so), or it succeeded but under-padded and left the
+  old assembly in the deployment partition for the CLR to find (nanoff looks perfectly healthy —
+  see the Deploy padding notes, and issue #46). Both names come from one `<AssemblyName>` (the
+  device reads its own at runtime, the runner reads the project's in the pre-flight), so this
+  can no longer mean a naming slip — that was issue #20.
 - `RESTARTED` — BrokerOutage only. The device did publish again, but its heartbeat counter went
   backwards, so it recovered by rebooting rather than reconnecting.
 
@@ -77,9 +82,11 @@ broken. `MqttCheck` targets a broker address hardcoded in its `Program.cs` — t
 front when that constant isn't an address of this machine, which is the usual reason it fails on
 an otherwise healthy device.
 
-Adding a test: new project under `src\integrationTests`, emit `IntegrationTest.Pass`/`Fail` as
-soon as the outcome is known (before any idle loop), then add it to `$testCatalog` in
-`Run-IntegrationTests.ps1`.
+Adding a test: new project under `src\integrationTests`, emit
+`IntegrationTest.Pass`/`Fail(typeof(Program), ...)` as soon as the outcome is known (before any
+idle loop), then add it to `$testCatalog` in `Run-IntegrationTests.ps1`. Nothing spells the
+test's name: the marker carries the assembly's own name, and the runner reads `<AssemblyName>`
+off the project.
 
 This is not `smarthome-test` — that one runs the `SmartHome.UnitTests` unit suite through
 `vstest.console`. These are separate suites with separate entry points.

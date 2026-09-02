@@ -13,8 +13,6 @@ namespace SmartHome.IntegrationTests.WifiCheck
     // greps for -- emit them as soon as the outcome is known, before the idle loop.
     public class Program
     {
-        private const string TestName = "WifiCheck";
-
         public static void Main()
         {
             try
@@ -23,11 +21,11 @@ namespace SmartHome.IntegrationTests.WifiCheck
             }
             catch (Exception ex)
             {
-                IntegrationTest.Fail(TestName, ex.Message);
+                IntegrationTest.Fail(typeof(Program), ex.Message);
                 return;
             }
 
-            IntegrationTest.Pass(TestName, "connected to the configured WiFi network");
+            IntegrationTest.Pass(typeof(Program), "connected to the configured WiFi network");
 
             while (true)
             {

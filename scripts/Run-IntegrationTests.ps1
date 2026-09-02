@@ -10,7 +10,9 @@
       device-decided  the entry names no Verdict function. The runner reboots the
                       device, captures managed debug output, and reads the
                       "[ITEST] <name> PASS/FAIL" marker the test emits (see
-                      src\integrationTests\TestSupport\IntegrationTest.cs).
+                      src\integrationTests\TestSupport\IntegrationTest.cs). <name>
+                      is the test's <AssemblyName>, which the device reads off its
+                      own running assembly and the runner reads off the project.
 
       host-decided    the entry names a Verdict function, which reaches the verdict
                       from the broker's side. MqttReconnectCheck's takes the broker
@@ -235,6 +237,98 @@ function Get-TestProjectPath {
     param([string]$TestName)
 
     return "src\integrationTests\$TestName\$TestName.nfproj"
+}
+
+function Get-IntegrationTestMarkerName {
+    # The name a device-decided test puts in its [ITEST] marker: the <AssemblyName> of
+    # the project this suite is about to flash.
+    #
+    # That used to be the catalog key, matched against a TestName const spelled out
+    # again in each project's Program.cs -- a third independent spelling of one name,
+    # which nothing in the build reconciled and which the runner grew a WRONG-TEST
+    # outcome to police (issue #20). The device now reads its own assembly name at
+    # runtime (IntegrationTest.NameOf) and this reads the same name off the project, so
+    # the two derive from one place and cannot drift. A mismatch therefore means only
+    # what it says: the app running is not the one just flashed.
+    #
+    # Takes the root rather than reading $repoRoot, so it is callable before the run
+    # sets that up -- which is what lets scripts\tests exercise it.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TestName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $projectPath = Join-Path $RepoRoot (Get-TestProjectPath -TestName $TestName)
+    if (-not (Test-Path -LiteralPath $projectPath)) {
+        throw "No project for test '$TestName': $projectPath"
+    }
+
+    return (Get-NfProjectAssemblyName -ProjectPath $projectPath)
+}
+
+function Get-DeviceMarkerVerdict {
+    # The other half: the outcome a device-decided test gets, from the lines its capture
+    # produced and the name Get-IntegrationTestMarkerName resolved for it. A function
+    # rather than a block inside the run loop so the four answers it can give are
+    # provable at a desk -- WRONG-TEST in particular, which no run should ever produce
+    # and which therefore never gets exercised by one.
+    #
+    # Same @{ Outcome; Detail } shape the host-decided verdict functions return.
+    param(
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$CapturedLines,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedName,
+
+        [Parameter(Mandatory = $true)]
+        [int]$CaptureSeconds
+    )
+
+    # Match the marker protocol, not this test's own name: reading back the name the
+    # device actually emitted turns a mismatch into a clear message instead of a
+    # NO-RESULT that reads like a crashed device or a stale deploy address.
+    $marker = $CapturedLines |
+        Select-String -Pattern '\[ITEST\]\s+(\S+)\s+(PASS|FAIL)\s*:?\s*(.*)$' |
+        Select-Object -First 1
+
+    if (-not $marker) {
+        return @{
+            Outcome = 'NO-RESULT'
+            Detail  = "No [ITEST] marker within ${CaptureSeconds}s"
+        }
+    }
+
+    $reportedName = $marker.Matches[0].Groups[1].Value
+    $reportedDetail = $marker.Matches[0].Groups[3].Value.Trim()
+
+    # Both sides of this comparison come from one <AssemblyName>: the device reads its
+    # own at runtime, and $ExpectedName was read off the project. So this can no longer
+    # catch a naming slip -- it is only ever the app on the device not being the one
+    # just flashed.
+    #
+    # Which has two causes, and the message names both because they send an investigation
+    # in opposite directions. A flash that failed is visible in nanoff's own output. A
+    # flash that succeeded but under-padded is not: nanoff erases only the new image's
+    # length and verifies its hash happily, while the CLR walks the whole deployment
+    # partition and can still find the previous test past the new image's end (see the
+    # Deploy padding section of CLAUDE.md, and issue #46). Saying only "the flash did not
+    # take" would send that one to check output that looks perfectly healthy.
+    if ($reportedName -ne $ExpectedName) {
+        return @{
+            Outcome = 'WRONG-TEST'
+            Detail  = "device reported '$reportedName', not '$ExpectedName' -- a previous test is still answering, either because the flash did not take or because it left the old assembly in the deployment partition (check the deploy padding)"
+        }
+    }
+
+    return @{
+        Outcome = $marker.Matches[0].Groups[2].Value
+        Detail  = if ($reportedDetail) { $reportedDetail } else { $marker.Line.Trim() }
+    }
 }
 
 # ── Evidence ──────────────────────────────────────────────────────────────────
@@ -2141,10 +2235,26 @@ Test-DeviceConstant -Label 'RoomSensor' `
                     -Expected $expectedBroker `
                     -What 'BrokerHost'
 
+# What each device-decided test's marker will call itself, resolved here rather than at
+# capture time: reading it off the project is a desk operation, and a project that
+# cannot be read is a mistake worth hearing about before the first 90-second flash --
+# which is the shape of failure issue #20 was about.
+$markerNames = @{}
+
 foreach ($testName in $Tests) {
     Test-DeviceConstant -Label $testName -ProgramPath (Get-IntegrationTestProgramPath -TestName $testName) -Pattern 'BrokerHost\s*=\s*"([^"]+)"' -Expected $expectedBroker -What 'BrokerHost'
 
     $settings = $testCatalog[$testName]
+
+    if (-not $settings.Contains('Verdict')) {
+        try {
+            $markerNames[$testName] = Get-IntegrationTestMarkerName -TestName $testName -RepoRoot $repoRoot
+        }
+        catch {
+            Write-Error ("Cannot work out what {0}'s [ITEST] marker will be called: {1}" -f $testName, $_.Exception.Message)
+            exit 1
+        }
+    }
 
     # Every topic the host and the device have to agree on, checked the same way.
     foreach ($constant in 'HeartbeatTopic', 'EchoCommandTopic', 'EchoTopic') {
@@ -2309,6 +2419,9 @@ try {
                 # to a test that never reported.
                 Write-Host ("Capturing device output for {0}s..." -f $settings.CaptureSeconds) -ForegroundColor Cyan
 
+                # Resolved in the pre-flight, off the project this test just deployed.
+                $expectedMarkerName = $markerNames[$testName]
+
                 # Write the log as it streams (so a capture that dies partway still
                 # leaves something to read) and explicitly as UTF-8 -- Tee-Object
                 # -FilePath on Windows PowerShell 5.1 writes UTF-16, which grep and
@@ -2326,7 +2439,7 @@ try {
                     # -Until turns CaptureSeconds into a timeout instead of a sleep. A
                     # healthy device reports in seconds; waiting out the full window
                     # anyway was about half this suite's wall clock.
-                    & $watchScript -DurationSeconds $settings.CaptureSeconds -NoBuild -Until "[ITEST] $testName" |
+                    & $watchScript -DurationSeconds $settings.CaptureSeconds -NoBuild -Until "[ITEST] $expectedMarkerName" |
                         Tee-Object -Variable captured |
                         Out-File -FilePath $logFile -Encoding utf8
                     $watchExit = $LASTEXITCODE
@@ -2344,31 +2457,11 @@ try {
                     throw "Watch-DeviceDebugOutput.ps1 exit code $watchExit (after a retry)"
                 }
 
-                # Match the marker protocol, not this test's own name: reading back
-                # the name the device actually emitted turns a mismatch into a clear
-                # message instead of a NO-RESULT that reads like a crashed device or
-                # a stale deploy address.
-                $marker = $captured |
-                    Select-String -Pattern '\[ITEST\]\s+(\S+)\s+(PASS|FAIL)\s*:?\s*(.*)$' |
-                    Select-Object -First 1
-
-                if (-not $marker) {
-                    $outcome = 'NO-RESULT'
-                    $detail = "No [ITEST] marker within $($settings.CaptureSeconds)s"
-                }
-                else {
-                    $reportedName = $marker.Matches[0].Groups[1].Value
-                    $reportedDetail = $marker.Matches[0].Groups[3].Value.Trim()
-
-                    if ($reportedName -ne $testName) {
-                        $outcome = 'WRONG-TEST'
-                        $detail = "device reported '$reportedName' -- a stale deploy, or that project's TestName constant doesn't match its project name"
-                    }
-                    else {
-                        $outcome = $marker.Matches[0].Groups[2].Value
-                        $detail = if ($reportedDetail) { $reportedDetail } else { $marker.Line.Trim() }
-                    }
-                }
+                $verdict = Get-DeviceMarkerVerdict -CapturedLines $captured `
+                                                   -ExpectedName $expectedMarkerName `
+                                                   -CaptureSeconds $settings.CaptureSeconds
+                $outcome = $verdict.Outcome
+                $detail = $verdict.Detail
             }
         }
         catch {
