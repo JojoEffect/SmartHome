@@ -520,6 +520,200 @@ Describe 'Get-SmartHomeSubscriberArguments' {
     }
 }
 
+Describe 'Get-SmartHomeSubscriberArgumentString' {
+    It 'renders the argument list cmd.exe expects, quoting only what needs it' {
+        # The whole string, not a property of it. This rendering used to live character for
+        # character in both Start-DevEnv.ps1 and Run-IntegrationTests.ps1 with nothing but a
+        # comment reconciling them (issue #85), so what is worth pinning is the exact text
+        # both of them now hand to cmd.exe.
+        Assert-Equal -Expected '-h 127.0.0.1 -p 1883 -t "homie/#" -F "%t %r %p"' `
+                     -Actual (Get-SmartHomeSubscriberArgumentString -Port '1883')
+    }
+
+    It 'quotes every value carrying whitespace, a slash or a #, and no others' {
+        # Derived from the argument list rather than from the expectation above, so this
+        # case still holds if the list grows: it says which values the quoting rule picks,
+        # not what today's list happens to contain.
+        #
+        # The predicate is spelled as a character set rather than by reusing the function's
+        # own '[\s/#]' regex. Copying that regex would put a second, unreconciled statement
+        # of the rule right next to the one this change exists to remove -- and an edit
+        # applied to both (the natural response to this case failing) would then pass
+        # silently. Two independent formulations disagree loudly instead.
+        $needsQuoting = " `t`n/#".ToCharArray()
+        $rendered = Get-SmartHomeSubscriberArgumentString -Port '1883'
+
+        foreach ($argument in Get-SmartHomeSubscriberArguments -Port '1883') {
+            $expected = if ($argument.IndexOfAny($needsQuoting) -ge 0) { '"{0}"' -f $argument } else { $argument }
+            Assert-True -Condition ($rendered.Contains($expected)) `
+                        -Because "'$argument' should render as '$expected', in '$rendered'"
+        }
+    }
+
+    It 'keeps the order the argument list is in' {
+        # -F and its format string are a pair, and so are -t and the topic. A rendering that
+        # sorted or dropped a value would leave mosquitto_sub reading a flag's value as a
+        # flag -- and the capture parser depends on that '%t %r %p' reaching it intact.
+        $arguments = @(Get-SmartHomeSubscriberArguments -Port '1883')
+        $rendered = Get-SmartHomeSubscriberArgumentString -Port '1883'
+
+        $position = -1
+        foreach ($argument in $arguments) {
+            $next = $rendered.IndexOf($argument, $position + 1)
+            Assert-True -Condition ($next -gt $position) -Because "'$argument' must appear after the one before it, in '$rendered'"
+            $position = $next
+        }
+    }
+
+    It 'passes the port through' {
+        Assert-Match -Pattern '-p 1884( |$)' -Actual (Get-SmartHomeSubscriberArgumentString -Port '1884')
+    }
+}
+
+Describe 'Get-SmartHomeMosquittoTool' {
+    It 'returns the tool inside the directory it was given' {
+        $dir = New-TestDirectory -Name 'mosquitto'
+        Set-TestFileContent -Path (Join-Path $dir 'mosquitto_sub.exe') -Content 'not really an executable'
+
+        Assert-Equal -Expected (Join-Path $dir 'mosquitto_sub.exe') `
+                     -Actual (Get-SmartHomeMosquittoTool -Name 'mosquitto_sub.exe' -Directory $dir)
+    }
+
+    It 'reads SMARTHOME_MOSQUITTO_DIR when no directory is given' {
+        $dir = New-TestDirectory -Name 'mosquitto-from-env'
+        Set-TestFileContent -Path (Join-Path $dir 'mosquitto.exe') -Content 'not really an executable'
+
+        $previous = [Environment]::GetEnvironmentVariable('SMARTHOME_MOSQUITTO_DIR')
+        try {
+            [Environment]::SetEnvironmentVariable('SMARTHOME_MOSQUITTO_DIR', $dir)
+            Assert-Equal -Expected (Join-Path $dir 'mosquitto.exe') `
+                         -Actual (Get-SmartHomeMosquittoTool -Name 'mosquitto.exe')
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('SMARTHOME_MOSQUITTO_DIR', $previous)
+        }
+    }
+
+    It 'finds a tool under a directory whose name contains [ or ]' {
+        # Test-Path -Path would read the brackets as a wildcard pattern and report a
+        # mosquitto.exe that demonstrably exists as missing -- then blame
+        # SMARTHOME_MOSQUITTO_DIR for a path that is already correct. Issue #71's defect
+        # class, which is why New-TestDirectory accepts a bracketed name at all.
+        $dir = New-TestDirectory -Name 'mosquitto[2]'
+        Set-TestFileContent -Path (Join-Path $dir 'mosquitto.exe') -Content 'not really an executable'
+
+        Assert-Equal -Expected (Join-Path $dir 'mosquitto.exe') `
+                     -Actual (Get-SmartHomeMosquittoTool -Name 'mosquitto.exe' -Directory $dir)
+    }
+
+    It 'treats an empty directory as no directory rather than as a path' {
+        # A caller reading the value out of a config file and passing it straight through
+        # binds the parameter with ''. Keying the fallback off $PSBoundParameters instead
+        # of the value sent that into Join-Path, which failed its own parameter binding --
+        # a raw exception naming Join-Path, in place of the remediation this guard exists
+        # to give.
+        $dir = New-TestDirectory -Name 'mosquitto-empty-argument'
+        Set-TestFileContent -Path (Join-Path $dir 'mosquitto.exe') -Content 'not really an executable'
+
+        $previous = [Environment]::GetEnvironmentVariable('SMARTHOME_MOSQUITTO_DIR')
+        try {
+            [Environment]::SetEnvironmentVariable('SMARTHOME_MOSQUITTO_DIR', $dir)
+            Assert-Equal -Expected (Join-Path $dir 'mosquitto.exe') `
+                         -Actual (Get-SmartHomeMosquittoTool -Name 'mosquitto.exe' -Directory '')
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('SMARTHOME_MOSQUITTO_DIR', $previous)
+        }
+    }
+
+    It 'lets an explicit directory beat the environment' {
+        # The seam that makes every case here independent of this machine's local.env.ps1.
+        # Without it the cases above would pass or fail on how Mosquitto happens to be
+        # installed here, which is the opposite of what a desk suite is for.
+        $wanted = New-TestDirectory -Name 'mosquitto-wanted'
+        $ignored = New-TestDirectory -Name 'mosquitto-ignored'
+        Set-TestFileContent -Path (Join-Path $wanted 'mosquitto.exe') -Content 'not really an executable'
+        Set-TestFileContent -Path (Join-Path $ignored 'mosquitto.exe') -Content 'not really an executable'
+
+        $previous = [Environment]::GetEnvironmentVariable('SMARTHOME_MOSQUITTO_DIR')
+        try {
+            [Environment]::SetEnvironmentVariable('SMARTHOME_MOSQUITTO_DIR', $ignored)
+            Assert-Equal -Expected (Join-Path $wanted 'mosquitto.exe') `
+                         -Actual (Get-SmartHomeMosquittoTool -Name 'mosquitto.exe' -Directory $wanted)
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('SMARTHOME_MOSQUITTO_DIR', $previous)
+        }
+    }
+
+    It 'names the missing path and SMARTHOME_MOSQUITTO_DIR when the tool is not there' {
+        # The remediation is the point of the guard. Without it a wrong directory reached
+        # the call site as a raw CommandNotFoundException, or -- for the conformance
+        # snapshot -- as an empty read reported as a FAIL against the device.
+        $dir = New-TestDirectory -Name 'mosquitto-empty'
+
+        $message = Assert-Throws -Body { Get-SmartHomeMosquittoTool -Name 'mosquitto.exe' -Directory $dir }
+        Assert-Match -Pattern 'Not found' -Actual $message
+        Assert-Match -Pattern 'SMARTHOME_MOSQUITTO_DIR in local\.env\.ps1' -Actual $message
+        Assert-Match -Pattern ([regex]::Escape((Join-Path $dir 'mosquitto.exe'))) -Actual $message
+    }
+
+    It 'stops the calling script rather than returning a path that is not there' {
+        # In a child process because that is the only place the claim can be made: both
+        # callers treat the return value as a runnable path, so a missing tool has to end
+        # the run, and "ends the run" means a non-zero exit code and nothing after the call.
+        #
+        # Note which mechanism actually stops it. Common.ps1 sets $ErrorActionPreference to
+        # Stop at file scope, so the Write-Error terminates before the exit 1 below it is
+        # reached; the exit is what a caller that relaxed the preference would fall back on.
+        # Both land on exit code 1, which is what this asserts.
+        $probeDir = New-TestDirectory -Name 'mosquitto-exit'
+        $probe = Join-Path $probeDir 'probe.ps1'
+        $common = Join-Path (Split-Path -Parent $PSScriptRoot) 'Common.ps1'
+
+        # Doubled for the single-quoted literals below. The fixture root is under
+        # GetTempPath(), which carries the user name, and an apostrophe is legal there
+        # (C:\Users\O'Brien\...) -- an unescaped one makes the probe a parse error, which
+        # still exits non-zero and so would satisfy the exit-code assertion below while
+        # proving nothing about the function.
+        $probeCommon = $common -replace "'", "''"
+        $probeDirLiteral = $probeDir -replace "'", "''"
+
+        Set-TestFileContent -Path $probe -Content @(
+            'Set-StrictMode -Version Latest'
+            '$ErrorActionPreference = ''Stop'''
+            ". '$probeCommon'"
+            "Get-SmartHomeMosquittoTool -Name 'mosquitto.exe' -Directory '$probeDirLiteral' | Out-Null"
+            'Write-Output ''REACHED-AFTER'''
+        )
+
+        $stdout = Join-Path $probeDir 'out.txt'
+        $stderr = Join-Path $probeDir 'err.txt'
+        $powershell = (Get-Process -Id $PID).Path
+
+        # -Redirect* here, which CLAUDE.md tells Start-DevEnv.ps1 never to use: those
+        # switches force UseShellExecute=false, and .NET then hands the child every
+        # inheritable handle including this runner's stdout, so a child that OUTLIVES the
+        # call leaves 'Run-ScriptTests.ps1 | tail' waiting forever for an EOF. -Wait is
+        # what makes it safe -- this probe is gone before the assertion below runs, so no
+        # handle survives it. Do not copy these switches into a case that backgrounds
+        # anything.
+        $process = Start-Process -FilePath $powershell `
+                                 -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $probe) `
+                                 -NoNewWindow -Wait -PassThru `
+                                 -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+
+        # Both reads are -ErrorAction SilentlyContinue: a probe that never started leaves
+        # neither file behind, and a Get-Content path error would then be reported in place
+        # of whichever assertion actually says what went wrong.
+        Assert-Equal -Expected 1 -Actual $process.ExitCode
+        Assert-Equal -Expected '' -Actual ((Get-Content -LiteralPath $stdout -ErrorAction SilentlyContinue) -join '') `
+                     -Because 'nothing after the guard may run'
+        Assert-Match -Pattern 'SMARTHOME_MOSQUITTO_DIR' `
+                     -Actual ((Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue) -join ' ')
+    }
+}
+
 Describe 'ConvertTo-SmartHomeHashtable' {
     It 'turns a PSCustomObject into a hashtable whose missing keys read as $null' {
         # The whole reason it exists: ConvertFrom-Json hands back PSCustomObjects, and
