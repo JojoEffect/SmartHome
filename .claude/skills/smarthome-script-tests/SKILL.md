@@ -9,10 +9,11 @@ description: Run the host-side script tests — the desk-provable half of script
 .\scripts\Run-ScriptTests.ps1
 ```
 
-No device, no broker, no network, no `local.env.ps1`, no restored `packages\`. About 6 seconds
-for ~100 cases. Exit 0 if everything passed, 1 otherwise — including when *nothing ran*, which is
-a failure on purpose: this repo already shipped three commits on a green `vstest` run that
-executed nothing.
+No device, no broker, no network, no `local.env.ps1`, no restored `packages\`. Under 20 seconds
+for ~170 cases — most of that is the handful that wait out a real one-second timeout to prove a
+poll loop gives up. Exit 0 if everything passed, 1 otherwise — including when *nothing ran*,
+which is a failure on purpose: this repo already shipped three commits on a green `vstest` run
+that executed nothing.
 
 Useful switches:
 
