@@ -641,7 +641,8 @@ function Wait-ForSubscriberLogLine {
         [int]$Skip = 0,
 
         # Run at the top of every pass, before the read. Wait-ForEcho republishes its
-        # command here; the other two waits pass nothing and only observe.
+        # command here; the other two waits pass nothing and only observe. Anything it
+        # writes is discarded -- see the call below.
         [scriptblock]$BeforeRead
     )
 
@@ -652,7 +653,11 @@ function Wait-ForSubscriberLogLine {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 
     while ((Get-Date) -lt $deadline) {
-        if ($BeforeRead) { & $BeforeRead }
+        # | Out-Null, because a function returns everything written to its output stream,
+        # not just what it returns. A block that emitted so much as one string would
+        # prepend it to $hit, and Wait-ForEcho's "$null -ne $hit" would then read a
+        # matchless timeout as a PASS. Nothing emits today; this makes it not matter.
+        if ($BeforeRead) { & $BeforeRead | Out-Null }
 
         $hit = @(Get-Content -LiteralPath $log -ErrorAction SilentlyContinue |
             Select-Object -Skip $Skip |

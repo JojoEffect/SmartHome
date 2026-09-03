@@ -710,6 +710,18 @@ Describe 'The subscriber-log waits' {
         Assert-Equal -Expected 2 -Actual $script:beforeReadCalls -Because 'the read must come after the block, on the same pass'
     }
 
+    It 'Wait-ForSubscriberLogLine discards whatever -BeforeRead writes' {
+        # A PowerShell function returns everything written to its output stream, so a
+        # block that emitted one string would prepend it to the result -- and
+        # Wait-ForEcho's "$null -ne $hit" would read a matchless timeout as a PASS.
+        Set-SubscriberLog -Lines @('noise 0 x')
+
+        $hit = Wait-ForSubscriberLogLine -Port '1883' -TimeoutSeconds 1 -PollMilliseconds 1500 `
+            -Predicate { $false } -BeforeRead { 'chatter from the block' }
+
+        Assert-Null -Value $hit
+    }
+
     It 'Wait-ForSubscriberLogLine polls at -PollMilliseconds' {
         # Asserted as passes-within-a-window rather than as elapsed time: a sleep longer
         # than the whole timeout leaves exactly one pass, whatever the machine is doing.
