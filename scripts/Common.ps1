@@ -708,11 +708,17 @@ function Get-SmartHomeMosquittoTool {
 
         # Defaulted from SMARTHOME_MOSQUITTO_DIR rather than read unconditionally, so a
         # caller -- a test, above all -- can ask about a directory without the machine's
-        # own configuration deciding the answer.
+        # own configuration deciding the answer. Empty and unsupplied mean the same thing
+        # here; see below.
         [string]$Directory
     )
 
-    if (-not $PSBoundParameters.ContainsKey('Directory')) {
+    # Tested by value rather than with $PSBoundParameters.ContainsKey, because a caller
+    # reading the directory out of a config file and passing it straight through binds the
+    # parameter with an empty string. That satisfies ContainsKey, skips the fallback, and
+    # dies in Join-Path's parameter binding -- a raw ParameterBindingValidationException
+    # naming Join-Path, which is the kind of message the guard below exists to replace.
+    if ([string]::IsNullOrWhiteSpace($Directory)) {
         $Directory = Get-RequiredEnvValue -Name 'SMARTHOME_MOSQUITTO_DIR'
     }
 
@@ -723,7 +729,12 @@ function Get-SmartHomeMosquittoTool {
     # an empty read reported as a conformance FAIL, i.e. a machine-config problem blamed on
     # the device. exit rather than throw, matching Get-RequiredEnvValue above: this is a
     # setup fault, and every caller's answer to it is to stop.
-    if (-not (Test-Path $path)) {
+    #
+    # -LiteralPath, not -Path: an install directory carrying [ or ] is a wildcard pattern
+    # to Test-Path, so a mosquitto.exe that demonstrably exists reads as missing and the
+    # remediation then points at a path that is already correct (issue #71's defect class,
+    # which is why Set-TestFileContent and Import-SmartHomeLocalEnv are -LiteralPath too).
+    if (-not (Test-Path -LiteralPath $path)) {
         Write-Error ("Not found: {0}`nCheck SMARTHOME_MOSQUITTO_DIR in local.env.ps1." -f $path)
         exit 1
     }

@@ -2316,6 +2316,19 @@ foreach ($testName in $Tests) {
     }
 }
 
+# Both mosquitto clients this script runs, resolved here for the same reason the marker
+# names are: it is a desk operation, and a machine that cannot produce them is a mistake
+# worth hearing about before the first 90-second flash rather than after it. Nothing else
+# catches them this early -- Start-DevEnv.ps1 resolves mosquitto.exe and mosquitto_sub.exe
+# but never mosquitto_pub.exe, and with -NoBroker it does not run at all, so the first
+# report of a missing client used to come from Start-HomieCapture mid-run or from
+# Publish-HomieCommand inside HomieClientCheck's /set phase, ~90s in. The paths are
+# deliberately discarded: the call sites resolve their own, and this is the check, not a
+# cache of it.
+foreach ($mosquittoClient in 'mosquitto_sub.exe', 'mosquitto_pub.exe') {
+    Get-SmartHomeMosquittoTool -Name $mosquittoClient | Out-Null
+}
+
 # Build the debug monitor once up front. Watch-DeviceDebugOutput.ps1 would otherwise
 # rebuild this host-side tool before every capture -- ~1.8s of no-op build per test.
 Write-Host "Building the device debug monitor..." -ForegroundColor DarkGray
