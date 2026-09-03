@@ -550,39 +550,54 @@ Describe 'Get-HomieLivePayloads' {
     }
 }
 
-Describe 'The announce witness' {
-    # Both functions read the long-running homie/# log through Get-SmartHomeDevEnvPath.
-    # Stubbing it here -- in this file's scope, which is where the subject was
-    # dot-sourced -- points them at a fixture instead of the real dev environment.
-    $script:witnessLog = $null
+Describe 'The subscriber-log waits' {
+    # Wait-Heartbeat, Wait-ForEcho and Wait-ForAnnounceWitnessed are one polling helper --
+    # Wait-ForSubscriberLogLine -- plus a predicate each, so one stub carries all of them
+    # and Get-SubscriberLogLineCount too. All of them read the long-running homie/# log
+    # through Get-SmartHomeDevEnvPath; stubbing it here -- in this file's scope, which is
+    # where the subject was dot-sourced -- points them at a fixture instead of the real
+    # dev environment.
+    $script:subscriberLog = $null
 
     function Get-SmartHomeDevEnvPath {
         param([string]$Port, [string]$Kind)
-        return $script:witnessLog
+        return $script:subscriberLog
     }
 
-    function Set-WitnessLog {
-        param([string[]]$Lines)
-        $script:witnessLog = Join-Path (New-TestDirectory -Name 'witness') 'homie.log'
-        Set-TestFileContent -Path $script:witnessLog -Content $Lines
+    function Set-SubscriberLog {
+        # -Directory so a case can put the log somewhere awkward on purpose; the default
+        # is an ordinary name.
+        param(
+            [string[]]$Lines,
+            [string]$Directory = 'subscriber-log'
+        )
+        $script:subscriberLog = Join-Path (New-TestDirectory -Name $Directory) 'homie.log'
+        Set-TestFileContent -Path $script:subscriberLog -Content $Lines
+    }
+
+    function Add-SubscriberLogLine {
+        # The device answering mid-wait. -LiteralPath so this works for the bracketed
+        # fixture too.
+        param([string]$Line)
+        Add-Content -LiteralPath $script:subscriberLog -Value $Line -Encoding UTF8
     }
 
     It 'Get-SubscriberLogLineCount reads a missing log as 0, not as an error' {
         # -NoBroker skips the long-running subscriber, and a watermark of 0 then means
         # "read the whole file", which is the right answer when there is no file.
-        $script:witnessLog = Join-Path (New-TestDirectory -Name 'no-log') 'absent.log'
+        $script:subscriberLog = Join-Path (New-TestDirectory -Name 'no-log') 'absent.log'
 
         Assert-Equal -Expected 0 -Actual (Get-SubscriberLogLineCount -Port '1883')
     }
 
     It 'Get-SubscriberLogLineCount counts lines, so the reader can -Skip it' {
-        Set-WitnessLog -Lines @('a', 'b', 'c')
+        Set-SubscriberLog -Lines @('a', 'b', 'c')
 
         Assert-Equal -Expected 3 -Actual (Get-SubscriberLogLineCount -Port '1883')
     }
 
     It 'witnesses this boot announcing' {
-        Set-WitnessLog -Lines @(
+        Set-SubscriberLog -Lines @(
             'homie/other/$state 0 ready'
             'homie/d/$state 0 init'
         )
@@ -596,7 +611,7 @@ Describe 'The announce witness' {
         # before it cannot have come from the image that was just flashed -- and a
         # retained $state=ready from the previous instance cannot say anything about this
         # one either, which is what this replaced (issue #35).
-        Set-WitnessLog -Lines @(
+        Set-SubscriberLog -Lines @(
             'homie/d/$state 0 init'
             'homie/d/$state 0 ready'
         )
@@ -605,7 +620,7 @@ Describe 'The announce witness' {
     }
 
     It 'accepts a retained init as well as a live one' {
-        Set-WitnessLog -Lines @('homie/d/$state 1 init')
+        Set-SubscriberLog -Lines @('homie/d/$state 1 init')
 
         Assert-True -Condition (Wait-ForAnnounceWitnessed -Port '1883' -DeviceId 'd' -TimeoutSeconds 2 -Watermark 0)
     }
@@ -613,7 +628,7 @@ Describe 'The announce witness' {
     It 'is not satisfied by init on another topic or another device' {
         # Line-prefix match, not -like "*init*": a payload of 'init' on some other topic,
         # or a device id that merely starts with this one, must not satisfy it.
-        Set-WitnessLog -Lines @(
+        Set-SubscriberLog -Lines @(
             'homie/d/n/mode 0 init'
             'homie/device-two/$state 0 init'
             'homie/d/$state 0 ready'
@@ -623,15 +638,197 @@ Describe 'The announce witness' {
     }
 
     It 'is not satisfied by a device id this one is a prefix of' {
-        Set-WitnessLog -Lines @('homie/d-two/$state 0 init')
+        Set-SubscriberLog -Lines @('homie/d-two/$state 0 init')
 
         Assert-False -Condition (Wait-ForAnnounceWitnessed -Port '1883' -DeviceId 'd' -TimeoutSeconds 1 -Watermark 0)
     }
 
     It 'returns false at the deadline rather than throwing on a missing log' {
-        $script:witnessLog = Join-Path (New-TestDirectory -Name 'no-log-2') 'absent.log'
+        $script:subscriberLog = Join-Path (New-TestDirectory -Name 'no-log-2') 'absent.log'
 
         Assert-False -Condition (Wait-ForAnnounceWitnessed -Port '1883' -DeviceId 'd' -TimeoutSeconds 1 -Watermark 0)
+    }
+
+    # --- Wait-ForSubscriberLogLine: the polling the three waits share -----------------
+
+    It 'Wait-ForSubscriberLogLine returns the matching line itself, not a verdict' {
+        # Wait-Heartbeat needs the line, not a bool: the counter it compares across the
+        # outage is parsed out of the payload.
+        Set-SubscriberLog -Lines @('a 0 one', 'b 0 two')
+
+        Assert-Equal -Expected 'b 0 two' `
+                     -Actual (Wait-ForSubscriberLogLine -Port '1883' -TimeoutSeconds 2 -Predicate { $_ -like 'b *' })
+    }
+
+    It 'Wait-ForSubscriberLogLine returns the first match, not the last' {
+        Set-SubscriberLog -Lines @('a 0 first', 'a 0 second')
+
+        Assert-Equal -Expected 'a 0 first' `
+                     -Actual (Wait-ForSubscriberLogLine -Port '1883' -TimeoutSeconds 2 -Predicate { $_ -like 'a *' })
+    }
+
+    It 'Wait-ForSubscriberLogLine returns $null at the deadline rather than throwing on a missing log' {
+        $script:subscriberLog = Join-Path (New-TestDirectory -Name 'no-log-3') 'absent.log'
+
+        Assert-Null -Value (Wait-ForSubscriberLogLine -Port '1883' -TimeoutSeconds 1 -Predicate { $true })
+    }
+
+    It 'Wait-ForSubscriberLogLine skips past the watermark' {
+        Set-SubscriberLog -Lines @('a 0 before', 'b 0 after')
+
+        Assert-Null -Value (Wait-ForSubscriberLogLine -Port '1883' -TimeoutSeconds 1 -Skip 1 -Predicate { $_ -like 'a *' })
+        Assert-Equal -Expected 'b 0 after' `
+                     -Actual (Wait-ForSubscriberLogLine -Port '1883' -TimeoutSeconds 2 -Skip 1 -Predicate { $_ -like 'b *' })
+    }
+
+    It 'Wait-ForSubscriberLogLine reads the log by literal path' {
+        # Issue #71's defect class, and the reason this helper is on -LiteralPath: two of
+        # the three waits were on -Path, where a '[' anywhere in the temp directory makes
+        # the log a wildcard pattern matching nothing -- a device that answered, reported
+        # as one that never did.
+        Set-SubscriberLog -Directory 'bracket[1]dir' -Lines @('a 0 one')
+
+        Assert-Equal -Expected 'a 0 one' `
+                     -Actual (Wait-ForSubscriberLogLine -Port '1883' -TimeoutSeconds 2 -Predicate { $_ -like 'a *' })
+    }
+
+    It 'Wait-ForSubscriberLogLine runs -BeforeRead on every pass, ahead of the read' {
+        # Both halves of that in one case. The block writes the match on its *second*
+        # call, so a helper that read before running it would need a third pass to see
+        # the line -- the count separates the two orderings.
+        Set-SubscriberLog -Lines @('noise 0 x')
+        $script:beforeReadCalls = 0
+
+        $hit = Wait-ForSubscriberLogLine -Port '1883' -TimeoutSeconds 10 -PollMilliseconds 50 `
+            -Predicate { $_ -like 'answer *' } `
+            -BeforeRead {
+                $script:beforeReadCalls++
+                if ($script:beforeReadCalls -eq 2) { Add-SubscriberLogLine -Line 'answer 0 here' }
+            }
+
+        Assert-Equal -Expected 'answer 0 here' -Actual $hit
+        Assert-Equal -Expected 2 -Actual $script:beforeReadCalls -Because 'the read must come after the block, on the same pass'
+    }
+
+    It 'Wait-ForSubscriberLogLine polls at -PollMilliseconds' {
+        # Asserted as passes-within-a-window rather than as elapsed time: a sleep longer
+        # than the whole timeout leaves exactly one pass, whatever the machine is doing.
+        Set-SubscriberLog -Lines @('noise 0 x')
+        $script:pollCalls = 0
+
+        Assert-Null -Value (Wait-ForSubscriberLogLine -Port '1883' -TimeoutSeconds 1 -PollMilliseconds 1500 `
+            -Predicate { $false } -BeforeRead { $script:pollCalls++ })
+        Assert-Equal -Expected 1 -Actual $script:pollCalls
+    }
+
+    It 'Wait-ForSubscriberLogLine reads a predicate''s variables from the caller' {
+        # How the three waits pass $Topic, $Payload and $DeviceId: the block is written
+        # in the wait and evaluated inside the helper, so it resolves them up the dynamic
+        # scope chain. This case is that chain, one function deeper than the shipped ones.
+        Set-SubscriberLog -Lines @('a 0 one', 'b 0 two')
+
+        function Invoke-WithLocal {
+            param([string]$Wanted)
+            return (Wait-ForSubscriberLogLine -Port '1883' -TimeoutSeconds 2 -Predicate { $_ -like "$Wanted *" })
+        }
+
+        Assert-Equal -Expected 'b 0 two' -Actual (Invoke-WithLocal -Wanted 'b')
+    }
+
+    It 'Wait-ForSubscriberLogLine also takes a predicate that carries its own closure' {
+        # The escape hatch for a block built somewhere the dynamic chain does not reach.
+        # It is not what the shipped call sites do, and deliberately: .GetNewClosure()
+        # binds the block into a new module scope with its own function table, and a
+        # -BeforeRead closed that way cannot resolve Publish-HomieCommand at all.
+        Set-SubscriberLog -Lines @('a 0 one', 'b 0 two')
+
+        $predicate = & {
+            $wanted = 'b'
+            return { $_ -like "$wanted *" }.GetNewClosure()
+        }
+
+        Assert-Equal -Expected 'b 0 two' `
+                     -Actual (Wait-ForSubscriberLogLine -Port '1883' -TimeoutSeconds 2 -Predicate $predicate)
+    }
+
+    # --- Wait-Heartbeat ---------------------------------------------------------------
+
+    It 'Wait-Heartbeat returns the line and the counter that separates a reconnect from a restart' {
+        Set-SubscriberLog -Lines @(
+            'homie/other/heartbeat 0 heartbeat 99'
+            'homie/mqtt-reconnect-check/heartbeat 0 heartbeat 12'
+        )
+
+        $hit = Wait-Heartbeat -Topic 'homie/mqtt-reconnect-check/heartbeat' -TimeoutSeconds 2 -Port '1883'
+
+        Assert-Equal -Expected 'homie/mqtt-reconnect-check/heartbeat 0 heartbeat 12' -Actual $hit.Line
+        Assert-Equal -Expected 12 -Actual $hit.Counter
+        Assert-True -Condition ($hit.Counter -is [int]) -Because 'Invoke-BrokerOutageCheck compares it with -le'
+    }
+
+    It 'Wait-Heartbeat reports a null counter rather than failing on a payload without one' {
+        # The counter is optional to the match: a heartbeat that arrived is evidence the
+        # device published, and Invoke-BrokerOutageCheck null-guards before comparing.
+        Set-SubscriberLog -Lines @('homie/x/heartbeat 0 alive')
+
+        $hit = Wait-Heartbeat -Topic 'homie/x/heartbeat' -TimeoutSeconds 2 -Port '1883'
+
+        Assert-Equal -Expected 'homie/x/heartbeat 0 alive' -Actual $hit.Line
+        Assert-Null -Value $hit.Counter
+    }
+
+    It 'Wait-Heartbeat returns $null when the topic never appears' {
+        Set-SubscriberLog -Lines @('homie/other/heartbeat 0 heartbeat 1')
+
+        Assert-Null -Value (Wait-Heartbeat -Topic 'homie/x/heartbeat' -TimeoutSeconds 1 -Port '1883')
+    }
+
+    # --- Wait-ForEcho -----------------------------------------------------------------
+
+    It 'Wait-ForEcho republishes the command every round until the echo comes back' {
+        # The republish is the whole point of this wait: the device's publish loop
+        # resumes before its subscriptions are replayed, so a single QoS-0 command into
+        # that window is dropped and a healthy device would be reported FAIL.
+        Set-SubscriberLog -Lines @('homie/x/heartbeat 0 heartbeat 1')
+        $script:published = @()
+
+        function Publish-HomieCommand {
+            param([string]$Port, [string]$Topic, [string]$Payload)
+            $script:published += "$Topic=$Payload"
+            if ($script:published.Count -eq 3) { Add-SubscriberLogLine -Line "homie/x/echo 0 $Payload" }
+        }
+
+        Assert-True -Condition (Wait-ForEcho -Topic 'homie/x/echo' -Payload 'echo-7' -TimeoutSeconds 20 `
+                                             -Port '1883' -CommandTopic 'homie/x/echo/set')
+        Assert-Equal -Expected 3 -Actual $script:published.Count -Because 'it must keep re-sending, not send once and wait'
+        Assert-Equal -Expected 'homie/x/echo/set=echo-7' -Actual $script:published[0]
+    }
+
+    It 'Wait-ForEcho returns false when the echo never comes, having published at least once' {
+        Set-SubscriberLog -Lines @('homie/x/heartbeat 0 heartbeat 1')
+        $script:published = @()
+
+        function Publish-HomieCommand {
+            param([string]$Port, [string]$Topic, [string]$Payload)
+            $script:published += "$Topic=$Payload"
+        }
+
+        Assert-False -Condition (Wait-ForEcho -Topic 'homie/x/echo' -Payload 'echo-7' -TimeoutSeconds 1 `
+                                              -Port '1883' -CommandTopic 'homie/x/echo/set')
+        Assert-True -Condition ($script:published.Count -ge 1)
+    }
+
+    It 'Wait-ForEcho requires the topic and the payload, not either' {
+        # A different device echoing the same nonce, and this device echoing a different
+        # one, both have to fail: the pair is what proves *this* subscription replayed.
+        Set-SubscriberLog -Lines @(
+            'homie/other/echo 0 echo-7'
+            'homie/x/echo 0 echo-6'
+        )
+        function Publish-HomieCommand { param([string]$Port, [string]$Topic, [string]$Payload) }
+
+        Assert-False -Condition (Wait-ForEcho -Topic 'homie/x/echo' -Payload 'echo-7' -TimeoutSeconds 1 `
+                                              -Port '1883' -CommandTopic 'homie/x/echo/set')
     }
 }
 

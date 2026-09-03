@@ -603,6 +603,71 @@ function Get-IntegrationTestProgramPath {
     return (Join-Path $repoRoot "src\integrationTests\$TestName\Program.cs")
 }
 
+function Wait-ForSubscriberLogLine {
+    # The polling half of Wait-Heartbeat, Wait-ForEcho and Wait-ForAnnounceWitnessed: it
+    # re-reads the detached subscriber's homie/# log until a line satisfies $Predicate,
+    # and returns that line -- or $null once $TimeoutSeconds have passed. The three waits
+    # differ only in the predicate, the poll interval, and whether they publish something
+    # first, so all three are that difference plus a call to this.
+    #
+    # The whole log is re-read every pass rather than tailed. These are one line per MQTT
+    # message over a window measured in seconds, and a reader that held a position would
+    # have to be right about a file the detached subscriber is appending to concurrently.
+    #
+    # $Skip is the watermark seam: lines at or before it are from before the caller's
+    # window opened. 0 means read the whole file, which is also what a missing log gives
+    # (see Get-SubscriberLogLineCount).
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Port,
+
+        # Takes the log line as $_, like any Where-Object filter. It is evaluated here
+        # rather than where it was written, so it reads its caller's variables up the
+        # dynamic scope chain -- which holds because the caller is the one calling this.
+        #
+        # Deliberately not .GetNewClosure() at the call sites: that binds the block into
+        # a new module scope with its own function table, and $BeforeRead below then
+        # cannot resolve Publish-HomieCommand at all. A caller that does need to hand in
+        # a block built somewhere else can still close it explicitly -- there is a case
+        # for that -- but nothing here does.
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Predicate,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds,
+
+        [int]$PollMilliseconds = 500,
+
+        [int]$Skip = 0,
+
+        # Run at the top of every pass, before the read. Wait-ForEcho republishes its
+        # command here; the other two waits pass nothing and only observe.
+        [scriptblock]$BeforeRead
+    )
+
+    # -LiteralPath, not -Path: the log sits under the temp directory, and a '[' anywhere
+    # in that path makes -Path a wildcard pattern that matches nothing -- the #71 defect
+    # class, which two of the three waits carried until they moved here.
+    $log = Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+
+    while ((Get-Date) -lt $deadline) {
+        if ($BeforeRead) { & $BeforeRead }
+
+        $hit = @(Get-Content -LiteralPath $log -ErrorAction SilentlyContinue |
+            Select-Object -Skip $Skip |
+            Where-Object $Predicate) |
+            Select-Object -First 1
+        if ($hit) {
+            return $hit
+        }
+
+        Start-Sleep -Milliseconds $PollMilliseconds
+    }
+
+    return $null
+}
+
 function Wait-Heartbeat {
     # Polls the detached subscriber's homie/# log for a heartbeat on $Topic.
     # Returns @{ Line; Counter } for the first one seen, or $null if none arrived
@@ -615,27 +680,19 @@ function Wait-Heartbeat {
         [string]$Port
     )
 
-    $log = Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-
-    while ((Get-Date) -lt $deadline) {
-        $hit = Get-Content -Path $log -ErrorAction SilentlyContinue |
-            Where-Object { $_ -like "$Topic*" } |
-            Select-Object -First 1
-        if ($hit) {
-            $counter = $null
-            $match = [regex]::Match($hit, '(\d+)\s*$')
-            if ($match.Success) {
-                $counter = [int]$match.Groups[1].Value
-            }
-
-            return @{ Line = $hit; Counter = $counter }
-        }
-
-        Start-Sleep -Milliseconds 500
+    $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds `
+        -Predicate { $_ -like "$Topic*" }
+    if (-not $hit) {
+        return $null
     }
 
-    return $null
+    $counter = $null
+    $match = [regex]::Match($hit, '(\d+)\s*$')
+    if ($match.Success) {
+        $counter = [int]$match.Groups[1].Value
+    }
+
+    return @{ Line = $hit; Counter = $counter }
 }
 
 function Invoke-BrokerOutageCheck {
@@ -772,27 +829,17 @@ function Wait-ForEcho {
         [string]$CommandTopic
     )
 
-    $log = Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds `
+        -Predicate { $_ -like "$Topic *" -and $_ -like "*$Payload" } `
+        -BeforeRead {
+            Publish-HomieCommand -Port $Port -Topic $CommandTopic -Payload $Payload
 
-    while ((Get-Date) -lt $deadline) {
-        Publish-HomieCommand -Port $Port -Topic $CommandTopic -Payload $Payload
-
-        # Give the round trip a moment before reading, so the common case costs one
-        # publish and one read rather than spinning.
-        Start-Sleep -Milliseconds 500
-
-        $hit = Get-Content -Path $log -ErrorAction SilentlyContinue |
-            Where-Object { $_ -like "$Topic *" -and $_ -like "*$Payload" } |
-            Select-Object -First 1
-        if ($hit) {
-            return $true
+            # Give the round trip a moment before reading, so the common case costs one
+            # publish and one read rather than spinning.
+            Start-Sleep -Milliseconds 500
         }
 
-        Start-Sleep -Milliseconds 500
-    }
-
-    return $false
+    return ($null -ne $hit)
 }
 
 function Get-SubscriberLogLineCount {
@@ -835,26 +882,20 @@ function Wait-ForAnnounceWitnessed {
         [int]$Watermark
     )
 
-    $log = Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog
     $topic = "homie/$DeviceId/`$state"
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 
-    while ((Get-Date) -lt $deadline) {
-        # Line-prefix match, not -like "*init*": a payload of 'init' on some other topic,
-        # or a device id that merely starts with this one, must not satisfy it. Log lines
-        # are "<topic> <0|1> <payload>", per Get-SmartHomeSubscriberArguments.
-        $hit = @(Get-Content -LiteralPath $log -ErrorAction SilentlyContinue |
-            Select-Object -Skip $Watermark |
-            Where-Object { $_ -eq "$topic 0 init" -or $_ -eq "$topic 1 init" }) |
-            Select-Object -First 1
-        if ($hit) {
-            return $true
-        }
+    # Line-prefix match, not -like "*init*": a payload of 'init' on some other topic,
+    # or a device id that merely starts with this one, must not satisfy it. Log lines
+    # are "<topic> <0|1> <payload>", per Get-SmartHomeSubscriberArguments.
+    #
+    # 250ms rather than the helper's default 500. The log is a record, so a slower poll
+    # would still find the line -- it only costs latency, and this one sits between the
+    # flash and everything the test then does.
+    $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds `
+        -Skip $Watermark -PollMilliseconds 250 `
+        -Predicate { $_ -eq "$topic 0 init" -or $_ -eq "$topic 1 init" }
 
-        Start-Sleep -Milliseconds 250
-    }
-
-    return $false
+    return ($null -ne $hit)
 }
 
 function Get-MosquittoTool {
