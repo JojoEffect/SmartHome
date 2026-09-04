@@ -1043,11 +1043,15 @@ Describe 'Invoke-CommandRetryRounds' {
         # -Observe sleeps because the shipped loop has no sleep of its own: a round costs
         # a 3s snapshot or a capture window, and that is the whole of its pacing. A block
         # that returned instantly would spin this case as fast as the CPU allows.
+        #
+        # 200ms against a 1s deadline, so the assertion below has five rounds of slack. A
+        # sleep sized to give exactly two would make this case fail on a loaded machine
+        # for reasons that have nothing to do with the loop.
         Reset-Recorders
 
         $result = Invoke-CommandRetryRounds -Items @('a', 'b') -TimeoutSeconds 1 `
             -Publish { param($item) $script:published += $item } `
-            -Observe { Start-Sleep -Milliseconds 400; return 'nothing' } `
+            -Observe { Start-Sleep -Milliseconds 200; return 'nothing' } `
             -IsSettled { param($item, $observation) return $false }
 
         Assert-ArrayEqual -Expected @('a', 'b') -Actual $result.Pending
@@ -1137,7 +1141,7 @@ Describe 'Invoke-CommandRetryRounds' {
 
         $result = Invoke-CommandRetryRounds -Items @('lost') -TimeoutSeconds 1 `
             -Publish { param($item) $script:published += $item } `
-            -Observe { Start-Sleep -Milliseconds 400; return @('unrelated traffic') } `
+            -Observe { Start-Sleep -Milliseconds 200; return @('unrelated traffic') } `
             -IsSettled {
                 param($item, $observation)
                 return ([array]::IndexOf($observation, 'the forbidden payload') -ge 0 -or
