@@ -36,6 +36,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="AssemblyIdentityTests.cs" />
+    <Compile Include="HomeAssistantAnnouncerTests.cs" />
+    <Compile Include="HomeAssistantDiscoveryTests.cs" />
     <Compile Include="HomieClientTests.cs" />
     <Compile Include="DeviceBuilderTests.cs" />
     <Compile Include="PropertyValidationTests.cs" />
@@ -47,6 +49,7 @@
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\common\HomeAssistant\HomeAssistant.nfproj" />
     <ProjectReference Include="..\..\common\Homie\Homie.nfproj" />
     <ProjectReference Include="..\..\common\Mqtt\Mqtt.nfproj" />
     <ProjectReference Include="..\..\common\Text\Text.nfproj" />

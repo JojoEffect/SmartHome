@@ -1,4 +1,5 @@
 using SmartHome.Homie.V4;
+using SmartHome.HomeAssistant;
 using SmartHome.Homie.V4.Enums;
 using SmartHome.Homie.V4.Builder;
 using SmartHome.Homie.V4.Properties;
@@ -24,6 +25,14 @@ namespace SmartHome.Devices.RoomSensor
         private const int I2cClockPin = 22;
         private const int MeasurementIntervalMs = 5000;
 
+        // How many missed readings Home Assistant tolerates before it calls a value
+        // stale. Six rather than one or two: a single I2C NACK is logged and the loop
+        // carries on, so a short gap is normal and must not blank the dashboard. What
+        // this is really for is the sensor failing persistently -- the device then goes
+        // to Homie 'alert' and stops publishing while staying connected, which without
+        // an expiry would leave the last good temperature on display indefinitely.
+        private const int HomeAssistantExpiryIntervals = 6;
+
         // Named rather than inline at the call site, so Run-IntegrationTests.ps1's
         // stale-constant pre-flight can find it: that check greps for exactly this
         // shape, and an inline literal was invisible to it. This address drifts from
@@ -34,6 +43,7 @@ namespace SmartHome.Devices.RoomSensor
         private static FloatProperty _temperatureProperty;
         private static FloatProperty _humidityProperty;
         private static FloatProperty _pressureProperty;
+        private static HomeAssistantAnnouncer _homeAssistant;
         private static ILogger _logger;
 
         // private static GpioController s_GpioController;
@@ -52,6 +62,8 @@ namespace SmartHome.Devices.RoomSensor
                 IHomieClient homieClient = new HomieClient(device, mqttClient);
 
                 ConnectWithRetry(homieClient);
+
+                AnnounceToHomeAssistant(device, mqttClient);
 
                 using var sensor = SetupSensor();
 
@@ -156,6 +168,55 @@ namespace SmartHome.Devices.RoomSensor
             _temperatureProperty.Update(reading.Temperature.DegreesCelsius);
             _humidityProperty.Update(reading.Humidity.Percent);
             _pressureProperty.Update(reading.Pressure.Pascals);
+        }
+
+        /// <summary>
+        /// Publishes this device to Home Assistant, over the connection Homie just opened.
+        /// </summary>
+        /// <remarks>
+        /// One MQTT session carries both conventions. Nothing here re-declares the device:
+        /// the discovery messages describe the same Device model Homie announced and point
+        /// Home Assistant at the same topics, so a property added to SetupHomieDevice gets
+        /// a Home Assistant entity with no edit here. The only new traffic is one retained
+        /// config per property, published once per session.
+        ///
+        /// Not fatal if it fails, unlike the Homie connect above: this device's job is to
+        /// publish readings, and it does that whether or not Home Assistant ever hears
+        /// about it. Announce() logs what went wrong, and the re-announce Attach() arms
+        /// runs again on the next reconnect.
+        /// </remarks>
+        private static void AnnounceToHomeAssistant(Device device, IReconnectingMqttClient mqttClient)
+        {
+            try
+            {
+                _homeAssistant = new HomeAssistantAnnouncer(device, mqttClient, new HomeAssistantSettings
+                {
+                    Model = Constants.DeviceModel,
+                    ExpireAfterSeconds = (MeasurementIntervalMs / 1000) * HomeAssistantExpiryIntervals,
+                });
+
+                // The one thing the Homie declaration cannot say. '%' is equally the unit
+                // of humidity, of battery charge and of soil moisture, and Home Assistant
+                // has a different device class for each, so DeviceClass.FromUnit
+                // deliberately returns nothing for it and the app names it instead.
+                // Temperature (°C) and pressure (Pa) are unambiguous and need no such line.
+                _homeAssistant.SetDeviceClass(_humidityProperty, DeviceClass.Humidity);
+
+                _homeAssistant.Announce();
+
+                // After the first announce, not before: Attach() only arms the
+                // *re*-announce paths (broker back, Home Assistant back), and arming them
+                // first would let a reconnect race the initial publish.
+                _homeAssistant.Attach();
+            }
+            catch (Exception ex)
+            {
+                // Caught here rather than inside the library, which propagates on purpose:
+                // only the app can decide that failing to reach Home Assistant is not a
+                // reason to stop measuring. Main's catch rethrows and the CLR turns that
+                // into a reboot, which is far too much for an optional integration.
+                _logger.LogError(ex, "Could not announce the device to Home Assistant; continuing without it.");
+            }
         }
 
         // The Homie client owns the MQTT session on purpose: it is the only thing that

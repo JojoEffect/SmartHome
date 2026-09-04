@@ -5,6 +5,10 @@ namespace SmartHome.Devices.RoomSensor
         public const string DeviceTopicId = "room-sensor-office";
         public const string DeviceName = "Raumsensor Buero";
         public const string DeviceType = "Sensor";
+
+        // Shown on the Home Assistant device page. Homie has no attribute for it -- the
+        // closest, $type, is a *node* attribute and describes the sensor, not the board.
+        public const string DeviceModel = "ESP32 + BMP280";
         
         public const string NodeSensorTopicId = "sensor";
         public const string NodeSensorName = "Sensor";

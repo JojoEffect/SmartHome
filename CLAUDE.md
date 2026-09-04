@@ -276,6 +276,8 @@ when nothing ran, but don't re-break the name.
 src/
   common/                 Shared libraries, used by device apps and tests alike
     Homie/                SmartHome.Homie      — Homie v4 client (SmartHome.Homie.V4 inside)
+    HomeAssistant/        SmartHome.HomeAssistant — Home Assistant MQTT Discovery, derived
+                            from the Homie model and published on the same session
     Mqtt/                 SmartHome.Mqtt       — ReconnectingMqttClient: auto-reconnect and
                             subscription replay over nanoFramework.M2Mqtt. Protocol-agnostic;
                             knows nothing about Homie
@@ -401,6 +403,54 @@ of plain MQTT. The Homie-specific publishing lives in `HomiePublishExtensions` (
 `SmartHome.Homie`), which extends M2Mqtt's own `IMqttClient` and never referenced the wrapper.
 The dependency runs one way only: `SmartHome.Homie` -> `SmartHome.Mqtt`. Don't add a reference
 back, and don't put topic or `$state` knowledge into the client.
+
+### Home Assistant, on the same session
+
+Home Assistant does not speak Homie — its equivalent convention is **MQTT Discovery**, under
+the `homeassistant/` prefix — so a Homie device is invisible to it. `SmartHome.HomeAssistant`
+closes that gap without the device growing a second personality. The dependency extends the
+same one-way chain: `SmartHome.HomeAssistant` -> `SmartHome.Homie` -> `SmartHome.Mqtt`. Nothing
+references back, and the Homie library does not know this one exists.
+
+Two decisions carry the design, and both are worth understanding before changing anything here:
+
+- **The discovery messages describe the Homie model and point at the Homie topics.**
+  `DiscoveryMapper` reads `$datatype`, `$unit`, `$format` and `$settable` off each property and
+  emits one retained config per property whose `state_topic` is that property's own value topic
+  and whose `command_topic` is the `/set` topic `HomieClient` already subscribes to. So the
+  device publishes no second copy of any value — the only new traffic is the configs
+  themselves, once per session — and a property added to the Homie model gets a Home Assistant
+  entity with no edit anywhere else.
+- **Availability is derived from `$state`, not from a second last will.** MQTT allows one will
+  per connection and Homie has already spent it on `$state` = `lost`. `DiscoveryMapper.
+  AvailabilityTemplate` maps the six Homie states onto Home Assistant's online/offline through
+  an `availability_template`, which is what lets one session carry both conventions. That is
+  why `HomeAssistantAnnouncer` takes an already-connected `IReconnectingMqttClient` and is
+  deliberately not a client: if it ever called `Connect()` it would need its own client id,
+  keep-alive and will.
+
+`HomeAssistantAnnouncer.Attach()` arms the two re-announce paths, and both are needed: a broker
+restart empties the retained store (same reason `HomieClient.HandleConnectionOpen` re-announces),
+and Home Assistant publishes `online` to `homeassistant/status` when it restarts. `Announce()`
+never throws, because it is reached from M2Mqtt's dispatch thread on both of those paths and
+that thread treats an escaping exception as a dead connection; `Attach()` does throw, because
+only the app can decide whether a device that cannot reach Home Assistant should still do its
+real job. RoomSensor decides it should.
+
+Two things to know before extending it. A Homie `%` unit is ambiguous to Home Assistant —
+humidity, battery and moisture all use it and each has its own device class — so
+`DeviceClass.FromUnit` returns nothing for it and the app names it with
+`SetDeviceClass` (RoomSensor does this for humidity); everything unambiguous is inferred, and
+every inference was checked against Home Assistant's own `DEVICE_CLASS_UNITS` table rather than
+assumed. And a retained config outlives the device that published it, so renaming or removing a
+property leaves a working-looking entity wired to a dead topic — `Remove()` withdraws them, and
+it has to be called *before* the model changes.
+
+Single-component discovery (`homeassistant/<component>/<object-id>/config`), not the
+device-based form Home Assistant 2024.11 added: device discovery would be one message instead of
+N, but it builds the whole device's configuration in memory at once, and N small messages built
+and released in turn is the cheaper shape on this hardware. It also still works on installations
+older than 2024.11.
 
 Anything that needs WiFi calls `NetworkHelper.ConnectToConfiguredNetwork()` from
 `src/common/Networking`. Don't reintroduce the hand-rolled scan/connect loop from the official
