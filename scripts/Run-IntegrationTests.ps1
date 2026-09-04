@@ -1441,6 +1441,129 @@ function Wait-ForRetainedValue {
     return @{ Ok = $false; Seen = $seen; Snapshot = $snapshot }
 }
 
+function Invoke-CommandRetryRounds {
+    # The retry half of the /set round trip and the out-of-format round: publish every
+    # still-pending item, observe once, drop the items that settled, repeat -- until
+    # nothing is pending or $TimeoutSeconds have passed. Returns what is still pending
+    # and how many rounds it took.
+    #
+    # Both rounds retry for the same reason, and it is not device flakiness. A /set is
+    # non-retained, as the convention requires of a controller, so one that reaches the
+    # broker while the device is not yet subscribed is dropped outright -- there is
+    # nothing left in the store for the device to pick up when it does subscribe.
+    # Published once, that single lost message becomes the full timeout of polling for an
+    # echo that can never arrive. Measured, not hypothetical: 1 run in 8 on 2026-08-26,
+    # and it was the only run of the eight whose announce wait was satisfied by its first
+    # snapshot rather than its third -- i.e. the only one that reached the /set loop early
+    # enough to be exposed to it. The phase then spent 33.4s over 10 snapshots and
+    # reported all five properties still holding their boot values (issue #35).
+    #
+    # Retrying is the only fix available at this layer. MQTT gives a publisher no signal
+    # about who is subscribed, and $state=ready is the device's claim about itself rather
+    # than a fact about the broker's routing table -- so the host cannot wait for the
+    # condition it actually needs. On a healthy run this costs nothing: the first round
+    # settles everything and nothing is ever re-sent, and a repeated /set is idempotent,
+    # so a device that did receive the first one applies the same value again and
+    # publishes back the same reflection.
+    #
+    # What the two rounds do NOT share is when an item counts as settled, which is why
+    # that is a parameter rather than something decided here. The /set round settles a
+    # property once its expected echo is on the topic. The out-of-format round settles a
+    # case as soon as EITHER payload was seen, because a forbidden payload that did land
+    # is a real failure and retrying it away would turn a defect into a PASS. The two
+    # -IsSettled blocks are meant to read differently; that difference is the finding
+    # this helper exists to make visible rather than leave for two readers to spot.
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Items,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds,
+
+        # Publishes one item's command; called once per still-pending item per round.
+        # Anything it writes is discarded, for the reason -IsSettled sets out below.
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Publish,
+
+        # Takes what -BeforePublish returned (or $null) and returns the round's single
+        # observation -- a retained snapshot for one caller, a window's captured lines
+        # for the other. It is handed to -IsSettled unchanged, so an array is fine here.
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Observe,
+
+        # ($item, $observation) -> $true when that item needs no further round. It is
+        # also where a caller records what it saw, which is why it runs per item rather
+        # than being one filter over the whole list: the blocks are evaluated here and
+        # reach their caller's hashtables up the dynamic scope chain, the same way
+        # Wait-ForSubscriberLogLine's predicates do. Deliberately not .GetNewClosure() at
+        # the call sites -- that binds a block into a new module scope with its own
+        # function table, and -Publish could then not resolve Publish-HomieCommand at all.
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$IsSettled,
+
+        # Opens the observation window before anything is published, for a caller that
+        # has to see the messages its own commands provoke; its return value is the
+        # context handed to -Observe, and must be exactly one value. Run once per round,
+        # not once per item -- one window holds every item's traffic, the same way one
+        # -Observe covers them all. The /set round passes nothing, because its snapshot
+        # is taken after the publishes and only the settled result matters there.
+        [scriptblock]$BeforePublish
+    )
+
+    $pending = @($Items)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $rounds = 0
+
+    while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        $rounds++
+
+        # Same one-value rule as -IsSettled below, and for a sharper reason: what this
+        # block returns is the handle to a window it has just opened. A block that also
+        # wrote a line to its output stream would make $context an array, -Observe's
+        # Stop-HomieCapture would fail to bind its [hashtable] parameter, and that throw
+        # would land with the window still open -- an orphaned mosquitto_sub appending to
+        # the shared capture path for the rest of the suite.
+        $context = $null
+        if ($BeforePublish) {
+            $opened = @(& $BeforePublish)
+            if ($opened.Count -ne 1) {
+                throw ("-BeforePublish must return exactly one value; it returned {0} ({1})." -f $opened.Count, ($opened -join ', '))
+            }
+            $context = $opened[0]
+        }
+
+        foreach ($item in $pending) {
+            & $Publish $item | Out-Null
+        }
+
+        $observation = & $Observe $context
+        $stillPending = @()
+
+        foreach ($item in $pending) {
+            # A scriptblock returns everything written to its output stream, not just its
+            # last expression. A block that grew a call emitting a line would hand back
+            # @('chatter', $false) -- a non-empty array, and therefore true -- settling an
+            # item that was never measured. That is the false-PASS shape this file has
+            # produced twice (#34, #36), and the one the sibling polling helper had to fix
+            # in its own seam, so it is a loud programming error here rather than a run
+            # that reports success.
+            $verdict = @(& $IsSettled $item $observation)
+            if ($verdict.Count -ne 1) {
+                throw ("-IsSettled must return exactly one value; it returned {0} ({1})." -f $verdict.Count, ($verdict -join ', '))
+            }
+
+            if (-not $verdict[0]) {
+                $stillPending += $item
+            }
+        }
+
+        $pending = $stillPending
+    }
+
+    return @{ Pending = @($pending); Rounds = $rounds }
+}
+
 # ── Phase timing ──────────────────────────────────────────────────────────────
 # The summary reports one number per test, and that number covers the deploy as well as
 # the measurement -- so when this check went from 59s to 73s between two runs there was
@@ -1818,47 +1941,26 @@ function Measure-HomieConformance {
         'float-value' = '21.50'
     }
 
-    # One snapshot per round, not one per property. Every reflection is checked
-    # against the same snapshot, so five properties cost one snapshot instead of
-    # five -- the snapshot has to be a fresh subscriber (retain flags are only set on
-    # replay), which is what makes it expensive.
-    $pending = @($commands.Keys)
+    # $lastSeen is written by the -IsSettled block below and read after the rounds are
+    # over, so it has to outlive them. The block reaches it up the dynamic scope chain.
     $lastSeen = @{}
-    $deadline = (Get-Date).AddSeconds($Settings.CommandTimeoutSeconds)
 
-    # The commands are published at the top of every round, not once before the loop.
+    # One snapshot per round, not one per property: -Observe runs once and every
+    # reflection is checked against what it returned, so five properties cost one
+    # snapshot instead of five -- the snapshot has to be a fresh subscriber (retain flags
+    # are only set on replay), which is what makes it expensive.
     #
-    # A /set is non-retained, as the convention requires of a controller, so one that
-    # reaches the broker while the device is not yet subscribed is dropped outright --
-    # there is nothing left in the store for the device to pick up when it does
-    # subscribe. Published once, that single lost message becomes the full
-    # CommandTimeoutSeconds of polling for an echo that can never arrive, and five
-    # conformance failures against a device that is working correctly.
-    #
-    # Measured, not hypothetical: 1 run in 8 on 2026-08-26, and it was the only run of
-    # the eight whose announce wait was satisfied by its first snapshot rather than its
-    # third -- i.e. the only one that reached this loop early. The /set phase then spent
-    # 33.4s over 10 snapshots and reported all five properties still holding their boot
-    # values.
-    #
-    # Retrying is the only fix available at this layer. MQTT gives a publisher no signal
-    # about who is subscribed, and $state=ready is the device's claim about itself, not
-    # about the broker's routing table -- so the host cannot wait for the condition it
-    # actually needs. On a healthy run this costs nothing: the first round succeeds and
-    # nothing is ever re-sent. Only still-pending properties are republished, and a
-    # repeated command is idempotent -- the device applies the same value again and
-    # publishes back the same reflection.
-    $rounds = 0
-    while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
-        $rounds++
-        foreach ($property in $pending) {
+    # Invoke-CommandRetryRounds owns the republishing and the reason for it (issue #35).
+    # Only still-pending properties are re-sent, so a healthy run publishes once.
+    $setRound = Invoke-CommandRetryRounds -Items @($commands.Keys) -TimeoutSeconds $Settings.CommandTimeoutSeconds `
+        -Publish {
+            param($property)
             Publish-HomieCommand -Port $Port -Topic "$node/$property/set" -Payload $commands[$property]
-        }
+        } `
+        -Observe { Get-HomieRetainedSnapshot -Port $Port } `
+        -IsSettled {
+            param($property, $snapshot)
 
-        $snapshot = Get-HomieRetainedSnapshot -Port $Port
-        $stillPending = @()
-
-        foreach ($property in $pending) {
             $expected = if ($expectedEcho.Contains($property)) { $expectedEcho[$property] } else { $commands[$property] }
             $topic = "$node/$property"
             $seen = if ($snapshot.Contains($topic)) { $snapshot[$topic].Payload } else { $null }
@@ -1870,17 +1972,16 @@ function Measure-HomieConformance {
             # what is being proven here is that the device applied the command -- a live
             # echo is equally good evidence of that, and requiring a replayed copy would
             # cost an extra snapshot round for nothing.
-            if ($seen -eq $expected) {
-                continue
-            }
-
-            $stillPending += $property
+            #
+            # Settled means "the echo is there". Contrast the out-of-format round below,
+            # which settles on either payload: there, seeing the forbidden one is the
+            # failure being measured and must not be retried away. Here there is nothing
+            # to preserve -- a property still holding its old value is exactly what a lost
+            # command looks like, so it is retried.
+            return ($seen -eq $expected)
         }
 
-        $pending = $stillPending
-    }
-
-    foreach ($property in $pending) {
+    foreach ($property in $setRound.Pending) {
         $wanted = if ($expectedEcho.Contains($property)) { $expectedEcho[$property] } else { $commands[$property] }
         $script:conformanceFailures += "/set on $property did not come back on the property topic (saw '$($lastSeen[$property])', expected '$wanted')"
     }
@@ -1897,8 +1998,8 @@ function Measure-HomieConformance {
     # QoS-1 retransmission on M2Mqtt's 1s DelayOnRetry, produces the same count against a
     # device that received the command and applied it. This line is the documented tell
     # for #35, so it must not assert the cause the captures are there to establish.
-    if ($rounds -gt 1) {
-        Write-Warning ("The /set round trip needed {0} rounds: a command produced no echo within its snapshot window and was re-sent (issue #35). The snapshot captures for this phase are in {1}." -f $rounds, $LogDirectory)
+    if ($setRound.Rounds -gt 1) {
+        Write-Warning ("The /set round trip needed {0} rounds: a command produced no echo within its snapshot window and was re-sent (issue #35). The snapshot captures for this phase are in {1}." -f $setRound.Rounds, $LogDirectory)
     }
 
     # ── payloads the properties' own $datatype/$format forbid ────────────────
@@ -1942,35 +2043,38 @@ function Measure-HomieConformance {
         @{ Property = 'color-value';   Bad = 'FF8000'; Good = '255,128,0'; Echo = '255,128,0' }
     )
 
-    $pending = @($outOfFormatCases)
+    # Written by the -IsSettled block and read after the rounds are over, so it outlives
+    # them; the block reaches it up the dynamic scope chain.
     $seenPayloads = @{}
-    $deadline = (Get-Date).AddSeconds($Settings.CommandTimeoutSeconds)
 
-    while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
-        $capture = Start-HomieCapture -Port $Port -WaitForConnectSeconds 5
-
-        foreach ($case in $pending) {
+    # The window is opened by -BeforePublish rather than around the observation, because
+    # both payloads have to go past *inside* it: a window opened after the commands would
+    # miss the very ordering this step measures.
+    Invoke-CommandRetryRounds -Items $outOfFormatCases -TimeoutSeconds $Settings.CommandTimeoutSeconds `
+        -BeforePublish { Start-HomieCapture -Port $Port -WaitForConnectSeconds 5 } `
+        -Publish {
+            param($case)
             Publish-HomieCommand -Port $Port -Topic "$node/$($case.Property)/set" -Payload $case.Bad
             Publish-HomieCommand -Port $Port -Topic "$node/$($case.Property)/set" -Payload $case.Good
-        }
+        } `
+        -Observe {
+            param($capture)
+            Stop-HomieCapture -Capture $capture
+        } `
+        -IsSettled {
+            param($case, $lines)
 
-        $lines = Stop-HomieCapture -Capture $capture
-        $stillPending = @()
-
-        foreach ($case in $pending) {
             $payloads = Get-HomieLivePayloads -Lines $lines -Topic "$node/$($case.Property)"
             $seenPayloads[$case.Property] = $payloads
 
-            # Retried only while NEITHER payload was seen, i.e. while nothing has been
-            # measured. A forbidden payload that did land is a real failure and must not
-            # be retried away.
-            if ([array]::IndexOf($payloads, $case.Echo) -lt 0 -and [array]::IndexOf($payloads, $case.Bad) -lt 0) {
-                $stillPending += $case
-            }
-        }
-
-        $pending = $stillPending
-    }
+            # Settled as soon as EITHER payload was seen, i.e. as soon as anything was
+            # measured -- which is where this round's retry semantics differ from the
+            # /set round's above, and the reason the predicate is a parameter. A
+            # forbidden payload that did land is a real failure, and a round that retried
+            # it away would replace a recorded defect with a clean window and report PASS.
+            # Only "neither payload arrived" is a lost command worth re-sending.
+            return ([array]::IndexOf($payloads, $case.Echo) -ge 0 -or [array]::IndexOf($payloads, $case.Bad) -ge 0)
+        } | Out-Null
 
     foreach ($case in $outOfFormatCases) {
         $payloads = if ($seenPayloads.Contains($case.Property)) { $seenPayloads[$case.Property] } else { @() }
