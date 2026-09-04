@@ -970,27 +970,27 @@ Describe 'Invoke-CommandRetryRounds' {
     # what these cases are about is the loop's contract with the four blocks it is
     # handed, and the blocks the shipped call sites pass are the only part that touches
     # mosquitto.
-    $script:published = @()
-    $script:observed = @()
-    $script:contexts = @()
-    $script:round = 0
+    $script:retryPublished = @()
+    $script:retryObserved = @()
+    $script:retryContexts = @()
+    $script:retryRound = 0
 
     function Reset-Recorders {
-        $script:published = @()
-        $script:observed = @()
-        $script:contexts = @()
-        $script:round = 0
+        $script:retryPublished = @()
+        $script:retryObserved = @()
+        $script:retryContexts = @()
+        $script:retryRound = 0
     }
 
     It 'publishes every item once and returns nothing pending when all settle' {
         Reset-Recorders
 
         $result = Invoke-CommandRetryRounds -Items @('a', 'b', 'c') -TimeoutSeconds 5 `
-            -Publish { param($item) $script:published += $item } `
+            -Publish { param($item) $script:retryPublished += $item } `
             -Observe { return 'settled' } `
             -IsSettled { param($item, $observation) return $true }
 
-        Assert-ArrayEqual -Expected @('a', 'b', 'c') -Actual $script:published
+        Assert-ArrayEqual -Expected @('a', 'b', 'c') -Actual $script:retryPublished
         Assert-ArrayEqual -Expected @() -Actual $result.Pending
         Assert-Equal -Expected 1 -Actual $result.Rounds
     }
@@ -1002,10 +1002,10 @@ Describe 'Invoke-CommandRetryRounds' {
 
         Invoke-CommandRetryRounds -Items @('a', 'b', 'c', 'd', 'e') -TimeoutSeconds 5 `
             -Publish { param($item) } `
-            -Observe { $script:observed += 'window'; return 'settled' } `
+            -Observe { $script:retryObserved += 'window'; return 'settled' } `
             -IsSettled { param($item, $observation) return $true } | Out-Null
 
-        Assert-ArrayEqual -Expected @('window') -Actual $script:observed
+        Assert-ArrayEqual -Expected @('window') -Actual $script:retryObserved
     }
 
     It 'republishes only the items that are still pending' {
@@ -1016,11 +1016,11 @@ Describe 'Invoke-CommandRetryRounds' {
         Reset-Recorders
 
         $result = Invoke-CommandRetryRounds -Items @('a', 'b') -TimeoutSeconds 5 `
-            -Publish { param($item) $script:published += $item } `
-            -Observe { $script:round++; return $script:round } `
+            -Publish { param($item) $script:retryPublished += $item } `
+            -Observe { $script:retryRound++; return $script:retryRound } `
             -IsSettled { param($item, $observation) return ($item -eq 'a' -or $observation -ge 2) }
 
-        Assert-ArrayEqual -Expected @('a', 'b', 'b') -Actual $script:published
+        Assert-ArrayEqual -Expected @('a', 'b', 'b') -Actual $script:retryPublished
         Assert-Equal -Expected 2 -Actual $result.Rounds
         Assert-ArrayEqual -Expected @() -Actual $result.Pending
     }
@@ -1033,7 +1033,7 @@ Describe 'Invoke-CommandRetryRounds' {
 
         $result = Invoke-CommandRetryRounds -Items @('a') -TimeoutSeconds 5 `
             -Publish { param($item) } `
-            -Observe { $script:round++; return $script:round } `
+            -Observe { $script:retryRound++; return $script:retryRound } `
             -IsSettled { param($item, $observation) return ($observation -ge 3) }
 
         Assert-Equal -Expected 3 -Actual $result.Rounds
@@ -1050,13 +1050,13 @@ Describe 'Invoke-CommandRetryRounds' {
         Reset-Recorders
 
         $result = Invoke-CommandRetryRounds -Items @('a', 'b') -TimeoutSeconds 1 `
-            -Publish { param($item) $script:published += $item } `
+            -Publish { param($item) $script:retryPublished += $item } `
             -Observe { Start-Sleep -Milliseconds 200; return 'nothing' } `
             -IsSettled { param($item, $observation) return $false }
 
         Assert-ArrayEqual -Expected @('a', 'b') -Actual $result.Pending
         Assert-True -Condition ($result.Rounds -ge 2) -Because 'the deadline has to allow more than one round'
-        Assert-Equal -Expected ($result.Rounds * 2) -Actual $script:published.Count
+        Assert-Equal -Expected ($result.Rounds * 2) -Actual $script:retryPublished.Count
     }
 
     It 'opens the window with -BeforePublish before anything is published' {
@@ -1066,13 +1066,95 @@ Describe 'Invoke-CommandRetryRounds' {
         Reset-Recorders
 
         Invoke-CommandRetryRounds -Items @('a') -TimeoutSeconds 5 `
-            -BeforePublish { $script:published += 'window-open'; return 'capture-1' } `
-            -Publish { param($item) $script:published += $item } `
-            -Observe { param($context) $script:contexts += $context; return 'settled' } `
+            -BeforePublish { $script:retryPublished += 'window-open'; return 'capture-1' } `
+            -Publish { param($item) $script:retryPublished += $item } `
+            -Observe { param($context) $script:retryContexts += $context; return 'settled' } `
             -IsSettled { param($item, $observation) return $true } | Out-Null
 
-        Assert-ArrayEqual -Expected @('window-open', 'a') -Actual $script:published
-        Assert-ArrayEqual -Expected @('capture-1') -Actual $script:contexts
+        Assert-ArrayEqual -Expected @('window-open', 'a') -Actual $script:retryPublished
+        Assert-ArrayEqual -Expected @('capture-1') -Actual $script:retryContexts
+    }
+
+    It 'observes what the publishes did, not a window that closed before them' {
+        # The ordering the whole helper turns on, and the one every other case here is
+        # blind to: their -Observe blocks return a constant or a round counter, so an
+        # -Observe hoisted above the publish loop satisfies all of them. This one wires
+        # the two together -- what -Publish put in the store is exactly what -Observe
+        # hands back -- so observing first leaves an empty store and nothing settles.
+        #
+        # On the /set round that inversion takes the snapshot before the commands go out,
+        # and at the shipped CommandTimeoutSeconds it reports all five properties as
+        # never echoed against a device that applied every one of them.
+        #
+        # -Observe returns a COPY of the store, not the store. Handing back the live
+        # object defeats the case: the publishes mutate it before the predicate reads it,
+        # so an -Observe hoisted above them still sees everything and the mutation
+        # survives. Get-HomieRetainedSnapshot has this property for real -- it builds a
+        # fresh object out of a closed capture window -- and the case has to model it.
+        Reset-Recorders
+        $store = @{}
+
+        $result = Invoke-CommandRetryRounds -Items @('a', 'b') -TimeoutSeconds 5 `
+            -Publish { param($item) $store[$item] = 'echoed' } `
+            -Observe { return ,@($store.Keys) } `
+            -IsSettled { param($item, $observation) return ([array]::IndexOf($observation, $item) -ge 0) }
+
+        Assert-Equal -Expected 1 -Actual $result.Rounds -Because 'a round that publishes then observes settles first time'
+        Assert-ArrayEqual -Expected @() -Actual $result.Pending
+    }
+
+    It 'opens a window every round, not just the first' {
+        # A window opened once and reused would have rounds 2+ of the out-of-format round
+        # calling Stop-HomieCapture on an already-closed capture and reading round 1''s
+        # stale lines as fresh evidence -- and rounds 2+ are the lost-command path the
+        # retry exists for in the first place.
+        Reset-Recorders
+
+        $result = Invoke-CommandRetryRounds -Items @('a') -TimeoutSeconds 5 `
+            -BeforePublish { $script:retryRound++; return ("window-{0}" -f $script:retryRound) } `
+            -Publish { param($item) } `
+            -Observe { param($context) $script:retryContexts += $context; return $context } `
+            -IsSettled { param($item, $observation) return ($observation -eq 'window-3') }
+
+        Assert-Equal -Expected 3 -Actual $result.Rounds
+        Assert-ArrayEqual -Expected @('window-1', 'window-2', 'window-3') -Actual $script:retryContexts `
+                          -Because 'each round must observe through the window that round opened'
+    }
+
+    It 'opens one window for the whole round, not one per item' {
+        # One window holds every item''s traffic, the same way one -Observe covers them
+        # all. A window per item would leave the out-of-format round opening five and
+        # closing only the last, orphaning four mosquitto_sub processes on the shared
+        # capture path -- the corruption the lifecycle step''s own comment describes.
+        Reset-Recorders
+
+        Invoke-CommandRetryRounds -Items @('a', 'b', 'c', 'd', 'e') -TimeoutSeconds 5 `
+            -BeforePublish { $script:retryContexts += 'opened'; return 'window' } `
+            -Publish { param($item) } `
+            -Observe { return 'settled' } `
+            -IsSettled { param($item, $observation) return $true } | Out-Null
+
+        Assert-ArrayEqual -Expected @('opened') -Actual $script:retryContexts
+    }
+
+    It 'throws when -BeforePublish writes more than the handle it returns' {
+        # Sharper than the -IsSettled guard below: what this block returns is the handle
+        # to a window it has just opened, so an unbindable $context throws with that
+        # window still open. Named here rather than left to Stop-HomieCapture''s
+        # parameter binder, whose message says nothing about where the extra value
+        # came from.
+        $message = Assert-Throws -Pattern 'exactly one value' -Body {
+            Invoke-CommandRetryRounds -Items @('a') -TimeoutSeconds 5 `
+                -BeforePublish {
+                    'chatter from the window'
+                    return 'the-handle'
+                } `
+                -Publish { param($item) } `
+                -Observe { return 'settled' } `
+                -IsSettled { param($item, $observation) return $true }
+        }
+
+        Assert-Match -Pattern 'chatter from the window' -Actual $message
     }
 
     It 'hands -Observe nothing when there is no window to open' {
@@ -1123,7 +1205,7 @@ Describe 'Invoke-CommandRetryRounds' {
         Reset-Recorders
 
         $result = Invoke-CommandRetryRounds -Items @('bad-landed') -TimeoutSeconds 5 `
-            -Publish { param($item) $script:published += $item } `
+            -Publish { param($item) $script:retryPublished += $item } `
             -Observe { return @('the forbidden payload') } `
             -IsSettled {
                 param($item, $observation)
@@ -1132,7 +1214,7 @@ Describe 'Invoke-CommandRetryRounds' {
             }
 
         Assert-Equal -Expected 1 -Actual $result.Rounds
-        Assert-ArrayEqual -Expected @('bad-landed') -Actual $script:published
+        Assert-ArrayEqual -Expected @('bad-landed') -Actual $script:retryPublished
     }
 
     It 'retries an item whose predicate saw neither payload, which is a lost command' {
@@ -1140,7 +1222,7 @@ Describe 'Invoke-CommandRetryRounds' {
         Reset-Recorders
 
         $result = Invoke-CommandRetryRounds -Items @('lost') -TimeoutSeconds 1 `
-            -Publish { param($item) $script:published += $item } `
+            -Publish { param($item) $script:retryPublished += $item } `
             -Observe { Start-Sleep -Milliseconds 200; return @('unrelated traffic') } `
             -IsSettled {
                 param($item, $observation)
@@ -1149,7 +1231,7 @@ Describe 'Invoke-CommandRetryRounds' {
             }
 
         Assert-ArrayEqual -Expected @('lost') -Actual $result.Pending
-        Assert-True -Condition ($script:published.Count -ge 2) -Because 'a lost command has to be re-sent'
+        Assert-True -Condition ($script:retryPublished.Count -ge 2) -Because 'a lost command has to be re-sent'
     }
 
     It 'throws rather than settling an item on a predicate that also wrote to its output stream' {
@@ -1208,26 +1290,26 @@ Describe 'Invoke-CommandRetryRounds' {
         # and three cases caught it before it shipped (#97), so it is pinned here too.
         Reset-Recorders
 
-        function Send-TestCommand { param($Item) $script:published += ("sent:{0}" -f $Item) }
+        function Send-TestCommand { param($Item) $script:retryPublished += ("sent:{0}" -f $Item) }
 
         Invoke-CommandRetryRounds -Items @('a') -TimeoutSeconds 5 `
             -Publish { param($item) Send-TestCommand -Item $item } `
             -Observe { return 'settled' } `
             -IsSettled { param($item, $observation) return $true } | Out-Null
 
-        Assert-ArrayEqual -Expected @('sent:a') -Actual $script:published
+        Assert-ArrayEqual -Expected @('sent:a') -Actual $script:retryPublished
     }
 
     It 'runs no round at all for an empty item list' {
         Reset-Recorders
 
         $result = Invoke-CommandRetryRounds -Items @() -TimeoutSeconds 5 `
-            -Publish { param($item) $script:published += $item } `
-            -Observe { $script:observed += 'window'; return 'settled' } `
+            -Publish { param($item) $script:retryPublished += $item } `
+            -Observe { $script:retryObserved += 'window'; return 'settled' } `
             -IsSettled { param($item, $observation) return $true }
 
         Assert-Equal -Expected 0 -Actual $result.Rounds
-        Assert-ArrayEqual -Expected @() -Actual $script:published
-        Assert-ArrayEqual -Expected @() -Actual $script:observed
+        Assert-ArrayEqual -Expected @() -Actual $script:retryPublished
+        Assert-ArrayEqual -Expected @() -Actual $script:retryObserved
     }
 }

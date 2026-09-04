@@ -1504,7 +1504,9 @@ function Invoke-CommandRetryRounds {
 
         # Opens the observation window before anything is published, for a caller that
         # has to see the messages its own commands provoke; its return value is the
-        # context handed to -Observe. The /set round passes nothing, because its snapshot
+        # context handed to -Observe, and must be exactly one value. Run once per round,
+        # not once per item -- one window holds every item's traffic, the same way one
+        # -Observe covers them all. The /set round passes nothing, because its snapshot
         # is taken after the publishes and only the settled result matters there.
         [scriptblock]$BeforePublish
     )
@@ -1516,7 +1518,20 @@ function Invoke-CommandRetryRounds {
     while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
         $rounds++
 
-        $context = if ($BeforePublish) { & $BeforePublish } else { $null }
+        # Same one-value rule as -IsSettled below, and for a sharper reason: what this
+        # block returns is the handle to a window it has just opened. A block that also
+        # wrote a line to its output stream would make $context an array, -Observe's
+        # Stop-HomieCapture would fail to bind its [hashtable] parameter, and that throw
+        # would land with the window still open -- an orphaned mosquitto_sub appending to
+        # the shared capture path for the rest of the suite.
+        $context = $null
+        if ($BeforePublish) {
+            $opened = @(& $BeforePublish)
+            if ($opened.Count -ne 1) {
+                throw ("-BeforePublish must return exactly one value; it returned {0} ({1})." -f $opened.Count, ($opened -join ', '))
+            }
+            $context = $opened[0]
+        }
 
         foreach ($item in $pending) {
             & $Publish $item | Out-Null
