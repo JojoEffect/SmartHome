@@ -47,6 +47,7 @@ jobs:
           # the repository's issue labels and layout.
           scopes: |
             homie
+            homeassistant
             mqtt
             networking
             roomsensor

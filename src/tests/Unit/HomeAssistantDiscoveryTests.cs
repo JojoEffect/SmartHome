@@ -46,8 +46,11 @@ namespace SmartHome.UnitTests
 
             var entities = DiscoveryMapper.Map(device, new HomeAssistantSettings());
 
-            // Six properties on the fixture's single node.
-            Assert.AreEqual(6, entities.Length, "one discovery message per property");
+            // Counted off the device rather than written as a literal. The claim is "one
+            // entity per property", and a hard-coded number states it only for as long as
+            // nobody adds a property to the fixture -- which is exactly how this assertion
+            // first failed, on a count that was wrong the day it was written.
+            Assert.AreEqual(PropertyCount(device), entities.Length, "one discovery message per property");
         }
 
         [TestMethod]
@@ -119,7 +122,7 @@ namespace SmartHome.UnitTests
 
             var entities = DiscoveryMapper.Map(device, new HomeAssistantSettings(), overrides);
 
-            Assert.AreEqual(5, entities.Length, "the excluded property is gone");
+            Assert.AreEqual(PropertyCount(device) - 1, entities.Length, "exactly one entity fewer");
             foreach (DiscoveryEntity entity in entities)
             {
                 Assert.IsFalse(entity.Topic.IndexOf("humidity") >= 0, "no humidity entity survived");
@@ -299,6 +302,18 @@ namespace SmartHome.UnitTests
                     .BuildProperty(out mode)
                 .BuildNode()
                 .BuildDevice();
+        }
+
+        /// <summary>Properties across every node of the device, i.e. how many entities to expect.</summary>
+        private static int PropertyCount(Device device)
+        {
+            var count = 0;
+            foreach (var node in device.Nodes)
+            {
+                count += node.Properties.Length;
+            }
+
+            return count;
         }
 
         private static DiscoveryEntity Find(DiscoveryEntity[] entities, string topic)
