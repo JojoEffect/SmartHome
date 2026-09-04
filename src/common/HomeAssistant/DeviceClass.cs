@@ -30,6 +30,14 @@ namespace SmartHome.HomeAssistant
         public const string Battery = "battery";
         public const string Moisture = "moisture";
 
+        // Not produced by FromUnit -- these exist only so
+        // AcceptsMeasurementStateClass can name the classes that refuse a measurement
+        // state class, which an app can reach through
+        // HomeAssistantAnnouncer.SetDeviceClass.
+        public const string Energy = "energy";
+        public const string Water = "water";
+        public const string Gas = "gas";
+
         /// <summary>
         /// The device class a Homie <c>$unit</c> implies, or <c>null</c> when it implies
         /// none.
@@ -72,5 +80,36 @@ namespace SmartHome.HomeAssistant
             // Assistant device class at all.
             _ => null,
         };
+
+        /// <summary>
+        /// Whether Home Assistant's <c>measurement</c> state class is valid for
+        /// <paramref name="deviceClass"/>.
+        /// </summary>
+        /// <remarks>
+        /// A device class constrains its state class as well as its unit, in a separate
+        /// table (<c>DEVICE_CLASS_STATE_CLASSES</c>, alongside the <c>DEVICE_CLASS_UNITS</c>
+        /// above), and the two are checked separately. Declaring a state class the class
+        /// forbids does not fail the discovery config -- it is reported per entity as
+        /// "impossible considering device class" and keeps the entity out of long-term
+        /// statistics, which is the one thing a state class is for.
+        ///
+        /// The classes that refuse it are the cumulative ones -- Home Assistant reads a
+        /// volume, an energy, a water or a gas figure as a meter reading and allows only
+        /// <c>total</c> and <c>total_increasing</c> there. <see cref="Volume"/> is the
+        /// only one <see cref="FromUnit"/> can return on its own (from a litre or a
+        /// gallon), but the other three are a <c>SetDeviceClass</c> call away, which is
+        /// the whole reason they are named above. Everything else this library can produce
+        /// -- temperature, humidity, both pressures, voltage, current, power, distance,
+        /// and the battery/moisture an app names itself -- takes <c>measurement</c>.
+        ///
+        /// A class outside both lists is allowed through: Home Assistant's own table is
+        /// the authority and it is longer than this, so an unknown name is more likely a
+        /// class this list has not caught up with than one that refuses the state class.
+        /// </remarks>
+        public static bool AcceptsMeasurementStateClass(string? deviceClass) =>
+            deviceClass != Volume
+            && deviceClass != Energy
+            && deviceClass != Water
+            && deviceClass != Gas;
     }
 }

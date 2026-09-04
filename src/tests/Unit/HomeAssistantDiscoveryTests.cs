@@ -228,20 +228,104 @@ namespace SmartHome.UnitTests
             // $format is a free string on the Homie side, and min/max go into the payload
             // as raw JSON numbers -- so anything that is not a bare number would produce
             // invalid JSON and lose the whole entity, not just its range.
-            var device = new HomieDeviceBuilder(_deviceTopicId, _deviceName)
-                .AddNode("engine", "Engine", "V8")
-                    .AddFloatProperty("setpoint", "Setpoint", 1.0)
-                        .WithSettable(true)
-                        .WithFormat("low:high")
-                    .BuildProperty(out _)
-                .BuildNode()
-                .BuildDevice();
+            var device = BuildSetpointDevice("low:high");
 
             var entities = DiscoveryMapper.Map(device, new HomeAssistantSettings());
             var payload = Find(entities, "homeassistant/number/super-car-engine-setpoint/config").Payload;
 
             AssertMissing(payload, "\"min\"");
             AssertMissing(payload, "\"max\"");
+        }
+
+        [TestMethod]
+        public void A_Reversed_Range_Declares_No_Range_Here_Either()
+        {
+            // "30:5" is a range PropertyBase.TryGetDeclaredRange refuses to read, so the
+            // device enforces nothing -- but Home Assistant's number schema requires
+            // max > min and rejects the entire config when it is not, so passing the two
+            // ends through independently costs the whole entity rather than its range.
+            var device = BuildSetpointDevice("30:5");
+
+            var entities = DiscoveryMapper.Map(device, new HomeAssistantSettings());
+            var payload = Find(entities, "homeassistant/number/super-car-engine-setpoint/config").Payload;
+
+            AssertMissing(payload, "\"min\"");
+            AssertMissing(payload, "\"max\"");
+        }
+
+        [TestMethod]
+        public void A_Range_End_That_Is_Not_A_Json_Number_Drops_The_Range()
+        {
+            // ".5" parses as a number for the property and is not one for JSON, which
+            // requires a digit before the point. Emitted raw it would make the payload
+            // unparseable, and Home Assistant drops an entity it cannot parse entirely --
+            // the failure this check exists to prevent, one digit-counting check short.
+            var device = BuildSetpointDevice(".5:10");
+
+            var entities = DiscoveryMapper.Map(device, new HomeAssistantSettings());
+            var payload = Find(entities, "homeassistant/number/super-car-engine-setpoint/config").Payload;
+
+            AssertMissing(payload, "\"min\"");
+            AssertMissing(payload, "\"max\"");
+        }
+
+        [TestMethod]
+        public void A_Spaced_Range_Is_Read_The_Way_The_Property_Reads_It()
+        {
+            // TryGetDeclaredRange trims both ends, so "5 : 30" is a range the device
+            // really does enforce. Dropping it here would leave Home Assistant's own
+            // 1..100 default offering values the device then refuses.
+            var device = BuildSetpointDevice("5 : 30");
+
+            var entities = DiscoveryMapper.Map(device, new HomeAssistantSettings());
+            var payload = Find(entities, "homeassistant/number/super-car-engine-setpoint/config").Payload;
+
+            AssertContains(payload, "\"min\":5");
+            AssertContains(payload, "\"max\":30");
+        }
+
+        [TestMethod]
+        public void Enum_Options_Are_Trimmed_The_Way_EnumProperty_Trims_Them()
+        {
+            // EnumProperty.Validate trims each declared value before comparing it to a
+            // payload, so "eco, sport" declares two names, not one of them with a space.
+            // Offering " sport" would give Home Assistant an option every selection of
+            // which the device's own property then rejects.
+            var device = new HomieDeviceBuilder(_deviceTopicId, _deviceName)
+                .AddNode("engine", "Engine", "V8")
+                    .AddEnumProperty("mode", "Mode", "eco")
+                        .WithFormat("eco, sport")
+                        .WithSettable(true)
+                    .BuildProperty(out _)
+                .BuildNode()
+                .BuildDevice();
+
+            var entities = DiscoveryMapper.Map(device, new HomeAssistantSettings());
+            var payload = Find(entities, "homeassistant/select/super-car-engine-mode/config").Payload;
+
+            AssertContains(payload, "\"options\":[\"eco\",\"sport\"]");
+        }
+
+        [TestMethod]
+        public void A_Settable_Enum_Without_A_Format_Becomes_A_Text_Entity()
+        {
+            // A select needs options, and Home Assistant rejects a config that carries
+            // none -- so a select built from a missing $format is an entity that never
+            // appears. EnumProperty accepts any payload when $format is missing, which is
+            // exactly a text control.
+            var device = new HomieDeviceBuilder(_deviceTopicId, _deviceName)
+                .AddNode("engine", "Engine", "V8")
+                    .AddEnumProperty("mode", "Mode", "eco")
+                        .WithSettable(true)
+                    .BuildProperty(out _)
+                .BuildNode()
+                .BuildDevice();
+
+            var entities = DiscoveryMapper.Map(device, new HomeAssistantSettings());
+            var payload = Find(entities, "homeassistant/text/super-car-engine-mode/config").Payload;
+
+            AssertContains(payload, "\"cmd_t\":\"homie/super-car/engine/mode/set\"");
+            AssertMissing(payload, "options");
         }
 
         [TestMethod]
@@ -262,6 +346,17 @@ namespace SmartHome.UnitTests
 
             AssertContains(payload, "\\\"fast\\\"");
         }
+
+        /// <summary>One settable float, so a test can vary nothing but its $format.</summary>
+        private static Device BuildSetpointDevice(string format) =>
+            new HomieDeviceBuilder(_deviceTopicId, _deviceName)
+                .AddNode("engine", "Engine", "V8")
+                    .AddFloatProperty("setpoint", "Setpoint", 1.0)
+                        .WithSettable(true)
+                        .WithFormat(format)
+                    .BuildProperty(out _)
+                .BuildNode()
+                .BuildDevice();
 
         private static Device BuildDevice() =>
             BuildDevice(out _, out _, out _, out _, out _, out _);

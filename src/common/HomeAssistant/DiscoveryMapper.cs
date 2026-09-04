@@ -126,6 +126,13 @@ namespace SmartHome.HomeAssistant
         /// property is one <c>r,g,b</c> string; pretending otherwise would produce a light
         /// that does not work. Until something maps a whole Homie node onto a light, a
         /// colour is reported as the string it is.
+        ///
+        /// A settable enum that declares no <c>$format</c> is the one case where
+        /// settability alone does not decide it. <c>options</c> is a required key of the
+        /// select schema and an empty list is rejected, so a select built from nothing is
+        /// an entity that never appears at all. <c>EnumProperty</c> deliberately accepts
+        /// any payload when <c>$format</c> is missing, and a free-text control is exactly
+        /// that property.
         /// </remarks>
         private static string ComponentFor(PropertyBase property)
         {
@@ -136,7 +143,9 @@ namespace SmartHome.HomeAssistant
                 DataType.Integer => settable ? Component.Number : Component.Sensor,
                 DataType.Float => settable ? Component.Number : Component.Sensor,
                 DataType.Boolean => settable ? Component.Switch : Component.BinarySensor,
-                DataType.Enum => settable ? Component.Select : Component.Sensor,
+                DataType.Enum => settable
+                    ? (OptionsOf(property.FormatAttribute.Value).Length > 0 ? Component.Select : Component.Text)
+                    : Component.Sensor,
                 _ => settable ? Component.Text : Component.Sensor,
             };
         }
@@ -203,10 +212,12 @@ namespace SmartHome.HomeAssistant
                     break;
 
                 case Component.Number:
+                    TryGetRange(property.FormatAttribute.Value, out var min, out var max);
+
                     json.String("unit_of_meas", property.UnitAttribute.Value.GetString())
                         .String("dev_cla", ResolveDeviceClass(property, propertyOverride))
-                        .Raw("min", MinOf(property.FormatAttribute.Value))
-                        .Raw("max", MaxOf(property.FormatAttribute.Value))
+                        .Raw("min", min)
+                        .Raw("max", max)
                         .Raw("step", StepOf(property))
                         // "box" gives a typed entry field rather than a slider. A slider
                         // needs a range to be meaningful, and $format is optional in
@@ -256,13 +267,18 @@ namespace SmartHome.HomeAssistant
 
             if (numeric)
             {
+                var deviceClass = ResolveDeviceClass(property, propertyOverride);
+
                 json.String("unit_of_meas", property.UnitAttribute.Value.GetString())
-                    .String("dev_cla", ResolveDeviceClass(property, propertyOverride))
+                    .String("dev_cla", deviceClass)
                     // Only a numeric sensor may carry a state class, and "measurement" is
                     // what makes Home Assistant keep long-term statistics for it -- the
                     // difference between a value you can see now and one you can graph
-                    // over a year.
-                    .String("stat_cla", "measurement");
+                    // over a year. Not every device class takes it, though, so the class
+                    // has the last word: see DeviceClass.AcceptsMeasurementStateClass.
+                    .String(
+                        "stat_cla",
+                        DeviceClass.AcceptsMeasurementStateClass(deviceClass) ? "measurement" : null);
             }
             else if (dataType == DataType.Enum)
             {
@@ -290,44 +306,70 @@ namespace SmartHome.HomeAssistant
             propertyOverride?.DeviceClass ?? DeviceClass.FromUnit(property.UnitAttribute.Value);
 
         /// <summary>
-        /// The <c>min</c> of a Homie <c>min:max</c> <c>$format</c>, or null when there is
+        /// The two ends of a Homie <c>min:max</c> <c>$format</c>, or false when there is
         /// no usable range.
         /// </summary>
         /// <remarks>
-        /// Emitted raw, as a JSON number, because that is what Home Assistant's schema
+        /// Emitted raw, as JSON numbers, because that is what Home Assistant's schema
         /// expects for <c>min</c>/<c>max</c>/<c>step</c> -- and because the substring is
         /// already the literal Homie published, so re-parsing it into a double and
         /// re-formatting it could only lose precision or reintroduce the decimal-separator
         /// problem <c>FloatProperty.FormatValue</c> exists to solve.
         ///
+        /// Read the way <c>PropertyBase.TryGetDeclaredRange</c> reads it, and that is the
+        /// point: whatever range the property will actually enforce is the range Home
+        /// Assistant has to offer. So both ends are trimmed (that helper trims too, and
+        /// "5 : 30" is a range the device really does enforce), and the pair is taken or
+        /// dropped together -- one end alone leaves Home Assistant's own default standing
+        /// at the other, and its number schema rejects the whole config outright when the
+        /// two cross. A <c>$format</c> the device itself declines to read as a range, such
+        /// as a reversed "30:5", declares no range here either.
+        ///
         /// Omitting both leaves Home Assistant's own 1..100 default, which is wrong for
         /// most setpoints -- so a settable numeric property really should declare a
         /// <c>$format</c>. That is a Homie-side fix, not something this mapper can invent.
         /// </remarks>
-        private static string? MinOf(string? format) => RangePart(format, 0);
-
-        private static string? MaxOf(string? format) => RangePart(format, 1);
-
-        private static string? RangePart(string? format, int index)
+        private static bool TryGetRange(string? format, out string? min, out string? max)
         {
+            min = null;
+            max = null;
+
             if (format == null || format.Length == 0)
             {
-                return null;
+                return false;
             }
 
             var parts = format.Split(':');
             if (parts.Length != 2)
             {
-                return null;
+                return false;
             }
 
-            var part = parts[index];
+            var low = parts[0].Trim();
+            var high = parts[1].Trim();
 
             // Anything that is not a bare number would be injected into the payload as a
             // raw JSON token and would corrupt it. Checked rather than trusted: $format is
             // a free string on the Homie side, and a malformed one is a device bug, not a
             // reason to publish invalid JSON.
-            return IsNumericLiteral(part) ? part : null;
+            if (!IsJsonNumber(low) || !IsJsonNumber(high))
+            {
+                return false;
+            }
+
+            // Parsed as well as shape-checked, so the pair can be compared. Home Assistant
+            // requires max > min and refuses the entity when it is not, which loses far
+            // more than the range.
+            if (!double.TryParse(low, out var lowValue)
+                || !double.TryParse(high, out var highValue)
+                || lowValue >= highValue)
+            {
+                return false;
+            }
+
+            min = low;
+            max = high;
+            return true;
         }
 
         /// <summary>
@@ -368,37 +410,88 @@ namespace SmartHome.HomeAssistant
         /// The values of a Homie enum <c>$format</c>.
         /// </summary>
         /// <remarks>
-        /// Split on ',' and used verbatim, with no trimming, because that is exactly what
-        /// <see cref="EnumProperty"/> does when it decides whether to accept a payload. If
-        /// this trimmed and that did not, Home Assistant would offer an option the device
-        /// then refuses.
+        /// Trimmed, because <c>EnumProperty.Validate</c> trims each declared value
+        /// before comparing it to a payload and this has to offer exactly the values that
+        /// comparison will accept. Untrimmed, a <c>$format</c> written "eco, sport" -- a
+        /// spelling that file explicitly supports -- put " sport" in Home Assistant's
+        /// option list, and every attempt to select it came back to the device as a
+        /// payload its own property then rejected.
         /// </remarks>
-        private static string[] OptionsOf(string? format) =>
-            format == null || format.Length == 0 ? new string[0] : format.Split(',');
-
-        private static bool IsNumericLiteral(string value)
+        private static string[] OptionsOf(string? format)
         {
-            if (value.Length == 0)
+            if (format == null || format.Length == 0)
+            {
+                return new string[0];
+            }
+
+            var options = format.Split(',');
+            for (int i = 0; i < options.Length; i++)
+            {
+                options[i] = options[i].Trim();
+            }
+
+            return options;
+        }
+
+        /// <summary>
+        /// Whether <paramref name="value"/> is a JSON number literal that can be written
+        /// into a payload as-is.
+        /// </summary>
+        /// <remarks>
+        /// Shape, not just "digits and dots". JSON requires a digit on both sides of the
+        /// decimal point, so ".5", "1." and "1.2.3" are not numbers -- and a merely
+        /// digit-counting check let all three through as raw tokens, which is a payload
+        /// Home Assistant cannot parse at all. That costs the whole entity rather than
+        /// just its range, and silently: the device sees a successful publish.
+        ///
+        /// Exponents are not accepted. JSON allows them, but no Homie <c>$format</c> in
+        /// this codebase writes one and accepting a form that cannot be checked here as
+        /// cheaply is not worth the surface.
+        /// </remarks>
+        private static bool IsJsonNumber(string value)
+        {
+            var index = 0;
+
+            if (index < value.Length && value[index] == '-')
+            {
+                index++;
+            }
+
+            var integerDigits = 0;
+            while (index < value.Length && IsDigit(value[index]))
+            {
+                index++;
+                integerDigits++;
+            }
+
+            if (integerDigits == 0)
             {
                 return false;
             }
 
-            var digits = 0;
-            for (int i = 0; i < value.Length; i++)
+            if (index == value.Length)
             {
-                var c = value[i];
-                if (c >= '0' && c <= '9')
-                {
-                    digits++;
-                }
-                else if (!((c == '-' && i == 0) || c == '.'))
-                {
-                    return false;
-                }
+                return true;
             }
 
-            return digits > 0;
+            if (value[index] != '.')
+            {
+                return false;
+            }
+
+            index++;
+
+            var fractionDigits = 0;
+            while (index < value.Length && IsDigit(value[index]))
+            {
+                index++;
+                fractionDigits++;
+            }
+
+            return fractionDigits > 0 && index == value.Length;
         }
+
+        private static bool IsDigit(char c) => c >= '0' && c <= '9';
 
         private static string BuildDeviceBlock(Device device, HomeAssistantSettings settings) =>
             new JsonWriter()

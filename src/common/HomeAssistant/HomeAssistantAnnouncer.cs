@@ -130,15 +130,26 @@ namespace SmartHome.HomeAssistant
         }
 
         /// <summary>Stops re-announcing. The published configuration stays where it is.</summary>
+        /// <remarks>
+        /// The handlers come off unconditionally, ahead of the flag check. Attach()
+        /// registers them before it issues the SUBSCRIBE, and that call throws whenever
+        /// the link is momentarily down -- which leaves the handlers live while _attached
+        /// is still false. Guarding their removal on the flag made Detach() a silent
+        /// no-op in exactly that case, and the announcer went on re-announcing after the
+        /// app had asked it to stop. Removing a handler that was never added is a no-op,
+        /// so the unguarded form is safe in the ordinary case too. The UNSUBSCRIBE stays
+        /// guarded: there is nothing to undo when the SUBSCRIBE never got out.
+        /// </remarks>
         public void Detach()
         {
+            _mqttClient.MqttMsgPublishReceived -= HandleIncomingMessage;
+            _mqttClient.ConnectionOpened -= HandleConnectionOpened;
+
             if (!_attached)
             {
                 return;
             }
 
-            _mqttClient.MqttMsgPublishReceived -= HandleIncomingMessage;
-            _mqttClient.ConnectionOpened -= HandleConnectionOpened;
             _mqttClient.Unsubscribe(new string[] { HomeAssistantTopics.StatusTopic });
 
             _attached = false;
@@ -148,14 +159,7 @@ namespace SmartHome.HomeAssistant
         /// Publishes one retained discovery configuration per property.
         /// </summary>
         /// <returns>False when a publish failed, so a caller can retry.</returns>
-        public bool Announce()
-        {
-            var entities = DiscoveryMapper.Map(_device, _settings, _overrides);
-
-            _logger.LogInformation($"Announcing {entities.Length} Home Assistant entities for device '{_device.TopicId}'.");
-
-            return PublishAll(entities, remove: false);
-        }
+        public bool Announce() => MapAndPublish(remove: false);
 
         /// <summary>
         /// Withdraws every entity: an empty retained payload on each discovery topic.
@@ -171,14 +175,7 @@ namespace SmartHome.HomeAssistant
         /// An empty payload is also how MQTT deletes a retained message, so this clears
         /// the broker's store as well as the entity -- the two are the same act.
         /// </remarks>
-        public bool Remove()
-        {
-            var entities = DiscoveryMapper.Map(_device, _settings, _overrides);
-
-            _logger.LogInformation($"Removing {entities.Length} Home Assistant entities for device '{_device.TopicId}'.");
-
-            return PublishAll(entities, remove: true);
-        }
+        public bool Remove() => MapAndPublish(remove: true);
 
         private EntityOverride OverrideFor(PropertyBase property)
         {
@@ -197,6 +194,39 @@ namespace SmartHome.HomeAssistant
             var created = new EntityOverride();
             _overrides[topic] = created;
             return created;
+        }
+
+        /// <summary>
+        /// Builds the discovery messages and puts them on the wire, letting nothing out.
+        /// </summary>
+        /// <remarks>
+        /// The mapping is guarded for the same reason each publish below is, and it is the
+        /// same reason: both re-announce paths reach this from M2Mqtt's dispatch thread,
+        /// whose catch-all does not merely log an escaping exception -- it treats one as a
+        /// dead connection and tears the session down. Mapping is not a step that cannot
+        /// fail: it allocates a JSON payload per property, on a device with tens of
+        /// kilobytes to spare, so leaving it outside the guard left "Announce() never
+        /// throws" true only by luck.
+        /// </remarks>
+        private bool MapAndPublish(bool remove)
+        {
+            DiscoveryEntity[] entities;
+
+            try
+            {
+                entities = DiscoveryMapper.Map(_device, _settings, _overrides);
+
+                _logger.LogInformation(remove
+                    ? $"Removing {entities.Length} Home Assistant entities for device '{_device.TopicId}'."
+                    : $"Announcing {entities.Length} Home Assistant entities for device '{_device.TopicId}'.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Could not build the Home Assistant discovery messages for device '{_device.TopicId}'.");
+                return false;
+            }
+
+            return PublishAll(entities, remove);
         }
 
         private bool PublishAll(DiscoveryEntity[] entities, bool remove)
