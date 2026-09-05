@@ -1,4 +1,4 @@
-# scripts\Run-IntegrationTests.ps1 -- the host-side half of the integration suite.
+﻿# scripts\Run-IntegrationTests.ps1 -- the host-side half of the integration suite.
 #
 # This is the half that decides every verdict the suite reports, and the half with no
 # coverage at all until issue #74. Dot-sourcing the script defines its functions and its
@@ -360,6 +360,131 @@ Describe 'Get-DeviceMarkerVerdict' {
 
         Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
         Assert-Equal -Expected 'ok' -Actual $verdict.Detail
+    }
+}
+
+Describe 'Test-DeviceConstant' {
+    # The pre-flight's stale-constant warning. A compile-time constant in a device
+    # project cannot be read from local.env.ps1, so the two drift, and the whole value of
+    # this check is that it turns "the test failed on a healthy device" into a warning
+    # naming both values. Every one of its three silent paths -- no file, no match, a
+    # match that agrees -- looks identical from the console, which is why they are
+    # separated here rather than covered by "it warned once".
+
+    function New-ProgramFile {
+        param(
+            [string[]]$Lines,
+            [string]$Directory = 'device-constant'
+        )
+        $path = Join-Path (New-TestDirectory -Name $Directory) 'Program.cs'
+        Set-TestFileContent -Path $path -Content $Lines
+        return $path
+    }
+
+    function Get-ConstantWarning {
+        # 3>&1 turns the warnings into objects this can count and read.
+        #
+        # Every caller wraps this in @(), and has to: a return unrolls, so one warning
+        # comes back as a bare string and none comes back as $null -- and .Count on
+        # either is a PropertyNotFoundException under Set-StrictMode -Version Latest,
+        # not a 1 and a 0. Wrapping HERE instead would be the ,@() shape issue #88 is
+        # about, which member-enumerates the moment a caller pipes it.
+        param([string]$ProgramPath, [string]$Pattern, [string]$Expected)
+
+        return (Test-DeviceConstant -Label 'MqttCheck' -ProgramPath $ProgramPath `
+                                    -Pattern $Pattern -Expected $Expected `
+                                    -What 'the broker address' 3>&1 |
+            ForEach-Object { $_.Message })
+    }
+
+    $brokerPattern = 'BrokerAddress\s*=\s*"([^"]+)"'
+
+    It 'warns naming both values when the constant has drifted' {
+        $program = New-ProgramFile -Lines @(
+            'internal sealed class Program {'
+            '    private const string BrokerAddress = "192.168.1.99";'
+            '}'
+        )
+
+        $warnings = @(Get-ConstantWarning -ProgramPath $program -Pattern $brokerPattern -Expected '192.168.1.238')
+
+        Assert-Equal -Expected 1 -Actual $warnings.Count
+        # Both values in the message, not just "they differ": which of the two is stale
+        # is the reader's call, and it cannot be made without seeing them.
+        Assert-Match -Actual $warnings[0] -Pattern ([regex]::Escape('192.168.1.99'))
+        Assert-Match -Actual $warnings[0] -Pattern ([regex]::Escape('192.168.1.238'))
+        Assert-Match -Actual $warnings[0] -Pattern 'MqttCheck'
+        Assert-Match -Actual $warnings[0] -Pattern 'the broker address'
+    }
+
+    It 'says nothing when the constant agrees' {
+        $program = New-ProgramFile -Lines @('const string BrokerAddress = "192.168.1.238";')
+
+        Assert-Equal -Expected 0 -Actual @(Get-ConstantWarning -ProgramPath $program `
+            -Pattern $brokerPattern -Expected '192.168.1.238').Count
+    }
+
+    It 'compares the first capture group, not the whole match' {
+        # The pattern deliberately matches more than the value -- the surrounding
+        # assignment is what makes it unambiguous -- so a comparison against $0 would
+        # never agree with anything and the check would warn on every healthy run.
+        $program = New-ProgramFile -Lines @('const string BrokerAddress = "10.0.0.1";')
+
+        Assert-Equal -Expected 0 -Actual @(Get-ConstantWarning -ProgramPath $program `
+            -Pattern $brokerPattern -Expected '10.0.0.1').Count
+    }
+
+    It 'takes the first match when the file holds several' {
+        $program = New-ProgramFile -Lines @(
+            'const string BrokerAddress = "10.0.0.1";'
+            'const string FallbackAddress = "10.0.0.2";'
+            '// BrokerAddress = "10.0.0.3"'
+        )
+
+        Assert-Equal -Expected 0 -Actual @(Get-ConstantWarning -ProgramPath $program `
+            -Pattern $brokerPattern -Expected '10.0.0.1').Count
+    }
+
+    It 'says nothing about a project that has no Program.cs' {
+        # The path is handed in rather than derived, and a caller can name a test that
+        # does not exist. Returning quietly is right; throwing here would abort a
+        # pre-flight over a warning.
+        $absent = Join-Path (New-TestDirectory -Name 'no-program') 'Program.cs'
+
+        Assert-Equal -Expected 0 -Actual @(Get-ConstantWarning -ProgramPath $absent `
+            -Pattern $brokerPattern -Expected '192.168.1.238').Count
+    }
+
+    It 'says nothing when the constant is not in the file at all' {
+        # Distinct from the case above, and the more dangerous of the two: the file is
+        # there and readable, so a renamed constant reads exactly like one that agrees.
+        # Pinned so a future "warn when the pattern finds nothing" is a deliberate change.
+        $program = New-ProgramFile -Lines @('const string SomethingElse = "192.168.1.99";')
+
+        Assert-Equal -Expected 0 -Actual @(Get-ConstantWarning -ProgramPath $program `
+            -Pattern $brokerPattern -Expected '192.168.1.238').Count
+    }
+
+    It 'is silent about a drifted constant under a bracketed path -- issue #80' {
+        # Pinned as it behaves today, NOT endorsed. Both reads here are -Path, so a '['
+        # anywhere in the checkout makes them wildcard patterns matching nothing:
+        # Test-Path returns false and the function returns as if the project had no
+        # Program.cs. The stale-broker warning then never fires on exactly the machine
+        # whose path is unusual -- the #71 defect class, and two of the 24 sites #80
+        # counts in this file.
+        #
+        # #80's sweep must invert this case rather than delete it: the same fixture, one
+        # warning instead of none.
+        $program = New-ProgramFile -Directory 'device [constant]' -Lines @(
+            'const string BrokerAddress = "192.168.1.99";'
+        )
+
+        Assert-Equal -Expected 0 -Actual @(Get-ConstantWarning -ProgramPath $program `
+            -Pattern $brokerPattern -Expected '192.168.1.238').Count
+
+        # And the file really is there, so the silence above is the path handling and
+        # nothing else.
+        Assert-True -Condition (Test-Path -LiteralPath $program)
     }
 }
 
@@ -841,6 +966,955 @@ Describe 'The subscriber-log waits' {
 
         Assert-False -Condition (Wait-ForEcho -Topic 'homie/x/echo' -Payload 'echo-7' -TimeoutSeconds 1 `
                                               -Port '1883' -CommandTopic 'homie/x/echo/set')
+    }
+}
+
+Describe 'Invoke-BrokerOutageCheck' {
+    # MqttReconnectCheck's verdict. Everything it decides is decided from the subscriber
+    # log -- the baseline heartbeat, the counter across the outage, the echo -- and only
+    # taking the broker away is not. So the three broker calls are the stubs and nothing
+    # else is: Wait-Heartbeat, Wait-ForEcho and Wait-ForSubscriberLogLine all run for
+    # real, against a fixture log, through the same Get-SmartHomeDevEnvPath stub the
+    # waits' own cases use.
+    #
+    # The stubs stand in for what the real ones do to that log, not for their signatures
+    # alone. Start-DevEnv.ps1 truncates the subscriber log on every start, and this check
+    # rests on that: it is the whole reason a phase's heartbeats can only be ones
+    # published after that phase's broker came up. So each stub truncates and refills,
+    # and the fixture is written in those terms -- what the device publishes once the
+    # opening cycle's broker is up, and what it publishes after each outage. A stub that
+    # left the log alone would let a case pass on a heartbeat from before the outage it
+    # claims to have survived.
+
+    # Names of their own, not $script:subscriberLog / $script:published. Those belong to
+    # the subscriber-log waits above, and sharing them would work only while both groups
+    # reset first and run in file order -- a passing suite resting on an accident, which
+    # is what a review pass caught in the group below this one.
+    $script:outageLog = $null
+    $script:outageEvents = @()
+    $script:outagePublished = @()
+
+    function Get-SmartHomeDevEnvPath {
+        param([string]$Port, [string]$Kind)
+        return $script:outageLog
+    }
+
+    function Set-OutageLog {
+        param([string[]]$Lines)
+        Set-TestFileContent -Path $script:outageLog -Content $Lines
+    }
+
+    function Reset-OutageFixture {
+        # -Baseline is what the device has published once the opening cycle's broker is
+        # up; -Recovery the same for each outage, one entry per Start-SuiteBroker, the
+        # last repeating if there are more outages than entries. -NoEcho models a client
+        # that reconnected without replaying its subscriptions.
+        param(
+            [string[]]$Baseline = @(),
+            [string[][]]$Recovery = @(),
+            [switch]$NoEcho
+        )
+
+        $script:outageLog = Join-Path (New-TestDirectory -Name 'outage-log') 'homie.log'
+        $script:outageEvents = @()
+        $script:outagePublished = @()
+        $script:outageBaseline = $Baseline
+        $script:outageRecovery = $Recovery
+        $script:outageStarts = 0
+        $script:outageEchoes = -not $NoEcho
+        $script:outageEchoTopic = 'homie/mqtt-reconnect-check/echo'
+
+        # Deliberately not empty: the case below that proves the opening cycle happened
+        # needs something here the check must NOT read. Overwritten by that cycle.
+        Set-OutageLog -Lines @('homie/mqtt-reconnect-check/heartbeat 0 heartbeat 400')
+    }
+
+    function Restart-SuiteBroker {
+        param([string]$Port, [int]$SettleSeconds = 0)
+        $script:outageEvents += 'restart'
+        Set-OutageLog -Lines $script:outageBaseline
+    }
+
+    function Stop-SuiteBroker {
+        param([string]$Port)
+        $script:outageEvents += 'stop'
+        Set-OutageLog -Lines @()
+    }
+
+    function Start-SuiteBroker {
+        param([string]$Port)
+        $script:outageEvents += 'start'
+        $index = [math]::Min($script:outageStarts, $script:outageRecovery.Count - 1)
+        # @() around the if, because an if hands back its branch's output stream: the
+        # "device published nothing" entry is an empty array, which enumerates to nothing
+        # and leaves $lines as $null rather than empty. Set-TestFileContent's -Content is
+        # mandatory and allows an empty collection but not a null, so that reads as a
+        # broken fixture rather than as the silent device it is meant to be.
+        $lines = @(if ($index -lt 0) { @() } else { $script:outageRecovery[$index] })
+        $script:outageStarts++
+        Set-OutageLog -Lines $lines
+    }
+
+    function Publish-HomieCommand {
+        param([string]$Port, [string]$Topic, [string]$Payload)
+        $script:outagePublished += $Payload
+        # The device echoing what it was sent, which is what MqttReconnectCheck's app
+        # does. Only a replayed subscription can produce this line, so withholding it is
+        # the "connected and deaf" case rather than a missing fixture.
+        if ($script:outageEchoes) {
+            Add-Content -LiteralPath $script:outageLog -Encoding UTF8 `
+                        -Value ('{0} 0 {1}' -f $script:outageEchoTopic, $Payload)
+        }
+    }
+
+    function New-OutageSettings {
+        # Seconds are 1 where the shipped catalog says 90: every one of them is a
+        # deadline this suite has to sit through whenever a case is a timeout.
+        param([int[]]$OutageSeconds = @(0))
+
+        return @{
+            HeartbeatTopic        = 'homie/mqtt-reconnect-check/heartbeat'
+            SettleSeconds         = 1
+            OutageSeconds         = $OutageSeconds
+            RecoverySeconds       = 1
+            EchoCommandTopic      = 'homie/mqtt-reconnect-check/echo/set'
+            EchoTopic             = 'homie/mqtt-reconnect-check/echo'
+            CommandTimeoutSeconds = 1
+        }
+    }
+
+    function Invoke-Outage {
+        # 6> $null, because this function narrates every phase with Write-Host and the
+        # runner does not swallow stream 6.
+        param([hashtable]$Settings)
+        return (Invoke-BrokerOutageCheck -Settings $Settings -Port '1883' -LogPath 'unused' 6> $null)
+    }
+
+    function New-Heartbeat {
+        param($Counter)
+        return @(('homie/mqtt-reconnect-check/heartbeat 0 heartbeat {0}' -f $Counter))
+    }
+
+    It 'PASSes when the counter climbed across the outage and the echo came back' {
+        Reset-OutageFixture -Baseline (New-Heartbeat 4) -Recovery @(, (New-Heartbeat 9))
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern 'stayed subscribed'
+    }
+
+    It 'cycles the broker before it reads a baseline' {
+        # The baseline has to belong to the instance now on the device. Whatever was
+        # flashed before it kept publishing on the same topic right through the build and
+        # the flash, so a baseline read from the log as found can be a previous app's --
+        # and a counter compared against that proves nothing.
+        #
+        # The fixture starts at 400 and the cycle replaces it with 2. Reading the log as
+        # found would make this 400 -> 7 and therefore RESTARTED, so the verdict is the
+        # assertion that the read happened after the cycle -- not merely that the cycle
+        # was called.
+        Reset-OutageFixture -Baseline (New-Heartbeat 2) -Recovery @(, (New-Heartbeat 7))
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'restart' -Actual $script:outageEvents[0]
+        Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
+    }
+
+    It 'reports RESTARTED when the counter went backwards' {
+        # The distinction the whole check exists for: a device that recovered by rebooting
+        # publishes again just as reliably as one that reconnected, and only the counter
+        # tells them apart.
+        Reset-OutageFixture -Baseline (New-Heartbeat 40) -Recovery @(, (New-Heartbeat 1))
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'RESTARTED' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern '40 -> 1'
+    }
+
+    It 'reports RESTARTED for a counter that merely stayed put' {
+        # -le, not -lt. A counter that did not move is no evidence of a reconnect either,
+        # and an app that restarted between two reads of the same value would otherwise
+        # be reported as having survived the outage.
+        Reset-OutageFixture -Baseline (New-Heartbeat 7) -Recovery @(, (New-Heartbeat 7))
+
+        Assert-Equal -Expected 'RESTARTED' -Actual (Invoke-Outage -Settings (New-OutageSettings)).Outcome
+    }
+
+    It 'does not call RESTARTED on a heartbeat carrying no counter' {
+        # Wait-Heartbeat reports a null counter rather than failing, and in PowerShell
+        # $null -le 7 is true -- so without the two null guards a payload format change
+        # would turn every run into RESTARTED, blaming the device for a parse.
+        Reset-OutageFixture -Baseline @('homie/mqtt-reconnect-check/heartbeat 0 alive') `
+                            -Recovery @(, @('homie/mqtt-reconnect-check/heartbeat 0 alive'))
+
+        Assert-Equal -Expected 'PASS' -Actual (Invoke-Outage -Settings (New-OutageSettings)).Outcome
+    }
+
+    It 'reports NO-RESULT when the device never reached the broker at all' {
+        # Not FAIL: there was nothing to disconnect, so this says nothing about
+        # reconnecting. The detail has to carry that, because the two read alike on the
+        # summary line.
+        Reset-OutageFixture -Baseline @() -Recovery @()
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'NO-RESULT' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern 'nothing to disconnect'
+        # And it stopped there rather than taking away a broker it had no baseline for.
+        Assert-ArrayEqual -Expected @('restart') -Actual $script:outageEvents
+    }
+
+    It 'reports FAIL when no heartbeat returned after the broker came back' {
+        Reset-OutageFixture -Baseline (New-Heartbeat 3) -Recovery @(, @())
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'FAIL' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern 'did not reconnect'
+    }
+
+    It 'reports FAIL when heartbeats resumed but the echo never came' {
+        # The case the echo exists for. Publishing resumes as soon as the socket is up, so
+        # a client that reconnected and replayed no subscriptions looks healthy from the
+        # heartbeat alone -- connected and deaf.
+        Reset-OutageFixture -Baseline (New-Heartbeat 2) -Recovery @(, (New-Heartbeat 8)) -NoEcho
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'FAIL' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern 'without replaying its subscriptions'
+        Assert-Match -Actual $verdict.Detail -Pattern 'echo-8'
+        # And it did publish: a check reporting FAIL having sent nothing would be
+        # measuring its own silence.
+        Assert-True -Condition ($script:outagePublished.Count -ge 1)
+        Assert-Equal -Expected 'echo-8' -Actual $script:outagePublished[0]
+    }
+
+    It 'names the nonce after the counter it last saw' {
+        # echo-<counter>, so the payload required back differs on every outage. A fixed
+        # nonce would be satisfied by the previous round's echo sitting in the log.
+        Reset-OutageFixture -Baseline (New-Heartbeat 2) -Recovery @(, (New-Heartbeat 55))
+
+        Assert-Equal -Expected 'PASS' -Actual (Invoke-Outage -Settings (New-OutageSettings)).Outcome
+        Assert-Equal -Expected 'echo-55' -Actual $script:outagePublished[0]
+    }
+
+    It 'takes the broker down once per entry in OutageSeconds' {
+        Reset-OutageFixture -Baseline (New-Heartbeat 1) `
+                            -Recovery @((New-Heartbeat 9), (New-Heartbeat 12))
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings -OutageSeconds @(0, 0))
+
+        Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
+        Assert-ArrayEqual -Expected @('restart', 'stop', 'start', 'stop', 'start') -Actual $script:outageEvents
+        # Both lengths in the detail, so the summary line says what was actually survived.
+        Assert-Match -Actual $verdict.Detail -Pattern '0s, 0s'
+    }
+
+    It 'carries the counter forward, so the second outage is measured against the first' {
+        # $before is reassigned from $latest at the top of every round. Comparing each
+        # outage against the original baseline instead would report a device that
+        # restarted during the second outage as PASS, as long as its counter had passed
+        # the pre-outage one -- 12 is above the baseline of 1 and below the 30 it reached.
+        #
+        # The two lengths differ (0s, then 1s) so the detail's "1s outage" also proves the
+        # label names the outage being run rather than the first one. One second, not the
+        # catalog's 20: Invoke-BrokerOutageCheck really does Start-Sleep for it.
+        Reset-OutageFixture -Baseline (New-Heartbeat 1) `
+                            -Recovery @((New-Heartbeat 30), (New-Heartbeat 12))
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings -OutageSeconds @(0, 1))
+
+        Assert-Equal -Expected 'RESTARTED' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern '30 -> 12'
+        Assert-Match -Actual $verdict.Detail -Pattern '1s outage'
+    }
+
+    It 'reports ERROR naming the phase when the broker cannot be cycled' {
+        Reset-OutageFixture -Baseline @() -Recovery @()
+        function Restart-SuiteBroker {
+            param([string]$Port, [int]$SettleSeconds = 0)
+            throw 'could not start the broker on port 1883: port in use'
+        }
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'ERROR' -Actual $verdict.Outcome
+        # A host-side fault reported as the device's would be the worst outcome this
+        # function can produce, so the phase is part of the detail, not just the message.
+        Assert-Match -Actual $verdict.Detail -Pattern 'port in use'
+        Assert-Match -Actual $verdict.Detail -Pattern 'before measuring'
+    }
+
+    It 'reports ERROR naming the outage it was starting when the stop failed' {
+        Reset-OutageFixture -Baseline (New-Heartbeat 1) -Recovery @(, (New-Heartbeat 2))
+        function Stop-SuiteBroker {
+            param([string]$Port)
+            throw 'could not stop the broker on port 1883: access denied'
+        }
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings -OutageSeconds @(3))
+
+        Assert-Equal -Expected 'ERROR' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern 'access denied'
+        Assert-Match -Actual $verdict.Detail -Pattern 'starting the 3s outage'
+    }
+
+    It 'reports ERROR naming the outage it had just run when the restart failed' {
+        Reset-OutageFixture -Baseline (New-Heartbeat 1) -Recovery @(, (New-Heartbeat 2))
+        function Start-SuiteBroker {
+            param([string]$Port)
+            $script:outageEvents += 'start'
+            throw 'could not start the broker on port 1883: port still held'
+        }
+
+        # 1s rather than the 3s above: this one reaches the Start-Sleep, the stop-failure
+        # case throws before it. The two lengths differing is also what shows each label
+        # is read from the outage in hand.
+        $verdict = Invoke-Outage -Settings (New-OutageSettings -OutageSeconds @(1))
+
+        Assert-Equal -Expected 'ERROR' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern 'port still held'
+        Assert-Match -Actual $verdict.Detail -Pattern 'after the 1s outage'
+    }
+}
+
+Describe 'The snapshot capture window' {
+    # Start-HomieCapture, Stop-HomieCapture and the Get-HomieRetainedSnapshot that is the
+    # two of them plus a parse. This is the pair issue #84 names first among the
+    # uncovered, and the pair a conformance verdict is computed from: what the window
+    # caught, and whether it was open when the caller published into it.
+    #
+    # The subscriber is a scripted cmd.exe script rather than mosquitto_sub, so a case can
+    # say what arrives and when. Start-HomieCapture redirects its stdout into the capture
+    # file exactly as it does the real one's, so what is exercised is the shipped
+    # redirect, the shipped connect wait and the shipped teardown -- no broker, no device,
+    # no network. That is the technique #59's throwaway harness used and #102 re-proved
+    # against a live broker; this is it in the repository.
+    #
+    # 'ping -n' is the delay, not 'timeout': timeout needs a console and there is none
+    # behind Start-Process -WindowStyle Hidden. 'ping -n <n+1>' is about n seconds.
+
+    $script:captureFile = $null
+    $script:fakeSubscriber = $null
+    $script:preservedCaptures = @()
+
+    function Get-SmartHomeDevEnvPath {
+        param([string]$Port, [string]$Kind)
+        return $script:captureFile
+    }
+
+    function Get-SmartHomeMosquittoTool {
+        param([string]$Name, [string]$Directory)
+        return $script:fakeSubscriber
+    }
+
+    function Get-SmartHomeSubscriberArgumentString {
+        param([string]$Port)
+        return ''
+    }
+
+    function Save-SnapshotEvidence {
+        # The real one copies into $LogDirectory, which a dot-source leaves empty -- it
+        # would warn on every window here and say nothing about the subject. Recorded
+        # instead, because *that it ran* is a claim worth making: it is in a finally, and
+        # the window is the only record of what a verdict was reached on.
+        param([hashtable]$Capture)
+        $script:preservedCaptures += $Capture.Path
+    }
+
+    function Set-FakeSubscriber {
+        # -Script is cmd.exe lines. Whatever they echo is what the window catches.
+        param([string[]]$Script, [string]$Directory = 'capture')
+
+        $dir = New-TestDirectory -Name $Directory
+        $script:captureFile = Join-Path $dir 'snapshot.log'
+        $script:fakeSubscriber = Join-Path $dir 'fake-sub.cmd'
+        # ASCII and no BOM: cmd.exe reads a UTF-8 BOM as part of the first command.
+        Set-Content -LiteralPath $script:fakeSubscriber -Encoding ascii `
+                    -Value (@('@echo off') + $Script)
+        $script:preservedCaptures = @()
+    }
+
+    function Get-DelayLine {
+        param([int]$Seconds)
+        return ('ping -n {0} 127.0.0.1 > nul' -f ($Seconds + 1))
+    }
+
+    function Start-TestCapture {
+        # Returns the capture record and whatever was warned, separately: several claims
+        # here are about the warning and not about the record.
+        param([int]$WaitForConnectSeconds = 0, [int]$ClearTimeoutSeconds = 5)
+
+        $emitted = @(Start-HomieCapture -Port '1883' `
+                                        -WaitForConnectSeconds $WaitForConnectSeconds `
+                                        -ClearTimeoutSeconds $ClearTimeoutSeconds 3>&1)
+
+        return @{
+            Capture  = @($emitted | Where-Object { $_ -is [hashtable] })[0]
+            Warnings = @($emitted |
+                Where-Object { $_ -is [System.Management.Automation.WarningRecord] } |
+                ForEach-Object { $_.Message })
+        }
+    }
+
+    function Stop-TestCapture {
+        param([hashtable]$Capture, [int]$SettleSeconds = 0)
+
+        $emitted = @(Stop-HomieCapture -Capture $Capture -SettleSeconds $SettleSeconds 3>&1)
+
+        return @{
+            Lines    = @($emitted | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] })
+            Warnings = @($emitted |
+                Where-Object { $_ -is [System.Management.Automation.WarningRecord] } |
+                ForEach-Object { $_.Message })
+        }
+    }
+
+    function Stop-Leftover {
+        # Nothing here may outlive its case: a surviving cmd.exe holds the capture file
+        # open and the next case's removal loop then spends its budget on it.
+        #
+        # Neither Common.ps1 helper can be used for this. Stop-SmartHomeRecordedProcess is
+        # replaced by a stub that throws in one case below, and Get-SmartHomeRecordedProcess
+        # by one that always reports "gone" in another -- and this runs in both of those
+        # cases' finally blocks, so routing through either name breaks the cleanup on
+        # exactly the cases that need it most.
+        #
+        # So the identity check is inlined rather than dropped. Several cases here use a
+        # subscriber that exits within milliseconds, which means this often runs against a
+        # pid that is already dead -- and taskkill /T /F on a pid Windows has since
+        # reissued would force-kill an unrelated process tree on a developer's machine.
+        # That is the hazard Get-SmartHomeRecordedProcess's own comment is about; a test
+        # helper does not get to opt out of it.
+        param([hashtable]$Capture)
+
+        if (-not $Capture) { return }
+
+        $process = Get-Process -Id $Capture.Record.Id -ErrorAction SilentlyContinue
+        if ($null -eq $process) { return }
+
+        # Both reads inside the try, for the reason Get-SmartHomeRecordedProcess gives:
+        # a process that exits between the lookup and either read throws rather than
+        # answering, and that is the "already gone" this must treat as nothing to do.
+        try {
+            if ($process.ProcessName -ne $Capture.Record.Name) { return }
+
+            $recorded = [datetime]::Parse(
+                $Capture.Record.StartTime,
+                [cultureinfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::RoundtripKind)
+            if ([math]::Abs(($process.StartTime - $recorded).TotalSeconds) -gt 2) { return }
+        }
+        catch { return }
+
+        Stop-SmartHomeProcessTree -ProcessId $Capture.Record.Id
+    }
+
+    It 'hands back a record naming the launcher and the file it redirects into' {
+        Set-FakeSubscriber -Script @(Get-DelayLine 10)
+
+        $started = Start-TestCapture
+        try {
+            Assert-Equal -Expected $script:captureFile -Actual $started.Capture.Path
+            Assert-NotNull -Value $started.Capture.Record.Id
+            # -Tree, because the real work is in the mosquitto_sub grandchild of the
+            # cmd.exe doing the redirect; stopping the launcher alone orphans it.
+            Assert-True -Condition $started.Capture.Record.Tree
+            # Taken before the connect wait, so the record still carries the name that
+            # tells a dead pid from a recycled one -- ProcessName reads back $null once
+            # the process has exited, and StartTime alone is a weaker check.
+            Assert-Equal -Expected 'cmd' -Actual $started.Capture.Record.Name
+        }
+        finally { Stop-Leftover -Capture $started.Capture }
+    }
+
+    It 'returns without waiting when no connect wait was asked for' {
+        # Get-HomieRetainedSnapshot's call. Its settle is a window rather than a
+        # measurement of anything published inside it, so it must not pay for a wait.
+        Set-FakeSubscriber -Script @(Get-DelayLine 10)
+
+        $elapsed = Measure-Command { $script:started = Start-TestCapture }
+        try {
+            Assert-True -Condition ($elapsed.TotalSeconds -lt 2) -Because "took $($elapsed.TotalSeconds)s"
+            Assert-Equal -Expected 0 -Actual $script:started.Warnings.Count
+        }
+        finally { Stop-Leftover -Capture $script:started.Capture }
+    }
+
+    It 'waits past a diagnostic and returns once a message has actually arrived' {
+        # The invariant #59 corrected: the first byte is not the connection being live.
+        # The subscriber's stderr shares this file, so its first line can be a diagnostic
+        # about a connection that never happened -- and returning on it would report the
+        # very thing the wait exists to establish.
+        Set-FakeSubscriber -Script @(
+            'echo Warning: Unable to set TCP_NODELAY.'
+            (Get-DelayLine 2)
+            'echo homie/probe/$state 1 ready'
+            (Get-DelayLine 10)
+        )
+
+        $elapsed = Measure-Command { $script:started = Start-TestCapture -WaitForConnectSeconds 6 }
+        try {
+            # 1.5, not 2, though the message lands at about 2s: the claim is only that
+            # the diagnostic did not end the wait, and that is decided long before then --
+            # the diagnostic is written at once, so returning on it costs about 0.2s. The
+            # slack is for a loaded machine, the way 11119bf had to add it to two deadline
+            # cases that were reading the same kind of margin.
+            Assert-True -Condition ($elapsed.TotalSeconds -ge 1.5) -Because "returned after $($elapsed.TotalSeconds)s, so the diagnostic ended the wait"
+            Assert-Equal -Expected 0 -Actual $script:started.Warnings.Count
+        }
+        finally { Stop-Leftover -Capture $script:started.Capture }
+    }
+
+    It 'warns quoting the diagnostics when nothing but diagnostics arrived' {
+        Set-FakeSubscriber -Script @(
+            'echo Error: Connection refused'
+            (Get-DelayLine 10)
+        )
+
+        $started = Start-TestCapture -WaitForConnectSeconds 1
+        try {
+            Assert-Equal -Expected 1 -Actual $started.Warnings.Count
+            # The reason is in the file and nowhere else, so the warning has to carry it:
+            # this is the difference between "the device did not answer" and "we were not
+            # listening", and the captured lines alone cannot tell them apart.
+            Assert-Match -Actual $started.Warnings[0] -Pattern 'Connection refused'
+            Assert-Match -Actual $started.Warnings[0] -Pattern 'did not within 1s'
+            Assert-Match -Actual $started.Warnings[0] -Pattern ([regex]::Escape($script:captureFile))
+        }
+        finally { Stop-Leftover -Capture $started.Capture }
+    }
+
+    It 'warns that nothing at all was recorded when the subscriber is silent' {
+        Set-FakeSubscriber -Script @(Get-DelayLine 10)
+
+        $started = Start-TestCapture -WaitForConnectSeconds 1
+        try {
+            Assert-Equal -Expected 1 -Actual $started.Warnings.Count
+            Assert-Match -Actual $started.Warnings[0] -Pattern 'recorded nothing at all'
+        }
+        finally { Stop-Leftover -Capture $started.Capture }
+    }
+
+    It 'gives up on a subscriber that exited rather than spending the whole budget' {
+        # Against an unreachable broker mosquitto_sub is gone in about 2.4s, so this is
+        # the ordinary outcome and not an edge. Without the liveness probe the wait would
+        # sit out its budget watching a process that no longer exists.
+        Set-FakeSubscriber -Script @('echo Error: Connection refused')
+
+        $elapsed = Measure-Command { $script:started = Start-TestCapture -WaitForConnectSeconds 10 }
+        try {
+            Assert-True -Condition ($elapsed.TotalSeconds -lt 8) -Because "spent $($elapsed.TotalSeconds)s of a 10s budget on a dead subscriber"
+            Assert-Equal -Expected 1 -Actual $script:started.Warnings.Count
+            Assert-Match -Actual $script:started.Warnings[0] -Pattern 'exited first'
+        }
+        finally { Stop-Leftover -Capture $script:started.Capture }
+    }
+
+    It 'does not warn about a subscriber that delivered and then exited' {
+        # Which path this takes is a race -- the message may already be in the file by
+        # the first poll, or the poll may find it empty and the re-read below the liveness
+        # probe pick it up. The assertion holds either way, and that is the point: it pins
+        # the OUTCOME and cannot pin the mechanism. The case below does that, and exists
+        # because a mutation removing the re-read passed this one.
+        Set-FakeSubscriber -Script @('echo homie/probe/$state 1 ready')
+
+        $started = Start-TestCapture -WaitForConnectSeconds 10
+        try {
+            Assert-Equal -Expected 0 -Actual $started.Warnings.Count
+        }
+        finally { Stop-Leftover -Capture $started.Capture }
+    }
+
+    It 'reads once more after finding the subscriber gone, so a last write is not lost' {
+        # The re-read after the liveness probe. That probe classifies from a view taken
+        # BEFORE it, and the subscriber's last write -- its whole retained replay, or the
+        # error explaining why there was none -- can land in that gap. Reporting from the
+        # stale view would claim nothing arrived into a window that is in fact full, which
+        # is the same false diagnostic this wait exists to stop making.
+        #
+        # That gap is microseconds wide against a 100ms poll, so a real subscriber lands
+        # in it only by luck: the case above was written that way first and a mutation
+        # removing the re-read passed it. The probe stub is what makes it deterministic --
+        # it writes the line and THEN reports the process gone, which is exactly the
+        # ordering being modelled. The subscriber itself stays silent, so the read that
+        # precedes the probe is genuinely empty.
+        Set-FakeSubscriber -Script @(Get-DelayLine 10)
+
+        $script:probeCalls = 0
+        function Get-SmartHomeRecordedProcess {
+            param([hashtable]$Record)
+            $script:probeCalls++
+            Add-Content -LiteralPath $script:captureFile -Encoding UTF8 `
+                        -Value 'homie/probe/$state 1 ready'
+            return $null
+        }
+
+        $started = Start-TestCapture -WaitForConnectSeconds 10
+        try {
+            # One probe: it broke out on the first pass rather than polling on.
+            Assert-Equal -Expected 1 -Actual $script:probeCalls
+            # And nothing was warned about, because the window is full -- even though the
+            # subscriber was already gone when the wait looked.
+            Assert-Equal -Expected 0 -Actual $started.Warnings.Count
+        }
+        finally { Stop-Leftover -Capture $started.Capture }
+    }
+
+    It 'clears a capture file left behind by a previous window' {
+        # Not tidiness. The connect wait reads this file to decide whether THIS subscriber
+        # is live, and a previous capture's lines satisfy it instantly -- defeating the
+        # wait entirely, on a window the caller is about to publish into.
+        Set-FakeSubscriber -Script @(Get-DelayLine 10)
+        Set-TestFileContent -Path $script:captureFile -Content @('homie/stale/$state 1 ready')
+
+        $started = Start-TestCapture -WaitForConnectSeconds 1
+        try {
+            # The stale line is gone, and the warning proves the wait was not satisfied by
+            # it: with the removal skipped this is a silent return instead.
+            Assert-Equal -Expected 1 -Actual $started.Warnings.Count
+            Assert-Match -Actual $started.Warnings[0] -Pattern 'recorded nothing at all'
+        }
+        finally { Stop-Leftover -Capture $started.Capture }
+    }
+
+    It 'throws naming the file when a previous subscriber still holds it open' {
+        # The branch that must not become a silent overwrite: -ErrorAction
+        # SilentlyContinue on the Remove-Item is what makes this reachable at all, so
+        # without the deadline test the loop would fall through to a subscriber appending
+        # to somebody else's capture.
+        Set-FakeSubscriber -Script @(Get-DelayLine 10)
+        Set-TestFileContent -Path $script:captureFile -Content @('held open')
+
+        $held = [System.IO.File]::Open($script:captureFile, 'Open', 'Read', 'None')
+        try {
+            $message = Assert-Throws -Body { Start-HomieCapture -Port '1883' -ClearTimeoutSeconds 1 }
+            Assert-Match -Actual $message -Pattern ([regex]::Escape($script:captureFile))
+            Assert-Match -Actual $message -Pattern 'still holds it open'
+        }
+        finally { $held.Dispose() }
+    }
+
+    It 'returns the window''s lines in arrival order' {
+        Set-FakeSubscriber -Script @(
+            'echo homie/probe/$homie 1 4.0.0'
+            'echo homie/probe/$state 1 ready'
+            'echo homie/probe/sensor/temperature 0 21.5'
+            (Get-DelayLine 10)
+        )
+
+        $started = Start-TestCapture -WaitForConnectSeconds 5
+        $stopped = Stop-TestCapture -Capture $started.Capture -SettleSeconds 1
+
+        Assert-ArrayEqual -Expected @(
+            'homie/probe/$homie 1 4.0.0'
+            'homie/probe/$state 1 ready'
+            'homie/probe/sensor/temperature 0 21.5'
+        ) -Actual $stopped.Lines
+        Assert-Equal -Expected 0 -Actual $stopped.Warnings.Count
+    }
+
+    It 'counts the window it closed, which is what explains a run''s duration' {
+        Set-FakeSubscriber -Script @('echo homie/probe/$state 1 ready', (Get-DelayLine 10))
+
+        $before = $script:snapshotsTaken
+        $started = Start-TestCapture -WaitForConnectSeconds 5
+        Stop-TestCapture -Capture $started.Capture -SettleSeconds 0 | Out-Null
+
+        Assert-Equal -Expected ($before + 1) -Actual $script:snapshotsTaken
+    }
+
+    It 'preserves the capture even when closing the window throws' {
+        # Save-SnapshotEvidence is in a finally, and that is the point: the window is the
+        # only record of what a verdict was computed from, and the next Start-HomieCapture
+        # deletes it. #54's throw is the case that made this urgent.
+        Set-FakeSubscriber -Script @('echo homie/probe/$state 1 ready', (Get-DelayLine 10))
+
+        $started = Start-TestCapture -WaitForConnectSeconds 5
+        try {
+            function Stop-SmartHomeRecordedProcess {
+                param([hashtable]$Record)
+                throw 'taskkill fell over'
+            }
+
+            Assert-Throws -Body { Stop-HomieCapture -Capture $started.Capture -SettleSeconds 0 } `
+                          -Pattern 'taskkill fell over' | Out-Null
+            Assert-ArrayEqual -Expected @($script:captureFile) -Actual $script:preservedCaptures
+        }
+        finally { Stop-Leftover -Capture $started.Capture }
+    }
+
+    It 'warns that a short capture is the host''s fault, quoting the subscriber''s reason' {
+        # A subscriber already gone did not observe the whole window, so its capture is
+        # short for a host-side reason -- indistinguishable, in the lines alone, from a
+        # device that published nothing. Said where the difference is known, rather than
+        # left for a caller to misread as evidence about the device.
+        Set-FakeSubscriber -Script @('echo Error: Connection refused')
+
+        $started = Start-TestCapture -WaitForConnectSeconds 3
+        $stopped = Stop-TestCapture -Capture $started.Capture -SettleSeconds 0
+
+        Assert-Equal -Expected 1 -Actual $stopped.Warnings.Count
+        Assert-Match -Actual $stopped.Warnings[0] -Pattern 'says nothing about the device'
+        # The reason is already in the lines -- stderr shares this file -- and it is the
+        # detail #54's throw discarded by failing before the read.
+        Assert-Match -Actual $stopped.Warnings[0] -Pattern 'Connection refused'
+        # And it is a warning, not a throw: this runs inside the caller's finally, where a
+        # throw replaces the verdict that caller had already reached.
+        Assert-ArrayEqual -Expected @('Error: Connection refused') -Actual $stopped.Lines
+    }
+
+    It 'says the subscriber recorded no reason when there is nothing to quote' {
+        Set-FakeSubscriber -Script @('echo homie/probe/$state 1 ready')
+
+        $started = Start-TestCapture -WaitForConnectSeconds 3
+        $stopped = Stop-TestCapture -Capture $started.Capture -SettleSeconds 0
+
+        Assert-Equal -Expected 1 -Actual $stopped.Warnings.Count
+        Assert-Match -Actual $stopped.Warnings[0] -Pattern 'it recorded no reason'
+        # A message line is not a reason, and this is the assertion that says so. Only the
+        # non-message lines are candidates -- the subscriber's own stderr shares the file
+        # -- so the retained replay must not be quoted back at the reader as if it
+        # explained anything. Stated as an absence, because a second match on a substring
+        # of the phrase above would be satisfied by any warning that already passed it.
+        Assert-False -Condition ($stopped.Warnings[0] -match [regex]::Escape('homie/probe/$state')) `
+                     -Because "the captured message was quoted as the reason: $($stopped.Warnings[0])"
+    }
+
+    It 'holds the window open for its settle before closing it' {
+        # The settle is the window. A caller that publishes inside one gets exactly this
+        # long for the response, so a stop that closed immediately would cut off every
+        # message the caller is waiting for.
+        Set-FakeSubscriber -Script @(
+            (Get-DelayLine 1)
+            'echo homie/probe/lifecycle 0 alert'
+            (Get-DelayLine 10)
+        )
+
+        $started = Start-TestCapture
+        $stopped = Stop-TestCapture -Capture $started.Capture -SettleSeconds 3
+
+        Assert-ArrayEqual -Expected @('homie/probe/lifecycle 0 alert') -Actual $stopped.Lines
+    }
+
+    It 'Get-HomieRetainedSnapshot is the window plus the parse, retain flags intact' {
+        # The three compose: open, close, collapse per topic. The flag has to survive --
+        # it is the only thing that separates the broker's retained store from a live
+        # delivery, and every conformance assertion about retained-ness reads it.
+        Set-FakeSubscriber -Script @(
+            'echo homie/probe/$state 1 ready'
+            'echo homie/probe/sensor/temperature 0 21.5'
+            (Get-DelayLine 10)
+        )
+
+        # Get-HomieRetainedSnapshot exposes no settle -- it takes Stop-HomieCapture's
+        # default, which is read from here up the dynamic scope chain. Shortened because
+        # the claim is that the three compose, not how long the window stays open; that
+        # is the case above.
+        $SnapshotSettleSeconds = 1
+
+        $snapshot = Get-HomieRetainedSnapshot -Port '1883'
+
+        Assert-Equal -Expected 'ready' -Actual $snapshot['homie/probe/$state'].Payload
+        Assert-True -Condition $snapshot['homie/probe/$state'].Retained
+        Assert-Equal -Expected '21.5' -Actual $snapshot['homie/probe/sensor/temperature'].Payload
+        Assert-False -Condition $snapshot['homie/probe/sensor/temperature'].Retained
+    }
+}
+
+Describe 'Wait-ForRetainedValue' {
+    # Polls fresh snapshots until a topic reaches a value. Its previous defect was #35:
+    # it read a retained $state=ready left by a PREVIOUS boot as proof this one had
+    # announced, and the host then published five non-retained /set commands the device
+    # was not yet subscribed to, which the broker dropped with no trace.
+    #
+    # Get-HomieRetainedSnapshot is the stub here, and it is a queue: what the caller sees
+    # differs from round to round, which is the whole subject. Publish-HomieCommand is
+    # recorded rather than performed.
+
+    $script:snapshotQueue = @()
+    $script:snapshotReads = 0
+    $script:retainPublished = @()
+
+    function Get-HomieRetainedSnapshot {
+        param([string]$Port)
+
+        # A snapshot costs a real window -- $SnapshotSettleSeconds, three seconds -- and
+        # Wait-ForRetainedValue's loop has no sleep of its own because of that. An instant
+        # stub therefore does not model a fast device, it models a loop the shipped code
+        # never runs: measured at 8,265 iterations inside one -TimeoutSeconds 1 case,
+        # spinning a core flat out where production reads one snapshot per three seconds.
+        # 25ms keeps every case here well inside its deadline while making the shape right
+        # and leaving the CPU to the cases that are timing something.
+        Start-Sleep -Milliseconds 25
+
+        $index = [math]::Min($script:snapshotReads, $script:snapshotQueue.Count - 1)
+        $script:snapshotReads++
+        if ($index -lt 0) { return @{} }
+        return $script:snapshotQueue[$index]
+    }
+
+    function Publish-HomieCommand {
+        param([string]$Port, [string]$Topic, [string]$Payload)
+        # Recorded with the read count, so a case can assert the publish happened at the
+        # TOP of the round rather than merely at some point during it.
+        $script:retainPublished += ('{0}={1}@{2}' -f $Topic, $Payload, $script:snapshotReads)
+    }
+
+    function Reset-SnapshotQueue {
+        param([hashtable[]]$Snapshots)
+        $script:snapshotQueue = $Snapshots
+        $script:snapshotReads = 0
+        $script:retainPublished = @()
+    }
+
+    function New-Snapshot {
+        param([string]$Topic, [string]$Payload, [bool]$Retained)
+        return @{ $Topic = @{ Payload = $Payload; Retained = $Retained } }
+    }
+
+    It 'returns Ok with the snapshot it matched on' {
+        # The snapshot comes back because the caller needs the one the match was made in,
+        # not a fresher one: a later window is a different set of retained values.
+        Reset-SnapshotQueue -Snapshots @((New-Snapshot -Topic 'homie/x/$state' -Payload 'ready' -Retained $true))
+
+        $result = Wait-ForRetainedValue -Port '1883' -Topic 'homie/x/$state' -Expected 'ready' -TimeoutSeconds 5
+
+        Assert-True -Condition $result.Ok
+        Assert-Equal -Expected 'ready' -Actual $result.Seen
+        Assert-Equal -Expected 'ready' -Actual $result.Snapshot['homie/x/$state'].Payload
+    }
+
+    It 'refuses a live delivery of the right value by default' {
+        # The #35 half that is still true: a subscriber connecting mid-announce receives
+        # the rest of it LIVE, retain flag clear, and accepting that hands the caller a
+        # snapshot in which most topics look unretained. It also means the announce was
+        # still in flight, which is exactly what the caller is waiting to be over.
+        Reset-SnapshotQueue -Snapshots @((New-Snapshot -Topic 'homie/x/$state' -Payload 'ready' -Retained $false))
+
+        $result = Wait-ForRetainedValue -Port '1883' -Topic 'homie/x/$state' -Expected 'ready' -TimeoutSeconds 1
+
+        Assert-False -Condition $result.Ok
+        # Seen still reports the payload, so the caller's message says "not retained"
+        # rather than "never appeared".
+        Assert-Equal -Expected 'ready' -Actual $result.Seen
+    }
+
+    It 'accepts a live delivery when the retain flag is not the claim' {
+        # -RequireRetained $false is for callers reading only Ok/Seen. Waiting for a
+        # REPLAYED value there costs a whole extra window whenever the device publishes it
+        # just after the subscriber connected -- a coin flip for a value written within
+        # milliseconds of a command.
+        Reset-SnapshotQueue -Snapshots @((New-Snapshot -Topic 'homie/x/lifecycle' -Payload 'alert' -Retained $false))
+
+        $result = Wait-ForRetainedValue -Port '1883' -Topic 'homie/x/lifecycle' -Expected 'alert' `
+                                        -TimeoutSeconds 5 -RequireRetained $false
+
+        Assert-True -Condition $result.Ok
+    }
+
+    It 'keeps polling until the value arrives' {
+        Reset-SnapshotQueue -Snapshots @(
+            @{}
+            (New-Snapshot -Topic 'homie/x/$state' -Payload 'init' -Retained $true)
+            (New-Snapshot -Topic 'homie/x/$state' -Payload 'ready' -Retained $true)
+        )
+
+        $result = Wait-ForRetainedValue -Port '1883' -Topic 'homie/x/$state' -Expected 'ready' -TimeoutSeconds 5
+
+        Assert-True -Condition $result.Ok
+        Assert-Equal -Expected 3 -Actual $script:snapshotReads
+    }
+
+    It 'reports the last payload it saw rather than the one it wanted' {
+        Reset-SnapshotQueue -Snapshots @((New-Snapshot -Topic 'homie/x/$state' -Payload 'init' -Retained $true))
+
+        $result = Wait-ForRetainedValue -Port '1883' -Topic 'homie/x/$state' -Expected 'ready' -TimeoutSeconds 1
+
+        Assert-False -Condition $result.Ok
+        Assert-Equal -Expected 'init' -Actual $result.Seen
+    }
+
+    It 'reports <nothing> for a topic the store never held' {
+        # Distinct from a wrong payload, and the caller's message says which: "the device
+        # never published this" and "it published something else" have different next
+        # steps.
+        Reset-SnapshotQueue -Snapshots @(@{})
+
+        $result = Wait-ForRetainedValue -Port '1883' -Topic 'homie/x/$state' -Expected 'ready' -TimeoutSeconds 1
+
+        Assert-False -Condition $result.Ok
+        Assert-Equal -Expected '<nothing>' -Actual $result.Seen
+        Assert-NotNull -Value $result.Snapshot
+    }
+
+    It 'republishes at the top of every round when given a command' {
+        # A /set is non-retained, so one that arrives while the device is not subscribed
+        # is dropped and no amount of further polling can recover it. Re-sending each
+        # round is what closes that window; publishing once and then only observing is
+        # the #35 failure.
+        Reset-SnapshotQueue -Snapshots @(
+            @{}
+            @{}
+            (New-Snapshot -Topic 'homie/x/lifecycle' -Payload 'alert' -Retained $true)
+        )
+
+        $result = Wait-ForRetainedValue -Port '1883' -Topic 'homie/x/lifecycle' -Expected 'alert' `
+                                        -TimeoutSeconds 5 `
+                                        -RepublishTopic 'homie/x/lifecycle/set' -RepublishPayload 'alert'
+
+        Assert-True -Condition $result.Ok
+        # Three publishes, each recorded before its round's read: @0, @1, @2 rather than
+        # @1, @2, @3. A publish after the snapshot would be measuring the round before it.
+        Assert-ArrayEqual -Expected @(
+            'homie/x/lifecycle/set=alert@0'
+            'homie/x/lifecycle/set=alert@1'
+            'homie/x/lifecycle/set=alert@2'
+        ) -Actual $script:retainPublished
+    }
+
+    It 'publishes nothing when no command was given' {
+        # The announce and the re-announce are things the device does by itself. A
+        # controller publishing into that wait would be changing what it is measuring.
+        Reset-SnapshotQueue -Snapshots @((New-Snapshot -Topic 'homie/x/$state' -Payload 'ready' -Retained $true))
+
+        Wait-ForRetainedValue -Port '1883' -Topic 'homie/x/$state' -Expected 'ready' -TimeoutSeconds 5 | Out-Null
+
+        Assert-Equal -Expected 0 -Actual $script:retainPublished.Count
+    }
+
+    It 'returns the last snapshot it read when the deadline passes' {
+        # Not an empty one: the caller reports what it saw, and a wait that timed out
+        # having read three windows should hand back the third rather than nothing.
+        Reset-SnapshotQueue -Snapshots @((New-Snapshot -Topic 'homie/x/$state' -Payload 'init' -Retained $true))
+
+        $result = Wait-ForRetainedValue -Port '1883' -Topic 'homie/x/$state' -Expected 'ready' -TimeoutSeconds 1
+
+        Assert-False -Condition $result.Ok
+        Assert-Equal -Expected 'init' -Actual $result.Snapshot['homie/x/$state'].Payload
+    }
+
+    It 'accepts a payload in the wrong case -- issue #93' {
+        # Pinned as it behaves today, NOT endorsed. The comparison is -eq, which is
+        # case-insensitive, so a device announcing $state = READY is read as having
+        # announced 'ready' and the conformance run proceeds on it. The Homie
+        # vocabularies are lowercase, so this can only ever accept something it should
+        # reject -- the passing-while-lying shape #34 and #36 were.
+        #
+        # A third site beyond the two #93's body lists, and not reached by either of its
+        # fixes: the snapshot's comparer decides the topic KEY, and this reads .Payload
+        # off the entry that key found. Recorded on the issue with the measurement.
+        # Closing #93 must invert this case rather than delete it.
+        Reset-SnapshotQueue -Snapshots @((New-Snapshot -Topic 'homie/x/$state' -Payload 'READY' -Retained $true))
+
+        $result = Wait-ForRetainedValue -Port '1883' -Topic 'homie/x/$state' -Expected 'ready' -TimeoutSeconds 1
+
+        Assert-True -Condition $result.Ok -Because 'today READY satisfies a wait for ready'
+        Assert-Equal -Expected 'READY' -Actual $result.Seen
     }
 }
 
