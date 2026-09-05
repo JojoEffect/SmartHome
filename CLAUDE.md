@@ -275,6 +275,11 @@ when nothing ran, but don't re-break the name.
 ```text
 src/
   common/                 Shared libraries, used by device apps and tests alike
+    DeviceModel/          SmartHome.DeviceModel — Device/Node/Property, DeviceBuilder, values,
+                            lifecycle, alerts. Protocol-neutral: no MQTT reference, no topics,
+                            no protocol constants (see below). Nothing consumes it yet
+    Protocol/             SmartHome.Protocol   — IDeviceProtocol, the seam an adapter implements.
+                            Nothing implements it yet
     Homie/                SmartHome.Homie      — Homie v4 client (SmartHome.Homie.V4 inside)
     Mqtt/                 SmartHome.Mqtt       — ReconnectingMqttClient: auto-reconnect and
                             subscription replay over nanoFramework.M2Mqtt. Protocol-agnostic;
@@ -408,6 +413,51 @@ Anything that needs WiFi calls `NetworkHelper.ConnectToConfiguredNetwork()` from
 `WifiConnectionStatus.UnspecifiedFailure` (error 5). RoomSensor carried that loop until
 2026-08-20 and would not join the network on a clean boot; `WifiNetworkHelper.Reconnect()` waits
 for the interface instead of racing it.
+
+### The protocol-neutral model, and the adapter seam
+
+`SmartHome.DeviceModel` and `SmartHome.Protocol` are the first slice of issue #108, which
+replaces "the device description *is* Homie v4" with "the description is neutral and exactly one
+injected adapter decides what it goes out as". **Nothing consumes them yet** — `SmartHome.Homie`
+is rewritten over them in #110, Home Assistant follows in #111, and RoomSensor picks an adapter
+in #112. Until then they are additive, and everything above still runs on `SmartHome.Homie.V4`.
+
+What the model owns: the device/node/property tree with ids and friendly names, the datatype,
+the *structured* format, the unit, the `QuantityKind`, settable and retained, the value and its
+canonical encoding, `OnCommand` vs `OnUpdate`, the lifecycle, alerts, and the optional
+`$target`. What an adapter owns: every topic and root, how the description is serialised and
+where, the last will, re-announce triggers, protocol version constants, and all of Home
+Assistant's component choice, device class and availability.
+
+Four things about it are easy to get wrong, and each is deliberate:
+
+- **`GetTopic()` did not come across.** That single omission is what makes the rest possible:
+  the old `HomieEntityBase` built `homie/<device>/<node>/<property>` from the parent chain, so
+  Homie's topic grammar was in every entity in the tree. Adapters walk `EntityBase.Parent` and
+  name things their own way. The same reasoning removes the datatype and lifecycle *tokens* —
+  `"integer"`, `"init"` — which are a convention's vocabulary, not the model's.
+  `DeviceStateExtensions.GetName()` returns capitalised names for logs precisely so that
+  publishing one would fail conformance loudly.
+- **Formats are types, not a string.** `NumericRange`, `EnumOptions`, `BooleanLabels`,
+  `ColorFormats`, each with the one parser for its text form. A raw `string Format` re-read by
+  every consumer is what let #106's discovery mapper disagree with the property's own validation
+  in three ways, advertising payloads the property refused. Don't add a `string Format` back.
+- **There is no `Alert` state.** The lifecycle is Homie v5's five (`Connecting`, `Ready`,
+  `Sleeping`, `Disconnecting`, `Lost`), and alerts are a separate keyed set —
+  `Device.RaiseAlert(id, message)` / `ClearAlert(id)`. Homie v4's `$state = alert` can only say
+  that *something* is wrong; a v4 adapter synthesises it from "any alert is raised", and that
+  mapping is one-way.
+- **`double?` is not available.** `NumericRange` spells its optional bounds as
+  `HasMinimum`/`Minimum` pairs because nanoFramework's mscorlib carries no `System.Nullable`,
+  so a nullable value type does not compile at all on this runtime. Checked against the
+  `CoreLibrary` checkout, not assumed.
+
+`SmartHome.Protocol` is one interface, `IDeviceProtocol`, plus the command event it raises. It is
+deliberately not derived from `IReconnectingMqttClient`, for the reason `IHomieClient` already
+documents: a device owns a connection rather than being one, and exposing `Publish`/`Subscribe`
+would let an app publish an attribute non-retained or a state out of order. An implementation
+takes an `IReconnectingMqttClient` by constructor injection and owns the session, last will
+included.
 
 ### Four kinds of test, deliberately kept apart
 
