@@ -1378,13 +1378,40 @@ Describe 'The snapshot capture window' {
         # Nothing here may outlive its case: a surviving cmd.exe holds the capture file
         # open and the next case's removal loop then spends its budget on it.
         #
-        # Straight to the tree kill rather than through Stop-SmartHomeRecordedProcess,
-        # which one case below replaces with a stub that throws. This runs in that case's
-        # finally, so going through the stubbed name would make the cleanup fail on
-        # exactly the case that most needs it to work. It is also allowed to be blunt:
-        # nothing here asserts on it.
+        # Neither Common.ps1 helper can be used for this. Stop-SmartHomeRecordedProcess is
+        # replaced by a stub that throws in one case below, and Get-SmartHomeRecordedProcess
+        # by one that always reports "gone" in another -- and this runs in both of those
+        # cases' finally blocks, so routing through either name breaks the cleanup on
+        # exactly the cases that need it most.
+        #
+        # So the identity check is inlined rather than dropped. Several cases here use a
+        # subscriber that exits within milliseconds, which means this often runs against a
+        # pid that is already dead -- and taskkill /T /F on a pid Windows has since
+        # reissued would force-kill an unrelated process tree on a developer's machine.
+        # That is the hazard Get-SmartHomeRecordedProcess's own comment is about; a test
+        # helper does not get to opt out of it.
         param([hashtable]$Capture)
-        if ($Capture) { Stop-SmartHomeProcessTree -ProcessId $Capture.Record.Id }
+
+        if (-not $Capture) { return }
+
+        $process = Get-Process -Id $Capture.Record.Id -ErrorAction SilentlyContinue
+        if ($null -eq $process) { return }
+
+        # Both reads inside the try, for the reason Get-SmartHomeRecordedProcess gives:
+        # a process that exits between the lookup and either read throws rather than
+        # answering, and that is the "already gone" this must treat as nothing to do.
+        try {
+            if ($process.ProcessName -ne $Capture.Record.Name) { return }
+
+            $recorded = [datetime]::Parse(
+                $Capture.Record.StartTime,
+                [cultureinfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::RoundtripKind)
+            if ([math]::Abs(($process.StartTime - $recorded).TotalSeconds) -gt 2) { return }
+        }
+        catch { return }
+
+        Stop-SmartHomeProcessTree -ProcessId $Capture.Record.Id
     }
 
     It 'hands back a record naming the launcher and the file it redirects into' {
@@ -1649,9 +1676,13 @@ Describe 'The snapshot capture window' {
 
         Assert-Equal -Expected 1 -Actual $stopped.Warnings.Count
         Assert-Match -Actual $stopped.Warnings[0] -Pattern 'it recorded no reason'
-        # A message line is not a reason: quoting the retained replay back at the reader
-        # would bury the point.
-        Assert-Match -Actual $stopped.Warnings[0] -Pattern ([regex]::Escape('recorded no reason'))
+        # A message line is not a reason, and this is the assertion that says so. Only the
+        # non-message lines are candidates -- the subscriber's own stderr shares the file
+        # -- so the retained replay must not be quoted back at the reader as if it
+        # explained anything. Stated as an absence, because a second match on a substring
+        # of the phrase above would be satisfied by any warning that already passed it.
+        Assert-False -Condition ($stopped.Warnings[0] -match [regex]::Escape('homie/probe/$state')) `
+                     -Because "the captured message was quoted as the reason: $($stopped.Warnings[0])"
     }
 
     It 'holds the window open for its settle before closing it' {
@@ -1711,6 +1742,15 @@ Describe 'Wait-ForRetainedValue' {
 
     function Get-HomieRetainedSnapshot {
         param([string]$Port)
+
+        # A snapshot costs a real window -- $SnapshotSettleSeconds, three seconds -- and
+        # Wait-ForRetainedValue's loop has no sleep of its own because of that. An instant
+        # stub therefore does not model a fast device, it models a loop the shipped code
+        # never runs: measured at 8,265 iterations inside one -TimeoutSeconds 1 case,
+        # spinning a core flat out where production reads one snapshot per three seconds.
+        # 25ms keeps every case here well inside its deadline while making the shape right
+        # and leaving the CPU to the cases that are timing something.
+        Start-Sleep -Milliseconds 25
 
         $index = [math]::Min($script:snapshotReads, $script:snapshotQueue.Count - 1)
         $script:snapshotReads++
