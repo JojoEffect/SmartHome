@@ -283,6 +283,8 @@ src/
     Text/                 SmartHome.Text       — StringUtils
   devices/                Real device apps — the things that actually get shipped
     RoomSensor/           SmartHome.Devices.RoomSensor — temperature/humidity/pressure, BMP280
+    RainwaterCistern/     SmartHome.Devices.RainwaterCistern — cistern level, 4-20 mA
+                            hydrostatic probe read over an ADS1115
     IrrigationControl/    SmartHome.Devices.IrrigationControl
     OvenControl/          SmartHome.Devices.OvenControl
   integrationTests/       On-device end-to-end checks, one dependency each (see below)
@@ -602,6 +604,33 @@ Note that `MqttCheck` hardcodes its own broker (`192.168.1.238`) separately — 
 drift apart easily, and a stale one is the usual reason a healthy device "can't reach the
 broker". `Run-IntegrationTests.ps1` warns when `MqttCheck`'s constant isn't an address of the
 host machine.
+
+## Current RainwaterCistern facts
+
+| Fact | Value |
+|---|---|
+| Device Homie ID | `rainwater-cistern` |
+| MQTT broker in code | `192.168.1.238` in `Program.cs` |
+| Node | `tank` |
+| Sensor | Hydrostatic 4-20 mA submersible probe (vented gauge), read as a voltage across a 150 Ω burden resistor on ADS1115 AIN0 |
+| Properties | `water-depth` (m), `level` (%), `volume` (l), `loop-current` (A) |
+| Update interval | `60000 ms` |
+
+**Not commissioned yet, and its readings are meaningless until it is.** Everything in
+`Calibration.cs` — probe range, usable depth, cistern diameter — is an assumption, because the
+probe carries no identifiable type (`EU536ZZJ730` / `02J335` return nothing in any public
+catalogue). `Calibration.ProbeRangeMeters` in particular has to be measured: put a milliammeter
+in the loop, read the current in air (expect 4.00 mA) and at a known submersion depth, then
+`range = depth / ((I - 4 mA) / 16 mA)`. Until that is done, treat published depths as scaled by
+an unknown constant. Issue #37 carries the full procedure and the definition of done, including
+removing this warning in the same change that removes the assumptions it warns about.
+
+The ADS1115 access is hand-rolled in `Ads1115Protocol.cs` + `CurrentLoopSensor.cs` rather than
+taken from `nanoFramework.Iot.Device.Ads1115`, because that package is in neither `packages\`
+nor this machine's NuGet cache and `Restore-Packages.ps1` is offline by design. The config-word
+arithmetic is covered by `Ads1115ProtocolTests`; swapping in the official driver later means
+replacing those two files and nothing else. That swap is #38 — worth doing as soon as the
+comparator, the ALERT/RDY pin or continuous mode is wanted, optional until then.
 
 ## Open work
 

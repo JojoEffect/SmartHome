@@ -44,7 +44,10 @@ jobs:
             chore
             revert
           # Scopes are optional, but when present should name the area touched, matching
-          # the repository's issue labels and layout.
+          # the repository's issue labels and layout. One per device, so adding a device
+          # means adding its scope here -- and because this workflow runs on
+          # pull_request_target, the addition only takes effect once it is on main. The
+          # pull request that introduces a device therefore cannot use its own new scope.
           scopes: |
             homie
             mqtt
@@ -52,6 +55,7 @@ jobs:
             roomsensor
             irrigation
             oven
+            cistern
             tests
             scripts
             ci

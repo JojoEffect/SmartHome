@@ -40,6 +40,18 @@
     <Compile Include="DeviceBuilderTests.cs" />
     <Compile Include="PropertyValidationTests.cs" />
     <Compile Include="MockMqttClient.cs" />
+    <Compile Include="LevelCalculationTests.cs" />
+    <Compile Include="Ads1115ProtocolTests.cs" />
+    <!-- Linked, not referenced: RainwaterCistern is an executable, and referencing it
+         would deploy the whole device application to test arithmetic. Same trick
+         Bmp280Check uses for IntegrationTest.cs. Only the two files that are pure
+         maths are linked; nothing here touches I2C. -->
+    <Compile Include="..\..\devices\RainwaterCistern\LevelCalculation.cs">
+      <Link>RainwaterCistern\LevelCalculation.cs</Link>
+    </Compile>
+    <Compile Include="..\..\devices\RainwaterCistern\Ads1115Protocol.cs">
+      <Link>RainwaterCistern\Ads1115Protocol.cs</Link>
+    </Compile>
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
