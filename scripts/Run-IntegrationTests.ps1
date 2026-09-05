@@ -1010,7 +1010,14 @@ function Start-HomieCapture {
         # it. Callers that only want the settled result do not need this: their 3s sleep
         # starts before the connection and is a window, not a measurement of anything
         # published inside it.
-        [int]$WaitForConnectSeconds = 0
+        [int]$WaitForConnectSeconds = 0,
+
+        # How long to keep retrying the removal below before giving up. Five seconds is
+        # what a suite run uses and the only value any caller passes; it is a parameter so
+        # that the give-up branch can be reached from a test in a fraction of a second
+        # rather than by sitting out the real budget -- the same defaulted-parameter seam
+        # Get-ConformanceCaptureSeconds took for -LifecycleStepCount.
+        [int]$ClearTimeoutSeconds = 5
     )
 
     $out = Get-SmartHomeDevEnvPath -Port $Port -Kind Snapshot
@@ -1021,7 +1028,7 @@ function Start-HomieCapture {
     # would swallow that. A surviving file is not merely untidy: the connect wait below
     # takes "the file has bytes" as proof that THIS subscriber is live, and the previous
     # capture's bytes satisfy it instantly, defeating the wait entirely.
-    $removeDeadline = (Get-Date).AddSeconds(5)
+    $removeDeadline = (Get-Date).AddSeconds($ClearTimeoutSeconds)
     while (Test-Path -Path $out) {
         Remove-Item -Path $out -Force -ErrorAction SilentlyContinue
         if (-not (Test-Path -Path $out)) {
