@@ -1,4 +1,4 @@
-# scripts\Run-IntegrationTests.ps1 -- the host-side half of the integration suite.
+﻿# scripts\Run-IntegrationTests.ps1 -- the host-side half of the integration suite.
 #
 # This is the half that decides every verdict the suite reports, and the half with no
 # coverage at all until issue #74. Dot-sourcing the script defines its functions and its
@@ -360,6 +360,131 @@ Describe 'Get-DeviceMarkerVerdict' {
 
         Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
         Assert-Equal -Expected 'ok' -Actual $verdict.Detail
+    }
+}
+
+Describe 'Test-DeviceConstant' {
+    # The pre-flight's stale-constant warning. A compile-time constant in a device
+    # project cannot be read from local.env.ps1, so the two drift, and the whole value of
+    # this check is that it turns "the test failed on a healthy device" into a warning
+    # naming both values. Every one of its three silent paths -- no file, no match, a
+    # match that agrees -- looks identical from the console, which is why they are
+    # separated here rather than covered by "it warned once".
+
+    function New-ProgramFile {
+        param(
+            [string[]]$Lines,
+            [string]$Directory = 'device-constant'
+        )
+        $path = Join-Path (New-TestDirectory -Name $Directory) 'Program.cs'
+        Set-TestFileContent -Path $path -Content $Lines
+        return $path
+    }
+
+    function Get-ConstantWarning {
+        # 3>&1 turns the warnings into objects this can count and read.
+        #
+        # Every caller wraps this in @(), and has to: a return unrolls, so one warning
+        # comes back as a bare string and none comes back as $null -- and .Count on
+        # either is a PropertyNotFoundException under Set-StrictMode -Version Latest,
+        # not a 1 and a 0. Wrapping HERE instead would be the ,@() shape issue #88 is
+        # about, which member-enumerates the moment a caller pipes it.
+        param([string]$ProgramPath, [string]$Pattern, [string]$Expected)
+
+        return (Test-DeviceConstant -Label 'MqttCheck' -ProgramPath $ProgramPath `
+                                    -Pattern $Pattern -Expected $Expected `
+                                    -What 'the broker address' 3>&1 |
+            ForEach-Object { $_.Message })
+    }
+
+    $brokerPattern = 'BrokerAddress\s*=\s*"([^"]+)"'
+
+    It 'warns naming both values when the constant has drifted' {
+        $program = New-ProgramFile -Lines @(
+            'internal sealed class Program {'
+            '    private const string BrokerAddress = "192.168.1.99";'
+            '}'
+        )
+
+        $warnings = @(Get-ConstantWarning -ProgramPath $program -Pattern $brokerPattern -Expected '192.168.1.238')
+
+        Assert-Equal -Expected 1 -Actual $warnings.Count
+        # Both values in the message, not just "they differ": which of the two is stale
+        # is the reader's call, and it cannot be made without seeing them.
+        Assert-Match -Actual $warnings[0] -Pattern ([regex]::Escape('192.168.1.99'))
+        Assert-Match -Actual $warnings[0] -Pattern ([regex]::Escape('192.168.1.238'))
+        Assert-Match -Actual $warnings[0] -Pattern 'MqttCheck'
+        Assert-Match -Actual $warnings[0] -Pattern 'the broker address'
+    }
+
+    It 'says nothing when the constant agrees' {
+        $program = New-ProgramFile -Lines @('const string BrokerAddress = "192.168.1.238";')
+
+        Assert-Equal -Expected 0 -Actual @(Get-ConstantWarning -ProgramPath $program `
+            -Pattern $brokerPattern -Expected '192.168.1.238').Count
+    }
+
+    It 'compares the first capture group, not the whole match' {
+        # The pattern deliberately matches more than the value -- the surrounding
+        # assignment is what makes it unambiguous -- so a comparison against $0 would
+        # never agree with anything and the check would warn on every healthy run.
+        $program = New-ProgramFile -Lines @('const string BrokerAddress = "10.0.0.1";')
+
+        Assert-Equal -Expected 0 -Actual @(Get-ConstantWarning -ProgramPath $program `
+            -Pattern $brokerPattern -Expected '10.0.0.1').Count
+    }
+
+    It 'takes the first match when the file holds several' {
+        $program = New-ProgramFile -Lines @(
+            'const string BrokerAddress = "10.0.0.1";'
+            'const string FallbackAddress = "10.0.0.2";'
+            '// BrokerAddress = "10.0.0.3"'
+        )
+
+        Assert-Equal -Expected 0 -Actual @(Get-ConstantWarning -ProgramPath $program `
+            -Pattern $brokerPattern -Expected '10.0.0.1').Count
+    }
+
+    It 'says nothing about a project that has no Program.cs' {
+        # The path is handed in rather than derived, and a caller can name a test that
+        # does not exist. Returning quietly is right; throwing here would abort a
+        # pre-flight over a warning.
+        $absent = Join-Path (New-TestDirectory -Name 'no-program') 'Program.cs'
+
+        Assert-Equal -Expected 0 -Actual @(Get-ConstantWarning -ProgramPath $absent `
+            -Pattern $brokerPattern -Expected '192.168.1.238').Count
+    }
+
+    It 'says nothing when the constant is not in the file at all' {
+        # Distinct from the case above, and the more dangerous of the two: the file is
+        # there and readable, so a renamed constant reads exactly like one that agrees.
+        # Pinned so a future "warn when the pattern finds nothing" is a deliberate change.
+        $program = New-ProgramFile -Lines @('const string SomethingElse = "192.168.1.99";')
+
+        Assert-Equal -Expected 0 -Actual @(Get-ConstantWarning -ProgramPath $program `
+            -Pattern $brokerPattern -Expected '192.168.1.238').Count
+    }
+
+    It 'is silent about a drifted constant under a bracketed path -- issue #80' {
+        # Pinned as it behaves today, NOT endorsed. Both reads here are -Path, so a '['
+        # anywhere in the checkout makes them wildcard patterns matching nothing:
+        # Test-Path returns false and the function returns as if the project had no
+        # Program.cs. The stale-broker warning then never fires on exactly the machine
+        # whose path is unusual -- the #71 defect class, and two of the 24 sites #80
+        # counts in this file.
+        #
+        # #80's sweep must invert this case rather than delete it: the same fixture, one
+        # warning instead of none.
+        $program = New-ProgramFile -Directory 'device [constant]' -Lines @(
+            'const string BrokerAddress = "192.168.1.99";'
+        )
+
+        Assert-Equal -Expected 0 -Actual @(Get-ConstantWarning -ProgramPath $program `
+            -Pattern $brokerPattern -Expected '192.168.1.238').Count
+
+        # And the file really is there, so the silence above is the path handling and
+        # nothing else.
+        Assert-True -Condition (Test-Path -LiteralPath $program)
     }
 }
 
@@ -841,6 +966,319 @@ Describe 'The subscriber-log waits' {
 
         Assert-False -Condition (Wait-ForEcho -Topic 'homie/x/echo' -Payload 'echo-7' -TimeoutSeconds 1 `
                                               -Port '1883' -CommandTopic 'homie/x/echo/set')
+    }
+}
+
+Describe 'Invoke-BrokerOutageCheck' {
+    # MqttReconnectCheck's verdict. Everything it decides is decided from the subscriber
+    # log -- the baseline heartbeat, the counter across the outage, the echo -- and only
+    # taking the broker away is not. So the three broker calls are the stubs and nothing
+    # else is: Wait-Heartbeat, Wait-ForEcho and Wait-ForSubscriberLogLine all run for
+    # real, against a fixture log, through the same Get-SmartHomeDevEnvPath stub the
+    # waits' own cases use.
+    #
+    # The stubs stand in for what the real ones do to that log, not for their signatures
+    # alone. Start-DevEnv.ps1 truncates the subscriber log on every start, and this check
+    # rests on that: it is the whole reason a phase's heartbeats can only be ones
+    # published after that phase's broker came up. So each stub truncates and refills,
+    # and the fixture is written in those terms -- what the device publishes once the
+    # opening cycle's broker is up, and what it publishes after each outage. A stub that
+    # left the log alone would let a case pass on a heartbeat from before the outage it
+    # claims to have survived.
+
+    # Names of their own, not $script:subscriberLog / $script:published. Those belong to
+    # the subscriber-log waits above, and sharing them would work only while both groups
+    # reset first and run in file order -- a passing suite resting on an accident, which
+    # is what a review pass caught in the group below this one.
+    $script:outageLog = $null
+    $script:outageEvents = @()
+    $script:outagePublished = @()
+
+    function Get-SmartHomeDevEnvPath {
+        param([string]$Port, [string]$Kind)
+        return $script:outageLog
+    }
+
+    function Set-OutageLog {
+        param([string[]]$Lines)
+        Set-TestFileContent -Path $script:outageLog -Content $Lines
+    }
+
+    function Reset-OutageFixture {
+        # -Baseline is what the device has published once the opening cycle's broker is
+        # up; -Recovery the same for each outage, one entry per Start-SuiteBroker, the
+        # last repeating if there are more outages than entries. -NoEcho models a client
+        # that reconnected without replaying its subscriptions.
+        param(
+            [string[]]$Baseline = @(),
+            [string[][]]$Recovery = @(),
+            [switch]$NoEcho
+        )
+
+        $script:outageLog = Join-Path (New-TestDirectory -Name 'outage-log') 'homie.log'
+        $script:outageEvents = @()
+        $script:outagePublished = @()
+        $script:outageBaseline = $Baseline
+        $script:outageRecovery = $Recovery
+        $script:outageStarts = 0
+        $script:outageEchoes = -not $NoEcho
+        $script:outageEchoTopic = 'homie/mqtt-reconnect-check/echo'
+
+        # Deliberately not empty: the case below that proves the opening cycle happened
+        # needs something here the check must NOT read. Overwritten by that cycle.
+        Set-OutageLog -Lines @('homie/mqtt-reconnect-check/heartbeat 0 heartbeat 400')
+    }
+
+    function Restart-SuiteBroker {
+        param([string]$Port, [int]$SettleSeconds = 0)
+        $script:outageEvents += 'restart'
+        Set-OutageLog -Lines $script:outageBaseline
+    }
+
+    function Stop-SuiteBroker {
+        param([string]$Port)
+        $script:outageEvents += 'stop'
+        Set-OutageLog -Lines @()
+    }
+
+    function Start-SuiteBroker {
+        param([string]$Port)
+        $script:outageEvents += 'start'
+        $index = [math]::Min($script:outageStarts, $script:outageRecovery.Count - 1)
+        # @() around the if, because an if hands back its branch's output stream: the
+        # "device published nothing" entry is an empty array, which enumerates to nothing
+        # and leaves $lines as $null rather than empty. Set-TestFileContent's -Content is
+        # mandatory and allows an empty collection but not a null, so that reads as a
+        # broken fixture rather than as the silent device it is meant to be.
+        $lines = @(if ($index -lt 0) { @() } else { $script:outageRecovery[$index] })
+        $script:outageStarts++
+        Set-OutageLog -Lines $lines
+    }
+
+    function Publish-HomieCommand {
+        param([string]$Port, [string]$Topic, [string]$Payload)
+        $script:outagePublished += $Payload
+        # The device echoing what it was sent, which is what MqttReconnectCheck's app
+        # does. Only a replayed subscription can produce this line, so withholding it is
+        # the "connected and deaf" case rather than a missing fixture.
+        if ($script:outageEchoes) {
+            Add-Content -LiteralPath $script:outageLog -Encoding UTF8 `
+                        -Value ('{0} 0 {1}' -f $script:outageEchoTopic, $Payload)
+        }
+    }
+
+    function New-OutageSettings {
+        # Seconds are 1 where the shipped catalog says 90: every one of them is a
+        # deadline this suite has to sit through whenever a case is a timeout.
+        param([int[]]$OutageSeconds = @(0))
+
+        return @{
+            HeartbeatTopic        = 'homie/mqtt-reconnect-check/heartbeat'
+            SettleSeconds         = 1
+            OutageSeconds         = $OutageSeconds
+            RecoverySeconds       = 1
+            EchoCommandTopic      = 'homie/mqtt-reconnect-check/echo/set'
+            EchoTopic             = 'homie/mqtt-reconnect-check/echo'
+            CommandTimeoutSeconds = 1
+        }
+    }
+
+    function Invoke-Outage {
+        # 6> $null, because this function narrates every phase with Write-Host and the
+        # runner does not swallow stream 6.
+        param([hashtable]$Settings)
+        return (Invoke-BrokerOutageCheck -Settings $Settings -Port '1883' -LogPath 'unused' 6> $null)
+    }
+
+    function New-Heartbeat {
+        param($Counter)
+        return @(('homie/mqtt-reconnect-check/heartbeat 0 heartbeat {0}' -f $Counter))
+    }
+
+    It 'PASSes when the counter climbed across the outage and the echo came back' {
+        Reset-OutageFixture -Baseline (New-Heartbeat 4) -Recovery @(, (New-Heartbeat 9))
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern 'stayed subscribed'
+    }
+
+    It 'cycles the broker before it reads a baseline' {
+        # The baseline has to belong to the instance now on the device. Whatever was
+        # flashed before it kept publishing on the same topic right through the build and
+        # the flash, so a baseline read from the log as found can be a previous app's --
+        # and a counter compared against that proves nothing.
+        #
+        # The fixture starts at 400 and the cycle replaces it with 2. Reading the log as
+        # found would make this 400 -> 7 and therefore RESTARTED, so the verdict is the
+        # assertion that the read happened after the cycle -- not merely that the cycle
+        # was called.
+        Reset-OutageFixture -Baseline (New-Heartbeat 2) -Recovery @(, (New-Heartbeat 7))
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'restart' -Actual $script:outageEvents[0]
+        Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
+    }
+
+    It 'reports RESTARTED when the counter went backwards' {
+        # The distinction the whole check exists for: a device that recovered by rebooting
+        # publishes again just as reliably as one that reconnected, and only the counter
+        # tells them apart.
+        Reset-OutageFixture -Baseline (New-Heartbeat 40) -Recovery @(, (New-Heartbeat 1))
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'RESTARTED' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern '40 -> 1'
+    }
+
+    It 'reports RESTARTED for a counter that merely stayed put' {
+        # -le, not -lt. A counter that did not move is no evidence of a reconnect either,
+        # and an app that restarted between two reads of the same value would otherwise
+        # be reported as having survived the outage.
+        Reset-OutageFixture -Baseline (New-Heartbeat 7) -Recovery @(, (New-Heartbeat 7))
+
+        Assert-Equal -Expected 'RESTARTED' -Actual (Invoke-Outage -Settings (New-OutageSettings)).Outcome
+    }
+
+    It 'does not call RESTARTED on a heartbeat carrying no counter' {
+        # Wait-Heartbeat reports a null counter rather than failing, and in PowerShell
+        # $null -le 7 is true -- so without the two null guards a payload format change
+        # would turn every run into RESTARTED, blaming the device for a parse.
+        Reset-OutageFixture -Baseline @('homie/mqtt-reconnect-check/heartbeat 0 alive') `
+                            -Recovery @(, @('homie/mqtt-reconnect-check/heartbeat 0 alive'))
+
+        Assert-Equal -Expected 'PASS' -Actual (Invoke-Outage -Settings (New-OutageSettings)).Outcome
+    }
+
+    It 'reports NO-RESULT when the device never reached the broker at all' {
+        # Not FAIL: there was nothing to disconnect, so this says nothing about
+        # reconnecting. The detail has to carry that, because the two read alike on the
+        # summary line.
+        Reset-OutageFixture -Baseline @() -Recovery @()
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'NO-RESULT' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern 'nothing to disconnect'
+        # And it stopped there rather than taking away a broker it had no baseline for.
+        Assert-ArrayEqual -Expected @('restart') -Actual $script:outageEvents
+    }
+
+    It 'reports FAIL when no heartbeat returned after the broker came back' {
+        Reset-OutageFixture -Baseline (New-Heartbeat 3) -Recovery @(, @())
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'FAIL' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern 'did not reconnect'
+    }
+
+    It 'reports FAIL when heartbeats resumed but the echo never came' {
+        # The case the echo exists for. Publishing resumes as soon as the socket is up, so
+        # a client that reconnected and replayed no subscriptions looks healthy from the
+        # heartbeat alone -- connected and deaf.
+        Reset-OutageFixture -Baseline (New-Heartbeat 2) -Recovery @(, (New-Heartbeat 8)) -NoEcho
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'FAIL' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern 'without replaying its subscriptions'
+        Assert-Match -Actual $verdict.Detail -Pattern 'echo-8'
+        # And it did publish: a check reporting FAIL having sent nothing would be
+        # measuring its own silence.
+        Assert-True -Condition ($script:outagePublished.Count -ge 1)
+        Assert-Equal -Expected 'echo-8' -Actual $script:outagePublished[0]
+    }
+
+    It 'names the nonce after the counter it last saw' {
+        # echo-<counter>, so the payload required back differs on every outage. A fixed
+        # nonce would be satisfied by the previous round's echo sitting in the log.
+        Reset-OutageFixture -Baseline (New-Heartbeat 2) -Recovery @(, (New-Heartbeat 55))
+
+        Assert-Equal -Expected 'PASS' -Actual (Invoke-Outage -Settings (New-OutageSettings)).Outcome
+        Assert-Equal -Expected 'echo-55' -Actual $script:outagePublished[0]
+    }
+
+    It 'takes the broker down once per entry in OutageSeconds' {
+        Reset-OutageFixture -Baseline (New-Heartbeat 1) `
+                            -Recovery @((New-Heartbeat 9), (New-Heartbeat 12))
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings -OutageSeconds @(0, 0))
+
+        Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
+        Assert-ArrayEqual -Expected @('restart', 'stop', 'start', 'stop', 'start') -Actual $script:outageEvents
+        # Both lengths in the detail, so the summary line says what was actually survived.
+        Assert-Match -Actual $verdict.Detail -Pattern '0s, 0s'
+    }
+
+    It 'carries the counter forward, so the second outage is measured against the first' {
+        # $before is reassigned from $latest at the top of every round. Comparing each
+        # outage against the original baseline instead would report a device that
+        # restarted during the second outage as PASS, as long as its counter had passed
+        # the pre-outage one -- 12 is above the baseline of 1 and below the 30 it reached.
+        #
+        # The two lengths differ (0s, then 1s) so the detail's "1s outage" also proves the
+        # label names the outage being run rather than the first one. One second, not the
+        # catalog's 20: Invoke-BrokerOutageCheck really does Start-Sleep for it.
+        Reset-OutageFixture -Baseline (New-Heartbeat 1) `
+                            -Recovery @((New-Heartbeat 30), (New-Heartbeat 12))
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings -OutageSeconds @(0, 1))
+
+        Assert-Equal -Expected 'RESTARTED' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern '30 -> 12'
+        Assert-Match -Actual $verdict.Detail -Pattern '1s outage'
+    }
+
+    It 'reports ERROR naming the phase when the broker cannot be cycled' {
+        Reset-OutageFixture -Baseline @() -Recovery @()
+        function Restart-SuiteBroker {
+            param([string]$Port, [int]$SettleSeconds = 0)
+            throw 'could not start the broker on port 1883: port in use'
+        }
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'ERROR' -Actual $verdict.Outcome
+        # A host-side fault reported as the device's would be the worst outcome this
+        # function can produce, so the phase is part of the detail, not just the message.
+        Assert-Match -Actual $verdict.Detail -Pattern 'port in use'
+        Assert-Match -Actual $verdict.Detail -Pattern 'before measuring'
+    }
+
+    It 'reports ERROR naming the outage it was starting when the stop failed' {
+        Reset-OutageFixture -Baseline (New-Heartbeat 1) -Recovery @(, (New-Heartbeat 2))
+        function Stop-SuiteBroker {
+            param([string]$Port)
+            throw 'could not stop the broker on port 1883: access denied'
+        }
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings -OutageSeconds @(3))
+
+        Assert-Equal -Expected 'ERROR' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern 'access denied'
+        Assert-Match -Actual $verdict.Detail -Pattern 'starting the 3s outage'
+    }
+
+    It 'reports ERROR naming the outage it had just run when the restart failed' {
+        Reset-OutageFixture -Baseline (New-Heartbeat 1) -Recovery @(, (New-Heartbeat 2))
+        function Start-SuiteBroker {
+            param([string]$Port)
+            $script:outageEvents += 'start'
+            throw 'could not start the broker on port 1883: port still held'
+        }
+
+        # 1s rather than the 3s above: this one reaches the Start-Sleep, the stop-failure
+        # case throws before it. The two lengths differing is also what shows each label
+        # is read from the outage in hand.
+        $verdict = Invoke-Outage -Settings (New-OutageSettings -OutageSeconds @(1))
+
+        Assert-Equal -Expected 'ERROR' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern 'port still held'
+        Assert-Match -Actual $verdict.Detail -Pattern 'after the 1s outage'
     }
 }
 
