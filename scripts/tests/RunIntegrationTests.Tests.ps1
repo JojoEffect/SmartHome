@@ -1432,7 +1432,12 @@ Describe 'The snapshot capture window' {
 
         $elapsed = Measure-Command { $script:started = Start-TestCapture -WaitForConnectSeconds 6 }
         try {
-            Assert-True -Condition ($elapsed.TotalSeconds -ge 2) -Because "returned after $($elapsed.TotalSeconds)s, so the diagnostic ended the wait"
+            # 1.5, not 2, though the message lands at about 2s: the claim is only that
+            # the diagnostic did not end the wait, and that is decided long before then --
+            # the diagnostic is written at once, so returning on it costs about 0.2s. The
+            # slack is for a loaded machine, the way 11119bf had to add it to two deadline
+            # cases that were reading the same kind of margin.
+            Assert-True -Condition ($elapsed.TotalSeconds -ge 1.5) -Because "returned after $($elapsed.TotalSeconds)s, so the diagnostic ended the wait"
             Assert-Equal -Expected 0 -Actual $script:started.Warnings.Count
         }
         finally { Stop-Leftover -Capture $script:started.Capture }
@@ -1484,9 +1489,11 @@ Describe 'The snapshot capture window' {
     }
 
     It 'does not warn about a subscriber that delivered and then exited' {
-        # The message is already in the file by the first poll, so this case returns on
-        # the ordinary path. It pins the outcome and not the mechanism -- the re-read the
-        # mechanism needs is the case below, which this one cannot reach.
+        # Which path this takes is a race -- the message may already be in the file by
+        # the first poll, or the poll may find it empty and the re-read below the liveness
+        # probe pick it up. The assertion holds either way, and that is the point: it pins
+        # the OUTCOME and cannot pin the mechanism. The case below does that, and exists
+        # because a mutation removing the re-read passed this one.
         Set-FakeSubscriber -Script @('echo homie/probe/$state 1 ready')
 
         $started = Start-TestCapture -WaitForConnectSeconds 10
