@@ -19,6 +19,24 @@ namespace SmartHome.DeviceModel.Properties
         /// </remarks>
         public const int DefaultDecimals = 2;
 
+        /// <summary>
+        /// The magnitude at which a fixed-decimal rendering stops fitting, so values
+        /// must stay strictly below it.
+        /// </summary>
+        /// <remarks>
+        /// nf-interpreter's <c>Format_F</c> builds a printf <c>%0.&lt;n&gt;f</c> into a
+        /// fixed 128-byte buffer (<c>FORMAT_RESULT_BUFFER_SIZE</c>), and its bundled
+        /// printf fork was patched to return the count it actually wrote rather than the
+        /// count it would have needed. So a value too wide to render is not an error --
+        /// it is silently cut off mid-digit, and the device publishes a number that is
+        /// simply wrong. 1e100 leaves room for 101 integer digits, a sign, the point and
+        /// the 15 decimals this type allows at most: 118 of the 127 usable bytes.
+        ///
+        /// Far outside anything a sensor produces. It exists for the settable property
+        /// that declares no range, where the value comes from a controller.
+        /// </remarks>
+        public const double MaxPublishableMagnitude = 1e100;
+
         // Precomputed: this is on the publish path, and the format string never changes
         // after construction.
         private readonly string _numericFormat;
@@ -48,6 +66,15 @@ namespace SmartHome.DeviceModel.Properties
             Decimals = decimals;
             _numericFormat = $"F{decimals}";
             Value = EnsurePublishable(initialValue);
+
+            // An initial value goes on the wire the same way a controller's does --
+            // GetPayload() announces it into the retained store before anything has been
+            // Set -- so it is held to the same declaration. Without this a property can
+            // be built already advertising a number its own Set() refuses.
+            if (Range != null && !Range.Contains(initialValue))
+            {
+                throw new ArgumentException($"Property '{id}': the initial value {initialValue} is outside the range '{Range}' it declares.");
+            }
         }
 
         public double Value { get; private set; }
@@ -65,8 +92,7 @@ namespace SmartHome.DeviceModel.Properties
         public void Update(double newValue)
         {
             Value = EnsurePublishable(newValue);
-            PropertyUpdateEventArgs args = new(this, Encoding.UTF8.GetBytes(FormatValue(newValue)));
-            OnUpdate?.Invoke(args);
+            OnUpdate?.Invoke(new PropertyUpdateEventArgs(this, Encoding.UTF8.GetBytes(FormatValue(newValue))));
         }
 
         /// <summary>Declares the value this property is heading for. See <see cref="PropertyBase.Target"/>.</summary>
@@ -95,6 +121,11 @@ namespace SmartHome.DeviceModel.Properties
                 throw new ArgumentException($"Property '{Id}' cannot publish '{value}': a float value must be a finite number.");
             }
 
+            if (value >= MaxPublishableMagnitude || value <= -MaxPublishableMagnitude)
+            {
+                throw new ArgumentException($"Property '{Id}' cannot publish a magnitude of {MaxPublishableMagnitude} or more: its fixed-decimal rendering does not fit the runtime's format buffer.");
+            }
+
             return value;
         }
 
@@ -112,6 +143,16 @@ namespace SmartHome.DeviceModel.Properties
             if (double.IsNaN(parsed) || double.IsPositiveInfinity(parsed) || double.IsNegativeInfinity(parsed))
             {
                 return "not a finite number";
+            }
+
+            // Caught here for the same reason the line above is: a magnitude this large
+            // has no fixed-decimal rendering that fits, so letting it through would
+            // publish a silently truncated number and reach EnsurePublishable's throw on
+            // the dispatch thread. A declared Range makes this unreachable; a property
+            // without one is what needs it.
+            if (parsed >= MaxPublishableMagnitude || parsed <= -MaxPublishableMagnitude)
+            {
+                return $"too large to render: the magnitude must be below {MaxPublishableMagnitude}";
             }
 
             if (Range != null && !Range.Contains(parsed))

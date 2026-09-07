@@ -1,6 +1,7 @@
 using SmartHome.DeviceModel.Enums;
 using SmartHome.DeviceModel.EventArgs;
 using SmartHome.DeviceModel.Formats;
+using System;
 using System.Text;
 
 namespace SmartHome.DeviceModel.Properties
@@ -20,6 +21,14 @@ namespace SmartHome.DeviceModel.Properties
         {
             Options = options;
             Value = initialValue;
+
+            // Same rule the /set path enforces. GetPayload() announces this into the
+            // retained store before anything has been Set, so a property built with a
+            // value outside its own option set advertises one it would itself refuse.
+            if (Options != null && !Options.Contains(initialValue))
+            {
+                throw new ArgumentException($"Property '{id}': the initial value '{initialValue}' is not one of the options '{Options}' it declares.");
+            }
         }
 
         public string Value { get; private set; }
@@ -34,8 +43,7 @@ namespace SmartHome.DeviceModel.Properties
         public void Update(string newValue)
         {
             Value = newValue;
-            PropertyUpdateEventArgs args = new(this, Encoding.UTF8.GetBytes(newValue));
-            OnUpdate?.Invoke(args);
+            OnUpdate?.Invoke(new PropertyUpdateEventArgs(this, Encoding.UTF8.GetBytes(newValue)));
         }
 
         /// <summary>Declares the value this property is heading for. See <see cref="PropertyBase.Target"/>.</summary>

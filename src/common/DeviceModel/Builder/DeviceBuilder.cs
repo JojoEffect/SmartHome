@@ -16,6 +16,7 @@ namespace SmartHome.DeviceModel.Builder
         private readonly string _id;
         private readonly string _name;
         private Node[] _nodes = new Node[0];
+        private bool _built;
 
         public DeviceBuilder(string id, string name)
         {
@@ -28,10 +29,32 @@ namespace SmartHome.DeviceModel.Builder
             _name = name;
         }
 
+        /// <summary>
+        /// Builds the device. A builder builds once; calling this again throws.
+        /// </summary>
+        /// <remarks>
+        /// The nodes collected here are handed to the device rather than copied into it,
+        /// and <see cref="Device.AddNodes"/> re-parents each one. A second call would
+        /// therefore attach the *same* node instances to a second device and silently
+        /// repoint the first device's nodes at it. That matters more here than it would
+        /// have in the model this replaces: there is deliberately no <c>GetTopic()</c>
+        /// any more, so an adapter names every entity by walking
+        /// <see cref="EntityBase.Parent"/>, and the first device's whole tree would go
+        /// out under the second device's id. Refused rather than deep-copied: a builder
+        /// is a description of one device, and nothing needs to build two.
+        /// </remarks>
+        /// <exception cref="InvalidOperationException">This builder has already built.</exception>
         public Device BuildDevice()
         {
+            if (_built)
+            {
+                throw new InvalidOperationException($"The device '{_id}' has already been built; a builder builds once.");
+            }
+
             var device = new Device(_id, _name);
             device.AddNodes(_nodes);
+
+            _built = true;
 
             return device;
         }

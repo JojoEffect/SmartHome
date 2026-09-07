@@ -1,6 +1,7 @@
 using SmartHome.DeviceModel.Enums;
 using SmartHome.DeviceModel.EventArgs;
 using SmartHome.DeviceModel.Formats;
+using System;
 using System.Text;
 
 namespace SmartHome.DeviceModel.Properties
@@ -20,6 +21,15 @@ namespace SmartHome.DeviceModel.Properties
         {
             Range = range;
             Value = initialValue;
+
+            // An initial value goes on the wire the same way a controller's does --
+            // GetPayload() announces it into the retained store before anything has been
+            // Set -- so it is held to the same declaration. Without this a property can
+            // be built already advertising a number its own Set() refuses.
+            if (Range != null && !Range.Contains(initialValue))
+            {
+                throw new ArgumentException($"Property '{id}': the initial value {initialValue} is outside the range '{Range}' it declares.");
+            }
         }
 
         public int Value { get; private set; }
@@ -34,8 +44,7 @@ namespace SmartHome.DeviceModel.Properties
         public void Update(int newValue)
         {
             Value = newValue;
-            PropertyUpdateEventArgs args = new(this, Encoding.UTF8.GetBytes(newValue.ToString()));
-            OnUpdate?.Invoke(args);
+            OnUpdate?.Invoke(new PropertyUpdateEventArgs(this, Encoding.UTF8.GetBytes(newValue.ToString())));
         }
 
         /// <summary>Declares the value this property is heading for. See <see cref="PropertyBase.Target"/>.</summary>

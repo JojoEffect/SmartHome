@@ -147,6 +147,16 @@ namespace SmartHome.DeviceModel.Properties
                 throw new InvalidOperationException($"Property '{Id}' is not settable.");
             }
 
+            // Rejected like any other payload this property cannot hold, rather than
+            // dereferenced. This runs on the transport's dispatch thread, where a throw
+            // takes down every subsequent delivery for the device, so nothing a caller
+            // can pass may reach one.
+            if (value == null)
+            {
+                _logger.LogWarning($"Property '{Id}' rejected a null payload.");
+                return false;
+            }
+
             var str = Encoding.UTF8.GetString(value, 0, value.Length);
 
             // Before SetInternal, deliberately. Validating afterwards would mean the
@@ -187,8 +197,29 @@ namespace SmartHome.DeviceModel.Properties
         /// <c>SetTarget</c> of each property, which encodes the value exactly as
         /// <see cref="GetPayload"/> would.
         /// </summary>
+        /// <remarks>
+        /// Held to the same declaration <see cref="Set"/> enforces. A target is a value
+        /// this property says it is heading for, so a target the property would refuse
+        /// as a value is a promise it cannot keep -- and an adapter publishing
+        /// <c>$target</c> from here would advertise, to every controller, a number the
+        /// same property rejects on <c>/set</c>.
+        ///
+        /// Thrown rather than logged and dropped, unlike a rejected <c>/set</c>: this
+        /// argument comes from the device's own code, not from a controller, so it is a
+        /// mistake to surface rather than a hostile payload to absorb. Same call
+        /// <c>FloatProperty.EnsurePublishable</c> makes for a non-finite value.
+        /// </remarks>
+        /// <exception cref="ArgumentException">
+        /// The value is not one this property's declared format permits.
+        /// </exception>
         protected void SetTargetPayload(string payload)
         {
+            var rejection = Validate(payload);
+            if (rejection != null)
+            {
+                throw new ArgumentException($"Property '{Id}' cannot target '{payload}': {rejection}.");
+            }
+
             Target = payload;
             OnTargetUpdate?.Invoke(new PropertyUpdateEventArgs(this, Encoding.UTF8.GetBytes(payload)));
         }

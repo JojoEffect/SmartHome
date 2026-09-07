@@ -1,5 +1,6 @@
 using SmartHome.DeviceModel.Enums;
 using SmartHome.DeviceModel.EventArgs;
+using System;
 using System.Text;
 
 namespace SmartHome.DeviceModel.Properties
@@ -33,6 +34,16 @@ namespace SmartHome.DeviceModel.Properties
         {
             Schema = schema;
             Value = initialValue;
+
+            // Same shape check the /set path applies. GetPayload() announces this into
+            // the retained store before anything has been Set, so without it a property
+            // built with "42" advertises a payload its own Validate calls "not a JSON
+            // array or object".
+            var rejection = Validate(initialValue);
+            if (rejection != null)
+            {
+                throw new ArgumentException($"Property '{id}': the initial value '{initialValue}' is {rejection}.");
+            }
         }
 
         /// <summary>The raw JSON text.</summary>
@@ -51,8 +62,7 @@ namespace SmartHome.DeviceModel.Properties
         public void Update(string newValue)
         {
             Value = newValue;
-            PropertyUpdateEventArgs args = new(this, Encoding.UTF8.GetBytes(newValue));
-            OnUpdate?.Invoke(args);
+            OnUpdate?.Invoke(new PropertyUpdateEventArgs(this, Encoding.UTF8.GetBytes(newValue)));
         }
 
         /// <summary>Declares the value this property is heading for. See <see cref="PropertyBase.Target"/>.</summary>

@@ -57,16 +57,59 @@ namespace SmartHome.DeviceModel.Formats
         public double Step { get; }
 
         /// <summary>A closed range, both ends inclusive. This is all Homie v4 can express.</summary>
-        public static NumericRange Between(double minimum, double maximum) =>
-            new(true, minimum, true, maximum, false, 0);
+        /// <exception cref="System.ArgumentException">
+        /// Either bound is NaN or infinite, or the minimum is above the maximum.
+        /// </exception>
+        public static NumericRange Between(double minimum, double maximum)
+        {
+            EnsureUsableBound(minimum, "minimum");
+            EnsureUsableBound(maximum, "maximum");
+
+            // The same two checks TryParse makes before it will hand back a range, held
+            // here too so that the typed route cannot build one the text route refuses.
+            // A range with its ends the wrong way round contains nothing at all, so a
+            // property declaring it would refuse every payload for the life of the
+            // device -- the exact inversion of "a malformed declaration must not start
+            // refusing a controller's otherwise valid payloads".
+            if (minimum > maximum)
+            {
+                throw new System.ArgumentException($"A range's minimum must not be above its maximum, was {minimum}:{maximum}.");
+            }
+
+            return new(true, minimum, true, maximum, false, 0);
+        }
 
         /// <summary>A range open at the top: <c>value &gt;= minimum</c>.</summary>
-        public static NumericRange AtLeast(double minimum) =>
-            new(true, minimum, false, 0, false, 0);
+        /// <exception cref="System.ArgumentException">The bound is NaN or infinite.</exception>
+        public static NumericRange AtLeast(double minimum)
+        {
+            EnsureUsableBound(minimum, "minimum");
+
+            return new(true, minimum, false, 0, false, 0);
+        }
 
         /// <summary>A range open at the bottom: <c>value &lt;= maximum</c>.</summary>
-        public static NumericRange AtMost(double maximum) =>
-            new(false, 0, true, maximum, false, 0);
+        /// <exception cref="System.ArgumentException">The bound is NaN or infinite.</exception>
+        public static NumericRange AtMost(double maximum)
+        {
+            EnsureUsableBound(maximum, "maximum");
+
+            return new(false, 0, true, maximum, false, 0);
+        }
+
+        /// <remarks>
+        /// Neither end may be NaN or an infinity, for the reason <see cref="TryParse"/>
+        /// gives: they are not values a payload can carry either, and every comparison
+        /// against NaN is false, so a NaN bound would silently enforce nothing while
+        /// still reading as a declared one.
+        /// </remarks>
+        private static void EnsureUsableBound(double bound, string which)
+        {
+            if (double.IsNaN(bound) || double.IsInfinity(bound))
+            {
+                throw new System.ArgumentException($"A range's {which} must be a finite number, was {bound}.");
+            }
+        }
 
         /// <summary>
         /// The same range with a step. Returns a new instance; this type is immutable.

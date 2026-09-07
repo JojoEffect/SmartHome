@@ -16,6 +16,20 @@ namespace SmartHome.DeviceModel.Properties
     /// </remarks>
     public class DurationProperty : PropertyBase
     {
+        /// <summary>
+        /// The largest whole number of seconds a <see cref="TimeSpan"/> can carry.
+        /// </summary>
+        private const long MaxPublishableSeconds = long.MaxValue / TimeSpan.TicksPerSecond;
+
+        /// <remarks>
+        /// Static so the two tables are built once at type-init rather than twice per
+        /// <c>Set</c> -- <see cref="Validate"/> and <see cref="SetInternal"/> each run
+        /// the parser.
+        /// </remarks>
+        private static readonly char[] Designators = new char[] { 'H', 'M', 'S' };
+
+        private static readonly long[] Multipliers = new long[] { 3600, 60, 1 };
+
         public DurationProperty(
             string id,
             string name,
@@ -37,8 +51,7 @@ namespace SmartHome.DeviceModel.Properties
         public void Update(TimeSpan newValue)
         {
             Value = EnsurePublishable(newValue);
-            PropertyUpdateEventArgs args = new(this, Encoding.UTF8.GetBytes(FormatValue(newValue)));
-            OnUpdate?.Invoke(args);
+            OnUpdate?.Invoke(new PropertyUpdateEventArgs(this, Encoding.UTF8.GetBytes(FormatValue(newValue))));
         }
 
         /// <summary>Declares the value this property is heading for. See <see cref="PropertyBase.Target"/>.</summary>
@@ -152,10 +165,7 @@ namespace SmartHome.DeviceModel.Properties
             var seenAny = false;
 
             // The designators in the order they may appear; each at most once.
-            var designators = new char[] { 'H', 'M', 'S' };
-            var multipliers = new long[] { 3600, 60, 1 };
-
-            for (int slot = 0; slot < designators.Length && index < value.Length; slot++)
+            for (int slot = 0; slot < Designators.Length && index < value.Length; slot++)
             {
                 var firstDigit = index;
                 long magnitude = 0;
@@ -164,8 +174,9 @@ namespace SmartHome.DeviceModel.Properties
                 {
                     magnitude = (magnitude * 10) + (value[index] - '0');
 
-                    // Bounded well below where the multiplication below could overflow a
-                    // long, and far beyond any duration a device has business publishing.
+                    // Bounds the accumulation itself, well below where multiplying by
+                    // 3600 could overflow a long. It does NOT bound the result: see the
+                    // seconds check below, which is the one that matters.
                     if (magnitude > 1000000000L)
                     {
                         return false;
@@ -181,7 +192,7 @@ namespace SmartHome.DeviceModel.Properties
                     continue;
                 }
 
-                if (index >= value.Length || value[index] != designators[slot])
+                if (index >= value.Length || value[index] != Designators[slot])
                 {
                     // Digits followed by something other than this slot's designator.
                     // Try the next slot without consuming them, so "PT5M" is read as
@@ -190,7 +201,21 @@ namespace SmartHome.DeviceModel.Properties
                     continue;
                 }
 
-                totalSeconds += magnitude * multipliers[slot];
+                totalSeconds += magnitude * Multipliers[slot];
+
+                // The digit cap above bounds the accumulation, not the result: 1e9 hours
+                // is 3.6e12 seconds, which is a fine long and 3.6e19 ticks, which is not.
+                // TimeSpan.FromSeconds is an unchecked multiply by TicksPerSecond and
+                // TimeSpan(long) validates nothing, so an overflow here wraps to a
+                // negative Ticks, sails past this parser, and only surfaces as the throw
+                // in EnsurePublishable -- out of SetInternal, on the transport's dispatch
+                // thread, for a payload Validate has already accepted. Refused here
+                // instead, which is where FloatProperty catches its own equivalent.
+                if (totalSeconds > MaxPublishableSeconds)
+                {
+                    return false;
+                }
+
                 seenAny = true;
                 index++;
             }

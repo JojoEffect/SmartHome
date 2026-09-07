@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Text;
 
 namespace SmartHome.DeviceModel.Formats
 {
@@ -110,15 +111,30 @@ namespace SmartHome.DeviceModel.Formats
         /// <summary>The comma-separated rendering, in declaration order.</summary>
         public override string ToString()
         {
-            // Hand-rolled rather than a Join helper: this assembly deliberately
-            // references nothing but the runtime.
-            var joined = string.Empty;
+            // Hand-rolled rather than SmartHome.Text's StringUtils.Join, which is what
+            // SmartHome.Homie uses for exactly this shape: on this runtime a project
+            // reference is deployment bytes, and one StringBuilder is cheaper than a
+            // whole assembly for a comma. Note that this is the only reason -- an
+            // earlier note here said the assembly "references nothing but the runtime",
+            // which DeviceModel.nfproj contradicts: it names nanoFramework.Logging,
+            // .System.Collections and .System.Text, and Sanitise below uses ArrayList
+            // from the second of those.
+            //
+            // A StringBuilder rather than accumulating into a string: the latter is
+            // quadratic, and EnumProperty.Validate renders the options into every
+            // rejection message, so a controller sending bad payloads reaches it.
+            var builder = new StringBuilder();
             for (int i = 0; i < _values.Length; i++)
             {
-                joined = i == 0 ? _values[i] : $"{joined},{_values[i]}";
+                if (i > 0)
+                {
+                    builder.Append(',');
+                }
+
+                builder.Append(_values[i]);
             }
 
-            return joined;
+            return builder.ToString();
         }
 
         /// <summary>The whole rule: trim every entry, drop the ones left empty.</summary>

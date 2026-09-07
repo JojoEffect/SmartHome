@@ -29,8 +29,7 @@ namespace SmartHome.DeviceModel.Properties
         public void Update(string newValue)
         {
             Value = newValue;
-            PropertyUpdateEventArgs args = new(this, Encoding.UTF8.GetBytes(newValue));
-            OnUpdate?.Invoke(args);
+            OnUpdate?.Invoke(new PropertyUpdateEventArgs(this, Encoding.UTF8.GetBytes(newValue)));
         }
 
         /// <summary>Declares the value this property is heading for. See <see cref="PropertyBase.Target"/>.</summary>

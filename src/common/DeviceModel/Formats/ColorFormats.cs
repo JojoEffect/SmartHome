@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Text;
 
 namespace SmartHome.DeviceModel.Formats
 {
@@ -124,15 +125,21 @@ namespace SmartHome.DeviceModel.Formats
         /// <summary>The comma-separated rendering, most preferred first.</summary>
         public override string ToString()
         {
-            // Hand-rolled rather than a Join helper: this assembly deliberately
-            // references nothing but the runtime, and the list is at most three entries.
-            var joined = string.Empty;
+            // Same call as EnumOptions.ToString, and see the note there: a StringBuilder
+            // rather than a reference to SmartHome.Text for a comma, and rather than
+            // accumulating into a string.
+            var builder = new StringBuilder();
             for (int i = 0; i < _values.Length; i++)
             {
-                joined = i == 0 ? _values[i] : $"{joined},{_values[i]}";
+                if (i > 0)
+                {
+                    builder.Append(',');
+                }
+
+                builder.Append(_values[i]);
             }
 
-            return joined;
+            return builder.ToString();
         }
 
         private static bool IsKnown(string value) => value == Rgb || value == Hsv || value == Xyz;
