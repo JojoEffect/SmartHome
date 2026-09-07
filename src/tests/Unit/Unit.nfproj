@@ -37,6 +37,7 @@
   <ItemGroup>
     <Compile Include="AssemblyIdentityTests.cs" />
     <Compile Include="DeviceModelFormatTests.cs" />
+    <Compile Include="DeviceModelGuardTests.cs" />
     <Compile Include="DeviceModelTests.cs" />
     <Compile Include="DeviceModelValueTests.cs" />
     <Compile Include="HomieClientTests.cs" />
