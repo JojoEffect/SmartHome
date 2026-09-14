@@ -66,8 +66,9 @@ namespace SmartHome.DeviceModel.Properties
         public string Unit { get; }
 
         /// <summary>
-        /// What the value means, independently of its unit. Ignored by the Homie
-        /// adapters, and the source of Home Assistant's device class.
+        /// What the value means, independently of its unit. An adapter whose convention
+        /// has a semantic category of its own maps this onto it; one that has none
+        /// ignores it.
         /// </summary>
         public QuantityKind QuantityKind { get; }
 
@@ -93,12 +94,11 @@ namespace SmartHome.DeviceModel.Properties
         /// is, or null when there is no transition in flight.
         /// </summary>
         /// <remarks>
-        /// Homie v5's <c>$target</c>: it closes the loop for a controller that has just
-        /// written a value, and it is the only way a device can say "I heard you, this
-        /// will take a while" for something that is not instantaneous -- a light dimming
-        /// over ten seconds, a motorised valve. Homie v4 and Home Assistant have no
-        /// equivalent, so their adapters ignore it; nothing else in the model depends on
-        /// it, so leaving it unset costs nothing.
+        /// It closes the loop for a controller that has just written a value, and it is
+        /// the only way a device can say "I heard you, this will take a while" for
+        /// something that is not instantaneous -- a light dimming over ten seconds, a
+        /// motorised valve. An adapter whose convention has no equivalent ignores it;
+        /// nothing else in the model depends on it, so leaving it unset costs nothing.
         /// </remarks>
         public string? Target { get; private set; }
 
@@ -135,10 +135,10 @@ namespace SmartHome.DeviceModel.Properties
         /// </returns>
         /// <remarks>
         /// A rejected payload is logged and dropped: the value does not move, so nothing
-        /// is published and nothing lands in the broker's retained store. Homie has no
-        /// "command refused" channel, so a property that did not change is the only
-        /// feedback a controller gets -- and it is the same signal the convention gives
-        /// for any other refusal.
+        /// is published and nothing lands in the broker's retained store. A convention
+        /// of this kind has no "command refused" channel, so a property that did not
+        /// change is the only feedback a controller gets -- and it is the same signal it
+        /// gives for any other refusal.
         /// </remarks>
         public bool Set(byte[] value)
         {

@@ -4,17 +4,18 @@ namespace SmartHome.DeviceModel.Enums
     /// What kind of value a property holds.
     /// </summary>
     /// <remarks>
-    /// All nine Homie v5 datatypes, which is a superset of Homie v4's six. The model
-    /// carries the whole set so that a device can be described once and published by
-    /// whichever adapter is compiled in; an adapter whose convention cannot express one
-    /// of them -- Homie v4 has no <see cref="DateTime"/>, <see cref="Duration"/> or
-    /// <see cref="Json"/> -- is expected to refuse such a property loudly when the
-    /// device is built, rather than publish something the convention does not define.
+    /// Deliberately the union rather than an intersection: the model carries every kind
+    /// of value a device might hold, so that a device can be described once and
+    /// published by whichever adapter is compiled in. Conventions differ in what they
+    /// can express, and an adapter whose convention cannot express one of these is
+    /// expected to refuse such a property loudly when the device is built, rather than
+    /// publish something that convention does not define.
     ///
-    /// Deliberately no <c>GetString()</c> here. The tokens a datatype goes out as
-    /// ("integer", "float", ...) are a property of the convention, not of the model, and
-    /// Home Assistant's MQTT Discovery publishes no datatype at all -- it infers a
-    /// component from the datatype and the settable flag. Naming is the adapter's job.
+    /// Deliberately no <c>GetString()</c> here. The token a datatype goes out as, and
+    /// whether it goes out at all, are properties of the convention rather than of the
+    /// model -- some publish a datatype attribute, others infer a component from the
+    /// datatype and the settable flag and publish no datatype of their own. Naming is
+    /// the adapter's job.
     /// </remarks>
     public enum DataType
     {
@@ -25,13 +26,13 @@ namespace SmartHome.DeviceModel.Enums
         Enum = 4,
         Color = 5,
 
-        /// <summary>An instant in time. Homie v5 only.</summary>
+        /// <summary>An instant in time. Not every convention carries this.</summary>
         DateTime = 6,
 
-        /// <summary>An elapsed time. Homie v5 only.</summary>
+        /// <summary>An elapsed time. Not every convention carries this.</summary>
         Duration = 7,
 
-        /// <summary>A JSON array or object. Homie v5 only.</summary>
+        /// <summary>A JSON array or object. Not every convention carries this.</summary>
         Json = 8,
     }
 }

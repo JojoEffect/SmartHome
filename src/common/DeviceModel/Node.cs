@@ -9,10 +9,11 @@ namespace SmartHome.DeviceModel
     /// A group of properties within a device -- a sensor, a relay bank, an engine.
     /// </summary>
     /// <remarks>
-    /// Both Homie versions have this level; Home Assistant does not, and an HA adapter
-    /// has to flatten it by folding the node id into each entity's id. That flattening is
-    /// the adapter's problem precisely because the node is real in the model: throwing
-    /// the level away here would lose information both Homie versions need.
+    /// Not every convention has this level. An adapter for one that does not has to
+    /// flatten it, typically by folding the node id into each entity identifier. That
+    /// flattening is the adapter's problem precisely because the node is real in the
+    /// model: throwing the level away here would lose information the conventions that
+    /// do have it need.
     /// </remarks>
     public class Node : NamedEntityBase
     {
@@ -30,7 +31,7 @@ namespace SmartHome.DeviceModel
 
         /// <summary>
         /// What kind of node this is, e.g. <c>"BMP280"</c>. Free-form, and carried
-        /// through by the Homie adapters as their <c>type</c>.
+        /// through by an adapter whose convention has somewhere to put it.
         /// </summary>
         public string Type { get; }
 

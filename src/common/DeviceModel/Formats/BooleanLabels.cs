@@ -7,24 +7,22 @@ namespace SmartHome.DeviceModel.Formats
     /// <remarks>
     /// **Descriptive, never payload-defining.** A boolean payload is the literal
     /// <c>true</c> or <c>false</c> whatever these say; the labels exist so a controller
-    /// can draw a switch that reads "open/closed" instead of "true/false". Homie v5 is
-    /// explicit about this ("the format does NOT specify valid payloads"), and it is
-    /// worth being explicit here too, because a reader who assumed otherwise would build
-    /// a device that refuses <c>true</c>.
+    /// can draw a switch that reads "open/closed" instead of "true/false". Worth being
+    /// explicit about, because a reader who assumed otherwise would build a device that
+    /// refuses <c>true</c>.
     ///
-    /// Homie v4 has no such format for booleans, so a v4 adapter drops these. Home
-    /// Assistant has the same idea under a different name and a different meaning --
-    /// <c>payload_on</c>/<c>payload_off</c> *do* define the payloads -- so an HA adapter
-    /// must not map these onto those.
+    /// An adapter whose convention has no such notion simply drops these. One whose
+    /// convention has a similar-looking pair that *does* define the payloads must not
+    /// map these onto it -- same shape, opposite meaning.
     /// </remarks>
     public class BooleanLabels
     {
         /// <exception cref="System.ArgumentException">Either label is null or empty.</exception>
         public BooleanLabels(string falseLabel, string trueLabel)
         {
-            // Both or neither: Homie v5 requires both entries when the format is given
-            // at all, and a half-declared pair would leave a controller rendering one
-            // side of a switch.
+            // Both or neither: a half-declared pair would leave a controller rendering
+            // one side of a switch, and conventions that carry labels at all generally
+            // require both entries when the format is given.
             if (string.IsNullOrEmpty(falseLabel) || string.IsNullOrEmpty(trueLabel))
             {
                 throw new System.ArgumentException("Boolean labels must name both the false and the true value.");

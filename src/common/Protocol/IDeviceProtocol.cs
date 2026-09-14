@@ -14,8 +14,8 @@ namespace SmartHome.Protocol
     /// An app builds a <c>Device</c> with the neutral builder, hands it to whichever
     /// adapter is compiled in, and then talks only to this interface: connect, announce,
     /// go to sleep, say what is wrong, act on commands. Which convention that goes out
-    /// as -- Homie v4, Homie v5, Home Assistant MQTT Discovery -- is a choice about which
-    /// implementation is constructed, and nothing above this line changes with it.
+    /// as is a choice about which implementation is constructed, and nothing above this
+    /// line changes with it.
     ///
     /// Deliberately NOT derived from <c>IReconnectingMqttClient</c>. A device *owns* an
     /// MQTT connection, it is not itself one -- and exposing Publish/Subscribe here would
@@ -24,10 +24,10 @@ namespace SmartHome.Protocol
     /// convention an implementation exists to keep.
     ///
     /// An implementation takes an <c>IReconnectingMqttClient</c> by constructor injection
-    /// and owns the session on it, including the last will: Homie requires the connection
-    /// to carry one setting the device's state to <c>lost</c>, and a will can only be
-    /// declared in CONNECT. A session someone else opened cannot have it, so an
-    /// implementation must replace such a session rather than reuse it.
+    /// and owns the session on it, including the last will. A convention that wants a
+    /// device declared lost when its connection drops can only get that from a will, and
+    /// a will can only be declared in CONNECT. A session someone else opened cannot have
+    /// it, so an implementation must replace such a session rather than reuse it.
     ///
     /// The device model says what the device *is*; this interface is what you *do* with
     /// it.
@@ -91,11 +91,11 @@ namespace SmartHome.Protocol
         /// flat battery and a device with an unreadable sensor are different situations,
         /// and the state-only spelling this replaces could not tell a controller which
         /// it was looking at. An adapter whose convention has no room for the detail --
-        /// Homie v4 has one <c>alert</c> state and nothing else -- still gets to publish
-        /// the fact, and logs the rest.
+        /// one that carries a single "something is wrong" and nothing else -- still gets
+        /// to publish the fact, and logs the rest.
         ///
-        /// The id follows the same character rule as a node or property id, because
-        /// Homie v5 publishes it as a topic level.
+        /// The id follows the same character rule as a node or property id, since an
+        /// adapter may well carry it as a path segment.
         /// </remarks>
         /// <param name="id">What is wrong, e.g. <c>battery</c>.</param>
         /// <param name="message">The human-readable description.</param>

@@ -7,9 +7,10 @@ namespace SmartHome.DeviceModel.Formats
     /// The colour encodings a colour property supports, most preferred first.
     /// </summary>
     /// <remarks>
-    /// Homie v5 shape: an ordered list drawn from <c>rgb</c>, <c>hsv</c> and <c>xyz</c>.
-    /// Homie v4 declares exactly one, so a v4 adapter publishes the first entry and the
-    /// rest are simply unsaid on that wire.
+    /// An ordered list drawn from <c>rgb</c>, <c>hsv</c> and <c>xyz</c>. Ordered because
+    /// conventions differ in how many encodings they can declare: one that carries only
+    /// a single encoding takes <see cref="Preferred"/> and the rest go unsaid on that
+    /// wire.
     ///
     /// Declaring an encoding is a statement about what a *controller* may send. This
     /// model's own colour value is an RGB triple and parses only the rgb payload form
@@ -21,13 +22,13 @@ namespace SmartHome.DeviceModel.Formats
     /// </remarks>
     public class ColorFormats
     {
-        /// <summary>The Homie token for a red/green/blue triple.</summary>
+        /// <summary>The token for a red/green/blue triple.</summary>
         public const string Rgb = "rgb";
 
-        /// <summary>The Homie token for hue/saturation/value.</summary>
+        /// <summary>The token for hue/saturation/value.</summary>
         public const string Hsv = "hsv";
 
-        /// <summary>The Homie token for CIE 1931 x/y chromaticity.</summary>
+        /// <summary>The token for CIE 1931 x/y chromaticity.</summary>
         public const string Xyz = "xyz";
 
         private readonly string[] _values;
@@ -74,7 +75,10 @@ namespace SmartHome.DeviceModel.Formats
             }
         }
 
-        /// <summary>The preferred encoding, and the only one Homie v4 can carry.</summary>
+        /// <summary>
+        /// The preferred encoding, and the only one a convention that declares just one
+        /// can carry.
+        /// </summary>
         public string Preferred => _values[0];
 
         /// <summary>Whether an encoding was declared.</summary>

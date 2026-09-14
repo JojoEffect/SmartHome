@@ -4,19 +4,19 @@ namespace SmartHome.DeviceModel.Enums
     /// Where a device is in its lifecycle.
     /// </summary>
     /// <remarks>
-    /// The five states Homie v5 defines, which Homie v4 also has, under names that say
-    /// what the device is doing rather than what a particular convention calls it. The
-    /// mapping to a wire token belongs to the adapter (Homie publishes
-    /// <c>init</c>/<c>ready</c>/<c>disconnected</c>/<c>sleeping</c>/<c>lost</c>; Home
-    /// Assistant has no lifecycle attribute at all and expresses this through
-    /// availability).
+    /// Named for what the device is doing rather than for what any one convention calls
+    /// it. The mapping to a wire token belongs to the adapter, and conventions vary
+    /// widely: some publish a lifecycle attribute with tokens of their own, others have
+    /// no lifecycle attribute at all and express the same facts through an availability
+    /// topic.
     ///
-    /// There is deliberately no <c>Alert</c> state. Homie v4 has one, and it can say
-    /// only *that* something is wrong; Homie v5 replaced it with alerts carrying an id
-    /// and a message, which is strictly more information. The model therefore keeps
-    /// alerts separate (<see cref="SmartHome.DeviceModel.Device.RaiseAlert"/>), and a v4 adapter synthesises
-    /// its <c>alert</c> state from "any alert is raised". That mapping is one-way and
-    /// lossy downward, which is why it lives in the adapter and not here.
+    /// There is deliberately no <c>Alert</c> state. A lifecycle state can say only
+    /// *that* something is wrong, where an alert carries an id and a message, which is
+    /// strictly more information. The model therefore keeps alerts separate
+    /// (<see cref="SmartHome.DeviceModel.Device.RaiseAlert"/>). An adapter whose
+    /// convention has only the coarser spelling synthesises it from "any alert is
+    /// raised"; that mapping is one-way and lossy, which is why it lives in the adapter
+    /// and not here.
     /// </remarks>
     public enum DeviceState
     {
@@ -39,8 +39,8 @@ namespace SmartHome.DeviceModel.Enums
         /// </summary>
         /// <remarks>
         /// Both meanings are the same fact -- this device is not on the broker -- and
-        /// Homie spells them with the single token <c>disconnected</c>, which a device
-        /// must publish before it disconnects.
+        /// one state is enough to carry it. Conventions that want it announced expect a
+        /// device to say so before it disconnects.
         /// </remarks>
         Disconnecting = 2,
 

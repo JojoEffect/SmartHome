@@ -35,9 +35,9 @@ namespace SmartHome.DeviceModel.Properties
         /// <summary>Declares the value this property is heading for. See <see cref="PropertyBase.Target"/>.</summary>
         public void SetTarget(string value) => SetTargetPayload(value);
 
-        // Any payload is a valid string, and no convention this model targets gives a
-        // string property a format -- so there is nothing declared for a payload to
-        // violate, and this type carries no format at all.
+        // Any payload is a valid string, and a string property is not usually given a
+        // format at all -- so there is nothing declared for a payload to violate, and
+        // this type carries no format.
         internal override string? Validate(string value) => null;
 
         internal override void SetInternal(string value) => Update(value);

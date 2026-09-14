@@ -14,10 +14,9 @@ namespace SmartHome.DeviceModel.Formats
     ///
     /// Note that this is a decision about the *declaration*, not about payloads: a
     /// controller sending <c>" low"</c> is sending a different value, and it is refused.
-    /// Homie v5 says leading and trailing whitespace in an enum value is significant,
-    /// which is exactly what makes trimming the declaration safe -- an option that only
-    /// differed from another by its surrounding spaces could never have been addressed
-    /// separately anyway.
+    /// Surrounding whitespace in an enum value is significant, which is exactly what
+    /// makes trimming the declaration safe -- an option that differed from another only
+    /// by its surrounding spaces could never have been addressed separately anyway.
     ///
     /// Immutable: a property's option set must not change after it has been announced.
     /// </remarks>
@@ -27,8 +26,8 @@ namespace SmartHome.DeviceModel.Formats
 
         /// <param name="values">
         /// The permitted values. Trimmed, and entries that are empty afterwards are
-        /// dropped -- an empty string is not a valid payload for any Homie datatype, so
-        /// an empty option could never be selected.
+        /// dropped -- an empty payload is how a retained value is deleted rather than a
+        /// value in its own right, so an empty option could never be selected.
         /// </param>
         /// <exception cref="System.ArgumentException">Nothing is left after trimming.</exception>
         public EnumOptions(string[] values)
@@ -111,10 +110,10 @@ namespace SmartHome.DeviceModel.Formats
         /// <summary>The comma-separated rendering, in declaration order.</summary>
         public override string ToString()
         {
-            // Hand-rolled rather than SmartHome.Text's StringUtils.Join, which is what
-            // SmartHome.Homie uses for exactly this shape: on this runtime a project
-            // reference is deployment bytes, and one StringBuilder is cheaper than a
-            // whole assembly for a comma. Note that this is the only reason -- an
+            // Hand-rolled rather than SmartHome.Text's StringUtils.Join, which another
+            // library in this solution uses for exactly this shape: on this runtime a
+            // project reference is deployment bytes, and one StringBuilder is cheaper
+            // than a whole assembly for a comma. Note that this is the only reason -- an
             // earlier note here said the assembly "references nothing but the runtime",
             // which DeviceModel.nfproj contradicts: it names nanoFramework.Logging,
             // .System.Collections and .System.Text, and Sanitise below uses ArrayList

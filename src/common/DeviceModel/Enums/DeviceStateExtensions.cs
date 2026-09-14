@@ -6,12 +6,12 @@ namespace SmartHome.DeviceModel.Enums
         /// A readable name for a state, for logs and test failure messages.
         /// </summary>
         /// <remarks>
-        /// **Not a wire token, and shaped so it cannot be mistaken for one.** Homie
-        /// publishes lowercase <c>init</c>, <c>ready</c>, <c>disconnected</c>,
-        /// <c>sleeping</c> and <c>lost</c>; two of those are not even spelled like the
-        /// model's names for the same states. Choosing the token is the adapter's job,
-        /// and an adapter that published these capitalised names instead would fail its
-        /// own conformance run immediately, which is the point of capitalising them.
+        /// **Not a wire token, and shaped so it cannot be mistaken for one.** Conventions
+        /// that publish a lifecycle at all tend to spell it lowercase, and not
+        /// necessarily with the model's own names for the same states. Choosing the token
+        /// is the adapter's job, and an adapter that published these capitalised names
+        /// instead would fail its own conformance run immediately, which is the point of
+        /// capitalising them.
         ///
         /// Written out rather than left to <c>Enum.ToString()</c> because that reads the
         /// enum's names through reflection, which a NoReflection firmware target does

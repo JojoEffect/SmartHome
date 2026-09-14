@@ -23,15 +23,15 @@ namespace SmartHome.DeviceModel
         /// An id "MAY contain lowercase letters from a to z, numbers from 0 to 9 as well
         /// as the hyphen character", and "MUST NOT start or end with a hyphen".
         ///
-        /// That is Homie's rule, and it stays in the model rather than moving to the
-        /// Homie adapter because it is the *intersection* of what the conventions this
-        /// model targets will accept: Homie v4 and v5 state it outright, and while Home
-        /// Assistant is laxer about entity ids, an id that satisfies this is safe
-        /// everywhere. Validating the loosest thing here and the strictest thing in each
-        /// adapter would mean a device that builds and then fails to publish.
+        /// A deliberately strict rule, and it stays in the model rather than moving to
+        /// any one adapter because it is the *intersection* of what conventions in this
+        /// space accept. Some state exactly this; others are laxer, and an id that
+        /// satisfies this one is safe under those too. Validating the loosest thing here
+        /// and the strictest thing in each adapter would mean a device that builds and
+        /// then fails to publish.
         ///
-        /// Alert ids are held to the same rule, for the same reason: Homie v5 puts them
-        /// in a topic level.
+        /// It is also what keeps an id safe to use as a path segment, which is how these
+        /// ids are usually carried. Alert ids are held to the same rule for that reason.
         /// </remarks>
         internal static string ValidateId(string id)
         {

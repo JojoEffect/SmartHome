@@ -14,8 +14,9 @@ namespace SmartHome.DeviceModel.Formats
     /// property refused was advertised as acceptable. Parsing happens once, here, and
     /// every consumer reads the result.
     ///
-    /// Open-ended sides and the step are Homie v5. Homie v4 defines only <c>min:max</c>
-    /// with both ends present, so a v4 adapter has to refuse a range it cannot express
+    /// An open-ended side and a step are the parts a convention is least likely to be
+    /// able to carry; a closed <c>min:max</c> with both ends present is the common
+    /// denominator. An adapter whose convention cannot express a range has to refuse it
     /// rather than render an approximation of it.
     ///
     /// Immutable: nothing may narrow a property's declared range after the device has
@@ -56,7 +57,10 @@ namespace SmartHome.DeviceModel.Formats
         /// <summary>The step, meaningful only when <see cref="HasStep"/>. Always greater than zero.</summary>
         public double Step { get; }
 
-        /// <summary>A closed range, both ends inclusive. This is all Homie v4 can express.</summary>
+        /// <summary>
+        /// A closed range, both ends inclusive -- the only shape every convention can
+        /// express.
+        /// </summary>
         /// <exception cref="System.ArgumentException">
         /// Either bound is NaN or infinite, or the minimum is above the maximum.
         /// </exception>
@@ -134,12 +138,13 @@ namespace SmartHome.DeviceModel.Formats
         /// that was not declared cannot be violated.
         /// </summary>
         /// <remarks>
-        /// The step is deliberately not enforced. Homie v5 says a consumer should *round*
-        /// a value to the nearest step and then check the bounds, which changes the value
-        /// rather than refusing it -- and silently moving a number a controller asked for
-        /// is a different behaviour from this model's, where a payload is either applied
-        /// as sent or dropped. The step is carried for adapters that publish it, and for
-        /// a controller to render a slider with.
+        /// The step is deliberately not enforced. Where a convention says anything about
+        /// it at all, it tends to say a consumer should *round* a value to the nearest
+        /// step and then check the bounds -- which changes the value rather than refusing
+        /// it, and silently moving a number a controller asked for is a different
+        /// behaviour from this model's, where a payload is either applied as sent or
+        /// dropped. The step is carried for adapters that publish it, and for a
+        /// controller to render a slider with.
         /// </remarks>
         public bool Contains(double value)
         {
@@ -168,8 +173,9 @@ namespace SmartHome.DeviceModel.Formats
         /// controller's otherwise valid payloads, and the malformed text is visible in
         /// the adapter's own build-time check.
         ///
-        /// <c>":"</c> parses to false as well. It is legal Homie v5 -- it is the default
-        /// format -- but it declares neither end, which is the same as declaring nothing.
+        /// <c>":"</c> parses to false as well. A convention may well accept it as its
+        /// default format, but it declares neither end, which is the same as declaring
+        /// nothing.
         /// </remarks>
         public static bool TryParse(string format, out NumericRange? range)
         {
@@ -234,10 +240,10 @@ namespace SmartHome.DeviceModel.Formats
         /// why <c>FloatProperty</c> publishes fixed-decimal instead. An adapter that
         /// publishes a range has to render the bounds the same deliberate way.
         ///
-        /// And a Homie v4 <c>$format</c> is <c>min:max</c> with both ends present and no
-        /// step, so an open-ended or stepped range has no v4 spelling at all and must be
-        /// refused when the device is built rather than rendered into something a v4
-        /// controller will misread.
+        /// And a convention that spells a range as <c>min:max</c> with both ends present
+        /// and no step has no spelling at all for an open-ended or stepped one, which
+        /// then has to be refused when the device is built rather than rendered into
+        /// something a controller will misread.
         /// </remarks>
         public override string ToString()
         {

@@ -9,9 +9,10 @@ namespace SmartHome.DeviceModel.Properties
     /// An instant in time, published as ISO 8601.
     /// </summary>
     /// <remarks>
-    /// Homie v5 only. Homie v4 has no such datatype, so a v4 adapter must refuse a
-    /// device carrying one rather than invent a spelling for it; Home Assistant has a
-    /// timestamp device class and can take the same ISO 8601 text.
+    /// Not every convention has a datatype for this. An adapter for one that does not
+    /// must refuse a device carrying such a property rather than invent a spelling for
+    /// it; one that has a timestamp category of its own can usually take this same ISO
+    /// 8601 text unchanged.
     ///
     /// Always UTC. nanoFramework's <see cref="DateTime"/> has no notion of local time --
     /// its <c>Kind</c> is hard-coded to UTC -- so this type publishes a trailing 'Z' and

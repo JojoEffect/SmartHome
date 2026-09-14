@@ -19,8 +19,8 @@ namespace SmartHome.DeviceModel
     /// Says nothing about how any of that is published. There is no topic here, no
     /// protocol version, no last will and no MQTT reference anywhere in this assembly --
     /// an adapter reads this tree and decides all of it. That separation is what lets one
-    /// device description go out as Homie v4, Homie v5 or Home Assistant MQTT Discovery
-    /// with the device app unchanged.
+    /// device description go out under any convention an adapter is written for, with
+    /// the device app unchanged.
     /// </remarks>
     public class Device : NamedEntityBase
     {
@@ -87,8 +87,8 @@ namespace SmartHome.DeviceModel
         }
 
         /// <summary>
-        /// Whether anything is wrong. A Homie v4 adapter's whole view of the alert set:
-        /// it can publish <c>$state = alert</c> and nothing more.
+        /// Whether anything is wrong. This is the whole of the alert set an adapter can
+        /// use when its convention carries no more than a single "something is wrong".
         /// </summary>
         public bool HasAlerts
         {
@@ -107,12 +107,12 @@ namespace SmartHome.DeviceModel
         /// <remarks>
         /// Nothing about the device's lifecycle state changes. An alerting device is
         /// still <c>ready</c> as far as this model is concerned -- it is running and it
-        /// is publishing -- and it is the Homie v4 adapter, which has nowhere else to put
-        /// the fact, that turns a non-empty alert set into its <c>alert</c> state.
+        /// is publishing. An adapter whose convention has nowhere else to put the fact is
+        /// the thing that turns a non-empty alert set into a degraded lifecycle state.
         /// </remarks>
         /// <param name="id">
         /// What is wrong, as an id. Held to the same character rule as a node or property
-        /// id: Homie v5 publishes it as a topic level.
+        /// id, since an adapter may well carry it as a path segment.
         /// </param>
         /// <param name="message">The human-readable description.</param>
         /// <exception cref="ArgumentException">The id is empty or not a valid id.</exception>

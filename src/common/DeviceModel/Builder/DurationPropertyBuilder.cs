@@ -4,8 +4,9 @@ using SmartHome.DeviceModel.Properties;
 namespace SmartHome.DeviceModel.Builder
 {
     /// <summary>
-    /// Builds a Homie v5 duration property. A Homie v4 adapter has no such datatype and
-    /// is expected to refuse the device rather than invent a spelling for it.
+    /// Builds a duration property. Not every convention carries this datatype; an adapter
+    /// for one that does not is expected to refuse the device rather than invent a
+    /// spelling for it.
     /// </summary>
     public class DurationPropertyBuilder : PropertyBuilderBase
     {
@@ -49,8 +50,9 @@ namespace SmartHome.DeviceModel.Builder
 
         /// <summary>
         /// What the value means, independently of its unit -- the difference between a
-        /// humidity in <c>%</c> and a battery charge in <c>%</c>. Ignored by the Homie
-        /// adapters; the source of Home Assistant's device class.
+        /// humidity in <c>%</c> and a battery charge in <c>%</c>. An adapter whose
+        /// convention has a semantic category of its own maps this onto it; one that
+        /// has none ignores it.
         /// </summary>
         public DurationPropertyBuilder WithQuantityKind(QuantityKind quantityKind)
         {

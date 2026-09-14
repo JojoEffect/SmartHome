@@ -6,13 +6,14 @@ namespace SmartHome.DeviceModel
     /// </summary>
     /// <remarks>
     /// There is deliberately no <c>GetTopic()</c> here, and that single omission is what
-    /// makes this model protocol-neutral. Its predecessor built <c>homie/&lt;device&gt;/
-    /// &lt;node&gt;/&lt;property&gt;</c> from the parent chain, which put the Homie root
-    /// topic and Homie's topic grammar into every entity in the tree -- so a second
-    /// convention meant either a parallel publisher or a fork. An adapter now walks this
-    /// chain and names things whichever way its own convention requires: Homie v4 nests
-    /// under <c>homie/</c>, Homie v5 under <c>homie/5/</c>, and Home Assistant has no
-    /// node level at all and flattens the two lower levels into one entity id.
+    /// makes this model protocol-neutral. Its predecessor built a topic path from the
+    /// parent chain, which put one convention's root and one convention's topic grammar
+    /// into every entity in the tree -- so a second convention meant either a parallel
+    /// publisher or a fork. An adapter now walks this chain and names things whichever
+    /// way its own convention requires, and the shapes that need naming differ enough
+    /// that no one spelling could serve them: some nest a path per level, some carry a
+    /// version in the root, and some have no node level at all and flatten the two
+    /// lower levels into a single identifier.
     /// </remarks>
     public abstract class EntityBase
     {

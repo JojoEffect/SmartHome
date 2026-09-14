@@ -95,8 +95,9 @@ namespace SmartHome.DeviceModel.Builder
         }
 
         /// <summary>
-        /// Adds a Homie v5 datetime property. A Homie v4 adapter cannot publish one and
-        /// is expected to refuse the device rather than invent a spelling.
+        /// Adds a datetime property. Not every convention carries this datatype; an adapter
+        /// for one that does not is expected to refuse the device rather than invent a
+        /// spelling for it.
         /// </summary>
         public DateTimePropertyBuilder AddDateTimeProperty(string id, string name)
         {
@@ -106,8 +107,9 @@ namespace SmartHome.DeviceModel.Builder
         }
 
         /// <summary>
-        /// Adds a Homie v5 duration property. A Homie v4 adapter cannot publish one and
-        /// is expected to refuse the device rather than invent a spelling.
+        /// Adds a duration property. Not every convention carries this datatype; an adapter
+        /// for one that does not is expected to refuse the device rather than invent a
+        /// spelling for it.
         /// </summary>
         public DurationPropertyBuilder AddDurationProperty(string id, string name)
         {
@@ -117,8 +119,9 @@ namespace SmartHome.DeviceModel.Builder
         }
 
         /// <summary>
-        /// Adds a Homie v5 JSON property. A Homie v4 adapter cannot publish one and is
-        /// expected to refuse the device rather than invent a spelling.
+        /// Adds a JSON property. Not every convention carries this datatype; an adapter
+        /// for one that does not is expected to refuse the device rather than invent a
+        /// spelling for it.
         /// </summary>
         public JsonPropertyBuilder AddJsonProperty(string id, string name, string initialValue)
         {

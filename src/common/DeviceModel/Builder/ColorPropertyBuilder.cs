@@ -71,8 +71,9 @@ namespace SmartHome.DeviceModel.Builder
 
         /// <summary>
         /// What the value means, independently of its unit -- the difference between a
-        /// humidity in <c>%</c> and a battery charge in <c>%</c>. Ignored by the Homie
-        /// adapters; the source of Home Assistant's device class.
+        /// humidity in <c>%</c> and a battery charge in <c>%</c>. An adapter whose
+        /// convention has a semantic category of its own maps this onto it; one that
+        /// has none ignores it.
         /// </summary>
         public ColorPropertyBuilder WithQuantityKind(QuantityKind quantityKind)
         {

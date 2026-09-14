@@ -7,19 +7,20 @@ namespace SmartHome.DeviceModel
     /// A unit is a <c>string</c> in this model, and this class only spells the common
     /// ones so that two properties measuring the same thing cannot disagree about how to
     /// write it. Nothing here is a closed set: a property may carry any unit string, and
-    /// these are simply the ones every Homie consumer is expected to recognise.
+    /// these are simply the ones a consumer is most likely to recognise.
     ///
     /// That openness is the point. The enum this replaces could not express <c>kWh</c>,
-    /// <c>Hz</c>, <c>m³</c> or <c>rpm</c>, all of which the convention lists, and a
-    /// closed enum makes adding one a change to a shared library rather than to the
-    /// device that needs it.
+    /// <c>Hz</c>, <c>m³</c> or <c>rpm</c>, and a closed enum makes adding one a change
+    /// to a shared library rather than to the device that needs it.
     ///
-    /// The values below are the recommended list from the Homie v5 convention
-    /// (homieiot/convention, <c>convention.md</c>, "Units"), which is a superset of
-    /// Homie v4's. The convention pins the non-ASCII ones by codepoint because
-    /// visually identical characters exist -- degree is U+00B0, the cubed sign is
-    /// U+00B3, and mired's characters are U+207B and U+00B9 -- so these constants must
-    /// stay byte-for-byte what is written here.
+    /// The list below was taken from one published recommendation for these strings --
+    /// the Homie v5 convention's "Units" section (homieiot/convention,
+    /// <c>convention.md</c>), cited for provenance rather than as a dependency, since
+    /// any other list would have been a different arbitrary choice of the same shape.
+    /// The non-ASCII ones are pinned by codepoint because visually identical characters
+    /// exist -- degree is U+00B0, the cubed sign is U+00B3, and mired's characters are
+    /// U+207B and U+00B9 -- so these constants must stay byte-for-byte what is written
+    /// here.
     /// </remarks>
     public static class Units
     {

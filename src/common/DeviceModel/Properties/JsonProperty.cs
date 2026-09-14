@@ -10,14 +10,15 @@ namespace SmartHome.DeviceModel.Properties
     /// object.
     /// </summary>
     /// <remarks>
-    /// Homie v5 only; a v4 adapter must refuse a device carrying one. The convention is
-    /// specific that the payload must be an array or an object -- a bare number, string
-    /// or boolean is a case for one of the ordinary datatypes, not for this one.
+    /// Not every convention has a datatype for this; an adapter for one that does not
+    /// must refuse a device carrying such a property. The payload must be an array or
+    /// an object -- a bare number, string or boolean is a case for one of the ordinary
+    /// datatypes, not for this one.
     ///
     /// The schema this property may declare is carried and never enforced. Validating a
     /// payload against a JSON schema needs a JSON parser and a schema engine, neither of
-    /// which belongs in a device model that is otherwise the size of a header file, and
-    /// the convention itself tells a consumer that fails to compile a schema to ignore it.
+    /// which belongs in a device model that is otherwise the size of a header file. A
+    /// consumer that cannot compile the schema is expected to ignore it.
     /// </remarks>
     public class JsonProperty : PropertyBase
     {

@@ -7,9 +7,9 @@ namespace SmartHome.DeviceModel.Builder
     /// </summary>
     /// <remarks>
     /// Neutral by design: nothing here names a convention, so a device written against
-    /// this builder can be published as Homie v4, Homie v5 or Home Assistant MQTT
-    /// Discovery by swapping the adapter it is handed to, and a device that will only
-    /// ever speak to Home Assistant never types the word Homie.
+    /// this builder is published by whichever adapter it is handed to, and swapping that
+    /// adapter is the whole of what it takes to speak a different one. A device author
+    /// never names a convention either.
     /// </remarks>
     public class DeviceBuilder
     {

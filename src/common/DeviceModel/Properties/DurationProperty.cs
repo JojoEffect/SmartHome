@@ -10,9 +10,10 @@ namespace SmartHome.DeviceModel.Properties
     /// <c>PT5M</c>.
     /// </summary>
     /// <remarks>
-    /// Homie v5 only; a v4 adapter must refuse a device carrying one. The convention
-    /// spells the format <c>PTxHxMxS</c> with each component optional, so there are no
-    /// day, month or year components: a duration longer than a day is published as hours.
+    /// Not every convention has a datatype for this; an adapter for one that does not
+    /// must refuse a device carrying such a property. The <c>PTxHxMxS</c> form spells
+    /// each component optionally and has no day, month or year component, so a duration
+    /// longer than a day is published as hours.
     /// </remarks>
     public class DurationProperty : PropertyBase
     {
@@ -101,8 +102,8 @@ namespace SmartHome.DeviceModel.Properties
         /// Sub-second precision is truncated. <c>xS</c> would take a fractional number,
         /// but rendering one on this runtime means either <c>double.ToString</c> -- which
         /// prints 1.5 as 1.5 and 21.5 as 21.499999999999999 -- or hand-assembling the
-        /// digits, and no convention this model targets asks for durations finer than a
-        /// second.
+        /// digits, and a duration finer than a second is not something these conventions
+        /// ask for.
         /// </remarks>
         private static string FormatValue(TimeSpan value)
         {

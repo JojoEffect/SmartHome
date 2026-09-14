@@ -6,10 +6,10 @@ namespace SmartHome.DeviceModel.Enums
     /// <remarks>
     /// The unit alone does not say. <c>%</c> is humidity, battery charge and soil
     /// moisture; each is a different thing to a consumer that wants to draw an icon,
-    /// pick a colour, or decide what "low" means. Homie carries no such semantic in
-    /// either version, so the Homie adapters ignore this outright; Home Assistant's MQTT
-    /// Discovery requires one (its <c>device_class</c>, which it cross-validates against
-    /// the unit), and this is where that comes from.
+    /// pick a colour, or decide what "low" means. Conventions differ on whether they
+    /// carry the distinction at all: an adapter for one that does not simply ignores
+    /// this, while one that has a semantic category of its own -- sometimes required,
+    /// and sometimes cross-validated against the unit -- maps this onto it.
     ///
     /// Kept deliberately small and physical. It answers "what is measured", not "how
     /// should it be displayed" -- the latter differs per consumer and does not belong in

@@ -452,6 +452,19 @@ Four things about it are easy to get wrong, and each is deliberate:
   so a nullable value type does not compile at all on this runtime. Checked against the
   `CoreLibrary` checkout, not assumed.
 
+**No source file under `src/common/DeviceModel` names a convention, and none should.** The
+paragraphs above are this repo's roadmap and may name whatever they like; the library itself may
+not, because naming one there is what turns a neutral model back into that convention with the
+labels filed off — and the point of the model is to outlive the three adapters currently planned.
+Its doc comments say "an adapter whose convention cannot express this" rather than "a v4 adapter",
+and a mapping note that is really an instruction to one adapter belongs in that adapter's issue.
+The ones that were in the code have been moved there: **Homie v4 → #110, Home Assistant → #111,
+Homie v5 → #108** until a v5 issue exists. Read those before writing an adapter; they carry the
+per-datatype and per-format detail the model deliberately no longer states.
+
+The one exception in the tree is `Units.cs`, which cites the list its constants were taken from.
+That is provenance for the pinned codepoints, not a dependency.
+
 `SmartHome.Protocol` is one interface, `IDeviceProtocol`, plus the command event it raises. It is
 deliberately not derived from `IReconnectingMqttClient`, for the reason `IHomieClient` already
 documents: a device owns a connection rather than being one, and exposing `Publish`/`Subscribe`

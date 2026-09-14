@@ -21,9 +21,9 @@ namespace SmartHome.DeviceModel.Properties
         // string.Format, whose specifier branch in nanoFramework is reflection-only and
         // throws NotImplementedException outright on a NoReflection target.
         //
-        // Note that Homie v5 prefixes the encoding name ("rgb,255,128,0") where v4 does
-        // not. This is the bare triple, i.e. the v4 spelling; prefixing it is a v5
-        // adapter's job, exactly like every other framing decision.
+        // This is the bare triple. A convention that prefixes the encoding name
+        // ("rgb,255,128,0") gets that prefix from its adapter, exactly like every other
+        // framing decision.
         public override readonly string ToString() => $"{R},{G},{B}";
 
         public static bool TryParse(string value, out ColorValue color)
