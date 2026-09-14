@@ -566,6 +566,14 @@ these, and `Run-IntegrationTests.ps1` parses them. A device app never exits with
 these markers *are* the exit code. Emit one as soon as the outcome is known, before any idle
 loop.
 
+**They go out through `Debug.WriteLine`, and that is not an oversight to tidy up.** Everything
+else in this repo logs through `ILogger`, so the markers look like the one place that was
+forgotten; they are the exception on purpose. A marker is a test *result*, not a log line, and
+routing it through the logging stack would make the verdict depend on the app having configured
+a factory — the default is null, whose logger silently drops everything, and every test would
+report `No [ITEST] marker`. A configured factory is no better: it prefixes level and category,
+and the runner's regex anchors on `[ITEST]` at the start. Leave them on `Debug.WriteLine`.
+
 **The name in the marker is nobody's to spell.** Both ends derive it from the project's
 `<AssemblyName>`: the device reads its own running assembly (`typeof(Program)` handed to
 `IntegrationTest.Pass/Fail`, which is why they take a `Type` and not a string), and the runner
