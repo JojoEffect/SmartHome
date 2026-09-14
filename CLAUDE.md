@@ -442,28 +442,40 @@ Four things about it are easy to get wrong, and each is deliberate:
   `ColorFormats`, each with the one parser for its text form. A raw `string Format` re-read by
   every consumer is what let #106's discovery mapper disagree with the property's own validation
   in three ways, advertising payloads the property refused. Don't add a `string Format` back.
-- **There is no `Alert` state.** The lifecycle is Homie v5's five (`Connecting`, `Ready`,
-  `Sleeping`, `Disconnecting`, `Lost`), and alerts are a separate keyed set —
-  `Device.RaiseAlert(id, message)` / `ClearAlert(id)`. Homie v4's `$state = alert` can only say
-  that *something* is wrong; a v4 adapter synthesises it from "any alert is raised", and that
-  mapping is one-way.
+- **There is no `Alert` state.** The lifecycle is five states of the model's own —
+  `Connecting`, `Ready`, `Sleeping`, `Disconnecting`, `Lost` — and alerts are a separate keyed
+  set, `Device.RaiseAlert(id, message)` / `ClearAlert(id)`. A lifecycle state can only say
+  *that* something is wrong, where an alert carries an id and a message. An adapter whose
+  convention has only the coarser spelling folds the set back into a state, and that mapping is
+  one-way and lossy — which is why it lives in the adapter. #110 carries the concrete one.
 - **`double?` is not available.** `NumericRange` spells its optional bounds as
   `HasMinimum`/`Minimum` pairs because nanoFramework's mscorlib carries no `System.Nullable`,
   so a nullable value type does not compile at all on this runtime. Checked against the
   `CoreLibrary` checkout, not assumed.
 
-**No source file under `src/common/DeviceModel` names a convention, and none should.** The
-paragraphs above are this repo's roadmap and may name whatever they like; the library itself may
-not, because naming one there is what turns a neutral model back into that convention with the
-labels filed off — and the point of the model is to outlive the three adapters currently planned.
-Its doc comments say "an adapter whose convention cannot express this" rather than "a v4 adapter",
-and a mapping note that is really an instruction to one adapter belongs in that adapter's issue.
-The ones that were in the code have been moved there: **Homie v4 → #110, Home Assistant → #111,
-Homie v5 → #108** until a v5 issue exists. Read those before writing an adapter; they carry the
-per-datatype and per-format detail the model deliberately no longer states.
+**Nothing in the protocol-neutral layer names a convention, and nothing should.** That layer is
+`SmartHome.DeviceModel`, `SmartHome.Protocol`, their unit tests, and the generic infrastructure
+underneath them — `SmartHome.Mqtt`, `SmartHome.Networking`, `SmartHome.Text`. The paragraphs
+above are this repo's roadmap and may name whatever they like; that code may not, because naming
+a convention there is what turns a neutral mechanism back into that convention with the labels
+filed off — and the point of the exercise is to outlive the three adapters currently planned.
+Its comments say "an adapter whose convention cannot express this" rather than "a v4 adapter",
+and "a session carrying a last will" rather than "a `HomieClient` session".
 
-The one exception in the tree is `Units.cs`, which cites the list its constants were taken from.
-That is provenance for the pinned codepoints, not a dependency.
+The line is about the *mechanism*, not the vocabulary: naming a concrete convention as one
+example among several is fine, and so is citing one as provenance. What is not fine is a comment
+that only makes sense if you already know which convention is meant, or that instructs one
+particular adapter. A mapping note of that second kind belongs in that adapter's issue, and the
+ones that were in the code have been moved: **Homie v4 → #110, Home Assistant → #111, Homie v5 →
+#108** until a v5 issue exists. Read those before writing an adapter; they carry the per-datatype
+and per-format detail the model deliberately no longer states.
+
+The one citation left in the tree is `Units.cs`, which names the list its constants were taken
+from. That is provenance for the pinned codepoints, not a dependency.
+
+The adapters themselves are the other side of this line and are *expected* to name their
+convention everywhere: `SmartHome.Homie`, `HomieClientCheck`, and the conformance verdict in
+`Run-IntegrationTests.ps1` all should.
 
 `SmartHome.Protocol` is one interface, `IDeviceProtocol`, plus the command event it raises. It is
 deliberately not derived from `IReconnectingMqttClient`, for the reason `IHomieClient` already

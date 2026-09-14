@@ -12,9 +12,9 @@
     <OutputType>Library</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <FileAlignment>512</FileAlignment>
-    <!-- The namespace is SmartHome.Device rather than Device on purpose: HomieNano
-         already has a HomieNano.Version4.Device *class*, and a bare Device namespace
-         in scope alongside it makes every use of that class ambiguous (CS0118). -->
+    <!-- Qualified rather than a bare Networking or Device namespace on purpose: a
+         namespace whose last segment matches a type in scope makes that type unusable
+         (CS0118), and this solution has more than one class named Device. -->
     <RootNamespace>SmartHome.Networking</RootNamespace>
     <AssemblyName>SmartHome.Networking</AssemblyName>
     <TargetFrameworkVersion>v1.0</TargetFrameworkVersion>

@@ -195,7 +195,7 @@ namespace SmartHome.UnitTests
         {
             Assert.IsTrue(ColorFormats.TryParse("rgb,hsv", out var formats));
             Assert.IsNotNull(formats);
-            Assert.AreEqual("rgb", formats!.Preferred, "the first entry is the one Homie v4 can carry");
+            Assert.AreEqual("rgb", formats!.Preferred, "the first entry is the one an adapter limited to a single encoding publishes");
             Assert.IsTrue(formats.Supports("hsv"));
             Assert.IsFalse(formats.Supports("xyz"));
             Assert.AreEqual("rgb,hsv", formats.ToString());

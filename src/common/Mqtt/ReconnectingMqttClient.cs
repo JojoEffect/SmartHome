@@ -272,9 +272,9 @@ namespace SmartHome.Mqtt
 
                     // Disconnect() can have run while the connect was in flight. It has
                     // already detached ReconnectHandler, so nothing else would ever close
-                    // the session this thread just opened -- and for a HomieClient
-                    // session that means the will fires against a device the app believes
-                    // it shut down.
+                    // the session this thread just opened -- and for a session carrying a
+                    // last will that means the will fires against a device the app
+                    // believes it shut down.
                     if (!_autoReconnectEnabled)
                     {
                         _logger.LogInformation("Disconnect requested during reconnect; closing the session that was just opened.");

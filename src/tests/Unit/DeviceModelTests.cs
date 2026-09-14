@@ -199,10 +199,10 @@ namespace SmartHome.UnitTests
         [TestMethod]
         public void Device_Alerts_Are_Independent_Of_Its_Lifecycle_State()
         {
-            // There is no Alert state, on purpose: 'something is wrong' is not a place in
-            // the lifecycle, and a device with a flat battery is still ready. Turning a
-            // raised alert into Homie v4's 'alert' state is the v4 adapter's job, and it
-            // is one-way.
+            // There is no Alert state, on purpose: "something is wrong" is not a place in
+            // the lifecycle, and a device with a flat battery is still ready. Folding a
+            // raised alert into a coarser lifecycle state is the job of an adapter whose
+            // convention has nowhere else to put it, and it is one-way.
             var device = new DeviceBuilder(_deviceId, _deviceName).BuildDevice();
             device.TryChangeState(DeviceState.Connecting);
             device.TryChangeState(DeviceState.Ready);
@@ -254,8 +254,8 @@ namespace SmartHome.UnitTests
         [TestMethod]
         public void Device_Holds_Alert_Ids_To_The_Same_Rule_As_Every_Other_Id()
         {
-            // Homie v5 publishes the alert id as a topic level, so an id no topic could
-            // carry has to be refused here rather than discovered on the wire.
+            // An adapter may well carry the alert id as a path segment, so an id no path
+            // could carry has to be refused here rather than discovered on the wire.
             var device = new DeviceBuilder(_deviceId, _deviceName).BuildDevice();
 
             Assert.ThrowsException(typeof(ArgumentException), () => device.RaiseAlert("Battery", "nope"));
