@@ -1,3 +1,5 @@
+using nanoFramework.Logging;
+using nanoFramework.Logging.Debug;
 using System;
 using System.Diagnostics;
 using System.Text;
@@ -28,6 +30,11 @@ namespace SmartHome.IntegrationTests.MqttCheck
 
         public static void Main()
         {
+            // NetworkHelper logs through ILogger, and the default factory is null, whose
+            // logger drops everything. Without this the capture would lose the WiFi half
+            // of the reasoning behind whatever verdict this test reports.
+            LogDispatcher.LoggerFactory = new DebugLoggerFactory();
+
             try
             {
                 NetworkHelper.ConnectToConfiguredNetwork();

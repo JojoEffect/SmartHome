@@ -275,6 +275,11 @@ when nothing ran, but don't re-break the name.
 ```text
 src/
   common/                 Shared libraries, used by device apps and tests alike
+    DeviceModel/          SmartHome.DeviceModel — Device/Node/Property, DeviceBuilder, values,
+                            lifecycle, alerts. Protocol-neutral: no MQTT reference, no topics,
+                            no protocol constants (see below). Nothing consumes it yet
+    Protocol/             SmartHome.Protocol   — IDeviceProtocol, the seam an adapter implements.
+                            Nothing implements it yet
     Homie/                SmartHome.Homie      — Homie v4 client (SmartHome.Homie.V4 inside)
     Mqtt/                 SmartHome.Mqtt       — ReconnectingMqttClient: auto-reconnect and
                             subscription replay over nanoFramework.M2Mqtt. Protocol-agnostic;
@@ -409,6 +414,76 @@ Anything that needs WiFi calls `NetworkHelper.ConnectToConfiguredNetwork()` from
 2026-08-20 and would not join the network on a clean boot; `WifiNetworkHelper.Reconnect()` waits
 for the interface instead of racing it.
 
+### The protocol-neutral model, and the adapter seam
+
+`SmartHome.DeviceModel` and `SmartHome.Protocol` are the first slice of issue #108, which
+replaces "the device description *is* Homie v4" with "the description is neutral and exactly one
+injected adapter decides what it goes out as". **Nothing consumes them yet** — `SmartHome.Homie`
+is rewritten over them in #110, Home Assistant follows in #111, and RoomSensor picks an adapter
+in #112. Until then they are additive, and everything above still runs on `SmartHome.Homie.V4`.
+
+What the model owns: the device/node/property tree with ids and friendly names, the datatype,
+the *structured* format, the unit, the `QuantityKind`, settable and retained, the value and its
+canonical encoding, `OnCommand` vs `OnUpdate`, the lifecycle, alerts, and the optional
+`$target`. What an adapter owns: every topic and root, how the description is serialised and
+where, the last will, re-announce triggers, protocol version constants, and all of Home
+Assistant's component choice, device class and availability.
+
+Four things about it are easy to get wrong, and each is deliberate:
+
+- **`GetTopic()` did not come across.** That single omission is what makes the rest possible:
+  the old `HomieEntityBase` built `homie/<device>/<node>/<property>` from the parent chain, so
+  Homie's topic grammar was in every entity in the tree. Adapters walk `EntityBase.Parent` and
+  name things their own way. The same reasoning removes the datatype and lifecycle *tokens* —
+  `"integer"`, `"init"` — which are a convention's vocabulary, not the model's.
+  `DeviceStateExtensions.GetName()` returns capitalised names for logs precisely so that
+  publishing one would fail conformance loudly.
+- **Formats are types, not a string.** `NumericRange`, `EnumOptions`, `BooleanLabels`,
+  `ColorFormats`, each with the one parser for its text form. A raw `string Format` re-read by
+  every consumer is what let #106's discovery mapper disagree with the property's own validation
+  in three ways, advertising payloads the property refused. Don't add a `string Format` back.
+- **There is no `Alert` state.** The lifecycle is five states of the model's own —
+  `Connecting`, `Ready`, `Sleeping`, `Disconnecting`, `Lost` — and alerts are a separate keyed
+  set, `Device.RaiseAlert(id, message)` / `ClearAlert(id)`. A lifecycle state can only say
+  *that* something is wrong, where an alert carries an id and a message. An adapter whose
+  convention has only the coarser spelling folds the set back into a state, and that mapping is
+  one-way and lossy — which is why it lives in the adapter. #110 carries the concrete one.
+- **`double?` is not available.** `NumericRange` spells its optional bounds as
+  `HasMinimum`/`Minimum` pairs because nanoFramework's mscorlib carries no `System.Nullable`,
+  so a nullable value type does not compile at all on this runtime. Checked against the
+  `CoreLibrary` checkout, not assumed.
+
+**Nothing in the protocol-neutral layer names a convention, and nothing should.** That layer is
+`SmartHome.DeviceModel`, `SmartHome.Protocol`, their unit tests, and the generic infrastructure
+underneath them — `SmartHome.Mqtt`, `SmartHome.Networking`, `SmartHome.Text`. The paragraphs
+above are this repo's roadmap and may name whatever they like; that code may not, because naming
+a convention there is what turns a neutral mechanism back into that convention with the labels
+filed off — and the point of the exercise is to outlive the three adapters currently planned.
+Its comments say "an adapter whose convention cannot express this" rather than "a v4 adapter",
+and "a session carrying a last will" rather than "a `HomieClient` session".
+
+The line is about the *mechanism*, not the vocabulary: naming a concrete convention as one
+example among several is fine, and so is citing one as provenance. What is not fine is a comment
+that only makes sense if you already know which convention is meant, or that instructs one
+particular adapter. A mapping note of that second kind belongs in that adapter's issue, and the
+ones that were in the code have been moved: **Homie v4 → #110, Home Assistant → #111, Homie v5 →
+#108** until a v5 issue exists. Read those before writing an adapter; they carry the per-datatype
+and per-format detail the model deliberately no longer states.
+
+The one citation left in the tree is `Units.cs`, which names the list its constants were taken
+from. That is provenance for the pinned codepoints, not a dependency.
+
+The adapters themselves are the other side of this line and are *expected* to name their
+convention everywhere: `SmartHome.Homie`, `HomieClientCheck`, and the conformance verdict in
+`Run-IntegrationTests.ps1` all should.
+
+`SmartHome.Protocol` is one interface, `IDeviceProtocol`, plus the command event it raises. It is
+deliberately not derived from `IReconnectingMqttClient`, for the reason `IHomieClient` already
+documents: a device owns a connection rather than being one, and exposing `Publish`/`Subscribe`
+would let an app publish an attribute non-retained or a state out of order. An implementation
+takes an `IReconnectingMqttClient` by constructor injection and owns the session, last will
+included.
+
 ### Four kinds of test, deliberately kept apart
 
 - **`src/tests`** — unit tests (`SmartHome.UnitTests`) driven by `vstest.console` and the nanoFramework
@@ -490,6 +565,14 @@ DeviceMarker tests report by writing a marker line to managed debug output:
 these, and `Run-IntegrationTests.ps1` parses them. A device app never exits with a status code —
 these markers *are* the exit code. Emit one as soon as the outcome is known, before any idle
 loop.
+
+**They go out through `Debug.WriteLine`, and that is not an oversight to tidy up.** Everything
+else in this repo logs through `ILogger`, so the markers look like the one place that was
+forgotten; they are the exception on purpose. A marker is a test *result*, not a log line, and
+routing it through the logging stack would make the verdict depend on the app having configured
+a factory — the default is null, whose logger silently drops everything, and every test would
+report `No [ITEST] marker`. A configured factory is no better: it prefixes level and category,
+and the runner's regex anchors on `[ITEST]` at the start. Leave them on `Debug.WriteLine`.
 
 **The name in the marker is nobody's to spell.** Both ends derive it from the project's
 `<AssemblyName>`: the device reads its own running assembly (`typeof(Program)` handed to
