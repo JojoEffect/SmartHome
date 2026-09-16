@@ -72,8 +72,21 @@ namespace SmartHome.Mqtt
         /// above build a <see cref="MqttClientTransport"/> and hand it here, so a caller
         /// that does not care sees no difference.
         /// </remarks>
+        /// <exception cref="ArgumentNullException">
+        /// <paramref name="transport"/> is null.
+        /// </exception>
         public ReconnectingMqttClient(IMqttTransport transport)
         {
+            // Guarded rather than left to fail later. The field is only ever dereferenced
+            // once a caller does something -- IsConnected, Connect, an event
+            // subscription -- so a null would surface as a NullReferenceException from
+            // inside this class, at a call site that looks unrelated to the constructor
+            // that actually caused it.
+            if (transport == null)
+            {
+                throw new ArgumentNullException(nameof(transport));
+            }
+
             _logger = this.GetCurrentClassLogger();
             _mqttCient = transport;
         }

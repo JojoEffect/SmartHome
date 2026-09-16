@@ -4,6 +4,7 @@ using nanoFramework.Logging.Debug;
 using nanoFramework.M2Mqtt;
 using nanoFramework.M2Mqtt.Messages;
 using nanoFramework.TestFramework;
+using System;
 using System.Text;
 using System.Threading;
 
@@ -59,6 +60,18 @@ namespace SmartHome.UnitTests
         public void Cleanup()
         {
             LogDispatcher.LoggerFactory = null;
+        }
+
+        [TestMethod]
+        public void A_Null_Transport_Is_Refused_By_The_Constructor()
+        {
+            // The field is only dereferenced once a caller does something -- IsConnected,
+            // Connect, an event subscription -- so without this guard a null arrives as a
+            // NullReferenceException thrown from inside the wrapper, at a call site that
+            // looks unrelated to the constructor that caused it.
+            Assert.ThrowsException(
+                typeof(ArgumentNullException),
+                () => new ReconnectingMqttClient((IMqttTransport)null!));
         }
 
         [TestMethod]

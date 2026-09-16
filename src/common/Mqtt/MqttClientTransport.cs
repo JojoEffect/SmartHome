@@ -1,6 +1,16 @@
 using nanoFramework.M2Mqtt;
 using System.Security.Cryptography.X509Certificates;
 
+// File-local, because this project does not set <Nullable>enable</Nullable> (issue #127).
+// Without it the certificate parameters below could only be spelled unannotated, which
+// says nothing at all about whether null is allowed -- and the caller one file over hands
+// them null whenever `secure` is false. Annotating them in a disabled context would be
+// worse than saying nothing: the `?` would be accepted, enforce nothing, and add two more
+// CS8632 warnings to the eight that issue already tracks. So the context is turned on for
+// the one file that needs it rather than for a project whose existing annotations are not
+// ready to become binding.
+#nullable enable
+
 namespace SmartHome.Mqtt
 {
     /// <summary>
@@ -35,7 +45,12 @@ namespace SmartHome.Mqtt
         }
 
         /// <inheritdoc cref="MqttClient(string, int, bool, X509Certificate, X509Certificate, MqttSslProtocols)"/>
-        public MqttClientTransport(string brokerHostName, int brokerPort, bool secure, X509Certificate caCert, X509Certificate clientCert, MqttSslProtocols sslProtocol)
+        /// <param name="caCert">
+        /// The CA certificate, or null. Null whenever <paramref name="secure"/> is false,
+        /// which is how every caller in this repository connects.
+        /// </param>
+        /// <param name="clientCert">The client certificate, or null. Same as above.</param>
+        public MqttClientTransport(string brokerHostName, int brokerPort, bool secure, X509Certificate? caCert, X509Certificate? clientCert, MqttSslProtocols sslProtocol)
             : base(brokerHostName, brokerPort, secure, caCert, clientCert, sslProtocol)
         {
         }
