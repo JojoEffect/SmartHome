@@ -920,6 +920,27 @@ Describe 'The subscriber-log waits' {
         Assert-Null -Value (Wait-Heartbeat -Topic 'homie/x/heartbeat' -TimeoutSeconds 1 -Port '1883')
     }
 
+    It 'Wait-Heartbeat reads the counter from past the watermark, not from the top' {
+        # The counter is what Invoke-BrokerOutageCheck compares across an outage, so which
+        # line it comes from decides the verdict. Same topic on both lines: the watermark,
+        # not the topic, is what separates this boot's heartbeat from the last one's.
+        Set-SubscriberLog -Lines @(
+            'homie/x/heartbeat 0 heartbeat 400'
+            'homie/x/heartbeat 0 heartbeat 2'
+        )
+
+        $hit = Wait-Heartbeat -Topic 'homie/x/heartbeat' -TimeoutSeconds 2 -Port '1883' -Skip 1
+
+        Assert-Equal -Expected 2 -Actual $hit.Counter
+    }
+
+    It 'Wait-Heartbeat defaults to reading the whole log' {
+        # -Skip is optional and 0 means the whole file, per Get-SubscriberLogLineCount.
+        Set-SubscriberLog -Lines @('homie/x/heartbeat 0 heartbeat 400')
+
+        Assert-Equal -Expected 400 -Actual (Wait-Heartbeat -Topic 'homie/x/heartbeat' -TimeoutSeconds 2 -Port '1883').Counter
+    }
+
     # --- Wait-ForEcho -----------------------------------------------------------------
 
     It 'Wait-ForEcho republishes the command every round until the echo comes back' {
@@ -967,6 +988,19 @@ Describe 'The subscriber-log waits' {
         Assert-False -Condition (Wait-ForEcho -Topic 'homie/x/echo' -Payload 'echo-7' -TimeoutSeconds 1 `
                                               -Port '1883' -CommandTopic 'homie/x/echo/set')
     }
+
+    It 'Wait-ForEcho will not accept an echo from before the watermark' {
+        # The nonce is named after a counter, so a previous instance that reached the same
+        # counter left the same line in the log -- and a check satisfied by it would be
+        # reading a subscription replayed by an app that is no longer on the device.
+        Set-SubscriberLog -Lines @('homie/x/echo 0 echo-7')
+        function Publish-HomieCommand { param([string]$Port, [string]$Topic, [string]$Payload) }
+
+        Assert-False -Condition (Wait-ForEcho -Topic 'homie/x/echo' -Payload 'echo-7' -TimeoutSeconds 1 `
+                                              -Port '1883' -CommandTopic 'homie/x/echo/set' -Skip 1)
+        Assert-True -Condition (Wait-ForEcho -Topic 'homie/x/echo' -Payload 'echo-7' -TimeoutSeconds 2 `
+                                             -Port '1883' -CommandTopic 'homie/x/echo/set')
+    }
 }
 
 Describe 'Invoke-BrokerOutageCheck' {
@@ -979,12 +1013,19 @@ Describe 'Invoke-BrokerOutageCheck' {
     #
     # The stubs stand in for what the real ones do to that log, not for their signatures
     # alone. Start-DevEnv.ps1 truncates the subscriber log on every start, and this check
-    # rests on that: it is the whole reason a phase's heartbeats can only be ones
-    # published after that phase's broker came up. So each stub truncates and refills,
-    # and the fixture is written in those terms -- what the device publishes once the
-    # opening cycle's broker is up, and what it publishes after each outage. A stub that
-    # left the log alone would let a case pass on a heartbeat from before the outage it
-    # claims to have survived.
+    # rests on that for its recovery reads: it is the whole reason a post-outage heartbeat
+    # can only be one published after that outage's broker came up. So each stub truncates
+    # and refills, and the fixture is written in those terms -- what the device publishes
+    # after each outage. A stub that left the log alone would let a case pass on a
+    # heartbeat from before the outage it claims to have survived.
+    #
+    # The baseline read is the other half, and it is the one issue #18 changed. Nothing is
+    # truncated before it: the check reads the log as it finds it, from
+    # $script:subscriberLogWatermark down -- the line count the run loop took in the gap
+    # between the flash's hard reset and the new image's first publish. So the fixture's
+    # log opens with -Stale (what the replaced image published, before the watermark)
+    # followed by -Baseline (what this boot has published since), and the watermark is set
+    # to the -Stale line count, which is what the run loop would have recorded.
 
     # Names of their own, not $script:subscriberLog / $script:published. Those belong to
     # the subscriber-log waits above, and sharing them would work only while both groups
@@ -1005,11 +1046,17 @@ Describe 'Invoke-BrokerOutageCheck' {
     }
 
     function Reset-OutageFixture {
-        # -Baseline is what the device has published once the opening cycle's broker is
-        # up; -Recovery the same for each outage, one entry per Start-SuiteBroker, the
-        # last repeating if there are more outages than entries. -NoEcho models a client
-        # that reconnected without replaying its subscriptions.
+        # -Stale is what the image that was replaced published before the flash, and it
+        # sets the watermark; -Baseline what this boot has published since; -Recovery the
+        # same for each outage, one entry per Start-SuiteBroker, the last repeating if
+        # there are more outages than entries. -NoEcho models a client that reconnected
+        # without replaying its subscriptions.
+        #
+        # -Stale defaults to one heartbeat carrying a counter far above anything a case
+        # uses. It is deliberately not empty: a check that read the log as found would be
+        # measuring that counter, and every case would report RESTARTED.
         param(
+            [string[]]$Stale = @('homie/mqtt-reconnect-check/heartbeat 0 heartbeat 400'),
             [string[]]$Baseline = @(),
             [string[][]]$Recovery = @(),
             [switch]$NoEcho
@@ -1018,21 +1065,27 @@ Describe 'Invoke-BrokerOutageCheck' {
         $script:outageLog = Join-Path (New-TestDirectory -Name 'outage-log') 'homie.log'
         $script:outageEvents = @()
         $script:outagePublished = @()
-        $script:outageBaseline = $Baseline
         $script:outageRecovery = $Recovery
         $script:outageStarts = 0
         $script:outageEchoes = -not $NoEcho
         $script:outageEchoTopic = 'homie/mqtt-reconnect-check/echo'
 
-        # Deliberately not empty: the case below that proves the opening cycle happened
-        # needs something here the check must NOT read. Overwritten by that cycle.
-        Set-OutageLog -Lines @('homie/mqtt-reconnect-check/heartbeat 0 heartbeat 400')
+        Set-OutageLog -Lines (@($Stale) + @($Baseline))
+
+        # What the run loop records after the flash, and what the check reads its baseline
+        # from. Assigned here rather than left at the dot-source's 0 for the same reason
+        # the log is: a case has to be able to say where this boot's traffic starts.
+        $script:subscriberLogWatermark = @($Stale).Count
     }
 
     function Restart-SuiteBroker {
+        # A tripwire, not a model of anything. Nothing in this check cycles the broker any
+        # more -- that is issue #18 -- so this exists to record a reintroduced cycle by
+        # name and to destroy the baseline it would have been read from, rather than let
+        # the real Restart-SuiteBroker quietly satisfy a case through the two stubs below.
         param([string]$Port, [int]$SettleSeconds = 0)
         $script:outageEvents += 'restart'
-        Set-OutageLog -Lines $script:outageBaseline
+        Set-OutageLog -Lines @()
     }
 
     function Stop-SuiteBroker {
@@ -1104,22 +1157,81 @@ Describe 'Invoke-BrokerOutageCheck' {
         Assert-Match -Actual $verdict.Detail -Pattern 'stayed subscribed'
     }
 
-    It 'cycles the broker before it reads a baseline' {
+    It 'reads its baseline past the watermark, not from the top of the log' {
         # The baseline has to belong to the instance now on the device. Whatever was
         # flashed before it kept publishing on the same topic right through the build and
-        # the flash, so a baseline read from the log as found can be a previous app's --
+        # the flash, so a baseline read from the top of the log can be a previous app's --
         # and a counter compared against that proves nothing.
         #
-        # The fixture starts at 400 and the cycle replaces it with 2. Reading the log as
-        # found would make this 400 -> 7 and therefore RESTARTED, so the verdict is the
-        # assertion that the read happened after the cycle -- not merely that the cycle
-        # was called.
+        # The stale line carries 400 and this boot's baseline is 2. Reading from the top
+        # would make this 400 -> 7 and therefore RESTARTED, so the verdict is the
+        # assertion: PASS is only reachable if the stale line was skipped.
         Reset-OutageFixture -Baseline (New-Heartbeat 2) -Recovery @(, (New-Heartbeat 7))
 
         $verdict = Invoke-Outage -Settings (New-OutageSettings)
 
-        Assert-Equal -Expected 'restart' -Actual $script:outageEvents[0]
         Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
+    }
+
+    It 'takes no broker away to get that baseline' {
+        # Issue #18. The watermark is what makes the baseline this boot's, so the opening
+        # cycle that used to buy the same guarantee by truncating the log is gone -- with
+        # it, a broker stop, a broker start and the device reconnect they cause, off the
+        # critical path of the check.
+        #
+        # Asserted as the first event rather than as the absence of 'restart' anywhere:
+        # the outage loop's own stop/start are events too, and what must not happen is one
+        # before the baseline is read.
+        Reset-OutageFixture -Baseline (New-Heartbeat 2) -Recovery @(, (New-Heartbeat 7))
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
+        Assert-Equal -Expected 'stop' -Actual $script:outageEvents[0]
+        Assert-False -Condition ($script:outageEvents -contains 'restart')
+    }
+
+    It 'skips a stale line whose counter is the one the fresh baseline would beat' {
+        # The failure the watermark has to catch, stated the other way round: without it
+        # the check reads 400, the device recovers at 401, and 400 -> 401 climbs -- so a
+        # device that really did restart during the outage would be reported PASS.
+        #
+        # 401 is below this boot's own baseline of 402, which is what makes it RESTARTED
+        # once the stale line is skipped.
+        Reset-OutageFixture -Baseline (New-Heartbeat 402) -Recovery @(, (New-Heartbeat 401))
+
+        $verdict = Invoke-Outage -Settings (New-OutageSettings)
+
+        Assert-Equal -Expected 'RESTARTED' -Actual $verdict.Outcome
+        Assert-Match -Actual $verdict.Detail -Pattern '402 -> 401'
+    }
+
+    It 'reads the whole log when there is no watermark' {
+        # 0 is what the first test of a run records: the broker has just come up and
+        # nothing has been published on it yet. It has to mean "read the whole file"
+        # rather than "read nothing", or that test would report NO-RESULT against a device
+        # that was publishing all along.
+        Reset-OutageFixture -Stale @() -Baseline (New-Heartbeat 4) -Recovery @(, (New-Heartbeat 9))
+
+        Assert-Equal -Expected 0 -Actual $script:subscriberLogWatermark
+        Assert-Equal -Expected 'PASS' -Actual (Invoke-Outage -Settings (New-OutageSettings)).Outcome
+    }
+
+    It 'drops the watermark once the broker has been replaced' {
+        # Start-DevEnv.ps1 truncates the subscriber log on every start, so after an outage
+        # the log begins at line 0 again. Carrying the flash-time watermark past that
+        # point skips the lines the recovery is read from: here the watermark is 3 and the
+        # post-outage log holds one line, so a carried watermark reports a healthy device
+        # as FAIL.
+        Reset-OutageFixture -Stale @(
+                                (New-Heartbeat 400)[0]
+                                (New-Heartbeat 401)[0]
+                                (New-Heartbeat 402)[0]
+                            ) `
+                            -Baseline (New-Heartbeat 4) -Recovery @(, (New-Heartbeat 9))
+
+        Assert-Equal -Expected 3 -Actual $script:subscriberLogWatermark
+        Assert-Equal -Expected 'PASS' -Actual (Invoke-Outage -Settings (New-OutageSettings)).Outcome
     }
 
     It 'reports RESTARTED when the counter went backwards' {
@@ -1164,7 +1276,9 @@ Describe 'Invoke-BrokerOutageCheck' {
         Assert-Equal -Expected 'NO-RESULT' -Actual $verdict.Outcome
         Assert-Match -Actual $verdict.Detail -Pattern 'nothing to disconnect'
         # And it stopped there rather than taking away a broker it had no baseline for.
-        Assert-ArrayEqual -Expected @('restart') -Actual $script:outageEvents
+        # Nothing at all now, where this used to be the opening cycle: the check touches
+        # no broker before it has a baseline.
+        Assert-ArrayEqual -Expected @() -Actual $script:outageEvents
     }
 
     It 'reports FAIL when no heartbeat returned after the broker came back' {
@@ -1209,7 +1323,7 @@ Describe 'Invoke-BrokerOutageCheck' {
         $verdict = Invoke-Outage -Settings (New-OutageSettings -OutageSeconds @(0, 0))
 
         Assert-Equal -Expected 'PASS' -Actual $verdict.Outcome
-        Assert-ArrayEqual -Expected @('restart', 'stop', 'start', 'stop', 'start') -Actual $script:outageEvents
+        Assert-ArrayEqual -Expected @('stop', 'start', 'stop', 'start') -Actual $script:outageEvents
         # Both lengths in the detail, so the summary line says what was actually survived.
         Assert-Match -Actual $verdict.Detail -Pattern '0s, 0s'
     }
@@ -1233,23 +1347,9 @@ Describe 'Invoke-BrokerOutageCheck' {
         Assert-Match -Actual $verdict.Detail -Pattern '1s outage'
     }
 
-    It 'reports ERROR naming the phase when the broker cannot be cycled' {
-        Reset-OutageFixture -Baseline @() -Recovery @()
-        function Restart-SuiteBroker {
-            param([string]$Port, [int]$SettleSeconds = 0)
-            throw 'could not start the broker on port 1883: port in use'
-        }
-
-        $verdict = Invoke-Outage -Settings (New-OutageSettings)
-
-        Assert-Equal -Expected 'ERROR' -Actual $verdict.Outcome
+    It 'reports ERROR naming the outage it was starting when the stop failed' {
         # A host-side fault reported as the device's would be the worst outcome this
         # function can produce, so the phase is part of the detail, not just the message.
-        Assert-Match -Actual $verdict.Detail -Pattern 'port in use'
-        Assert-Match -Actual $verdict.Detail -Pattern 'before measuring'
-    }
-
-    It 'reports ERROR naming the outage it was starting when the stop failed' {
         Reset-OutageFixture -Baseline (New-Heartbeat 1) -Recovery @(, (New-Heartbeat 2))
         function Stop-SuiteBroker {
             param([string]$Port)

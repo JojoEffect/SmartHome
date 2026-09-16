@@ -679,13 +679,18 @@ function Wait-Heartbeat {
     # inside $TimeoutSeconds. The counter is the trailing integer of the payload
     # ("<topic> heartbeat 12"), and it is what separates a device that reconnected
     # from one that died and came back -- see Invoke-BrokerOutageCheck.
+    #
+    # $Skip is the watermark, forwarded: lines at or before it belong to whatever was
+    # publishing on this topic before the caller's window opened, and a counter read from
+    # one of those would be measured against a different instance of the app.
     param(
         [string]$Topic,
         [int]$TimeoutSeconds,
-        [string]$Port
+        [string]$Port,
+        [int]$Skip = 0
     )
 
-    $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds `
+    $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds -Skip $Skip `
         -Predicate { $_ -like "$Topic*" }
     if (-not $hit) {
         return $null
@@ -702,9 +707,9 @@ function Wait-Heartbeat {
 
 function Invoke-BrokerOutageCheck {
     # Kills the broker under a running device and asserts the device publishes
-    # again once a fresh broker is up. Start-DevEnv.ps1 truncates the subscriber
-    # log on every start, so each phase reads a log that can only contain
-    # heartbeats published after that phase's broker came up -- no stale hits.
+    # again once a fresh broker is up. Every phase reads the long-running homie/#
+    # log from a watermark down, so no phase can be satisfied by a line published
+    # before it opened.
     param(
         [hashtable]$Settings,
         [string]$Port,
@@ -717,22 +722,26 @@ function Invoke-BrokerOutageCheck {
 
     $topic = $Settings.HeartbeatTopic
 
-    # Cycle the environment before measuring anything. The just-deployed app is not
-    # the only thing that has been publishing on this topic: whatever was flashed
-    # before it kept running, and kept publishing, right through the build and flash
-    # -- so the subscriber log can hold a high counter from a previous instance.
-    # Start-DevEnv.ps1 truncates the log, which makes the baseline provably belong to
-    # the instance now on the device.
-    Write-Host "Cycling the broker so the baseline can only come from the new deploy..." -ForegroundColor DarkGray
-    try {
-        Restart-SuiteBroker -Port $Port
-    }
-    catch {
-        return @{ Outcome = 'ERROR'; Detail = "$($_.Exception.Message) (before measuring)" }
-    }
+    # The baseline has to belong to the instance now on the device. The just-deployed
+    # app is not the only thing that has been publishing on this topic: whatever was
+    # flashed before it kept running, and kept publishing, right through the build and
+    # the flash -- so the log as found can hold a high counter from a previous instance,
+    # and a counter compared against that proves nothing.
+    #
+    # That requirement is a watermark, not a restart. $script:subscriberLogWatermark is
+    # the log's line count taken in the gap between the flash's hard reset and the new
+    # image's first publish, so a line after it cannot be the replaced image's -- the
+    # same guarantee a broker cycle bought by truncating the log, without the stop, the
+    # start and the device reconnect they cause. (Issue #18. It is the same watermark
+    # Wait-ForAnnounceWitnessed reads, taken once per test in the run loop.)
+    #
+    # 0 means "read the whole file", per Get-SubscriberLogLineCount, and it is an ordinary
+    # value here rather than a defect: an empty log is what the first test of a run finds,
+    # the broker having just come up with nothing published on it yet.
+    $watermark = $script:subscriberLogWatermark
 
-    Write-Host ("Waiting up to {0}s for the first heartbeat on {1}..." -f $Settings.SettleSeconds, $topic) -ForegroundColor Cyan
-    $latest = Wait-Heartbeat -Topic $topic -TimeoutSeconds $Settings.SettleSeconds -Port $Port
+    Write-Host ("Waiting up to {0}s for the first heartbeat on {1} (past line {2})..." -f $Settings.SettleSeconds, $topic, $watermark) -ForegroundColor Cyan
+    $latest = Wait-Heartbeat -Topic $topic -TimeoutSeconds $Settings.SettleSeconds -Port $Port -Skip $watermark
     if (-not $latest) {
         return @{
             Outcome = 'NO-RESULT'
@@ -761,7 +770,13 @@ function Invoke-BrokerOutageCheck {
             return @{ Outcome = 'ERROR'; Detail = "$($_.Exception.Message) (after the ${outage}s outage)" }
         }
 
-        $latest = Wait-Heartbeat -Topic $topic -TimeoutSeconds $Settings.RecoverySeconds -Port $Port
+        # Start-DevEnv.ps1 truncates the subscriber log on every start, so from here the
+        # log begins at line 0 again and everything in it was published after this
+        # outage's broker came up. Carrying the flash-time watermark past this point
+        # would skip past exactly the lines the recovery is read from.
+        $watermark = 0
+
+        $latest = Wait-Heartbeat -Topic $topic -TimeoutSeconds $Settings.RecoverySeconds -Port $Port -Skip $watermark
         if (-not $latest) {
             return @{
                 Outcome = 'FAIL'
@@ -800,7 +815,7 @@ function Invoke-BrokerOutageCheck {
     # true, which is before the reconnect thread has finished replaying subscriptions.
     # A single QoS-0 publish into that window reaches a broker with no subscriber for
     # the topic and is dropped forever, so a healthy device would be reported FAIL.
-    if (-not (Wait-ForEcho -Topic $Settings.EchoTopic -Payload $nonce -TimeoutSeconds $Settings.CommandTimeoutSeconds -Port $Port -CommandTopic $Settings.EchoCommandTopic)) {
+    if (-not (Wait-ForEcho -Topic $Settings.EchoTopic -Payload $nonce -TimeoutSeconds $Settings.CommandTimeoutSeconds -Port $Port -CommandTopic $Settings.EchoCommandTopic -Skip $watermark)) {
         return @{
             Outcome = 'FAIL'
             Detail  = "heartbeats resumed but '$nonce' was never echoed on $($Settings.EchoTopic) -- the client reconnected without replaying its subscriptions"
@@ -826,15 +841,20 @@ function Wait-ForEcho {
     # command topic has no subscriber. A QoS-0 publish into that window is dropped by
     # the broker with no trace, and waiting alone would then report a healthy device as
     # FAIL. Re-sending costs nothing and closes the race.
+    #
+    # $Skip is the watermark, forwarded, for the same reason Wait-Heartbeat takes one:
+    # the nonce is named after a counter, and a previous instance that reached the same
+    # counter left the same echo line in the log.
     param(
         [string]$Topic,
         [string]$Payload,
         [int]$TimeoutSeconds,
         [string]$Port,
-        [string]$CommandTopic
+        [string]$CommandTopic,
+        [int]$Skip = 0
     )
 
-    $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds `
+    $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds -Skip $Skip `
         -Predicate { $_ -like "$Topic *" -and $_ -like "*$Payload" } `
         -BeforeRead {
             Publish-HomieCommand -Port $Port -Topic $CommandTopic -Payload $Payload
@@ -947,7 +967,9 @@ $script:currentPhase = $null
 # to whatever was running on the device beforehand -- which, when the previous suite run
 # left HomieClientCheck flashed, is the *same* device id announcing on the same broker.
 # Wait-ForAnnounceWitnessed reads from here down, so an announce it witnesses is
-# necessarily this boot's.
+# necessarily this boot's, and Invoke-BrokerOutageCheck reads its baseline heartbeat from
+# here down for the same reason -- it used to cycle the whole broker to get the log
+# truncated instead, which is issue #18.
 #
 # Taken in the run loop rather than inside a verdict function, so that it is read in the
 # gap between the flash's hard reset and the new image's first publish -- see the comment

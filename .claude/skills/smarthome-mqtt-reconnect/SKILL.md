@@ -23,7 +23,9 @@ as `smarthome-deploy`.
    publishes a heartbeat on `homie/mqtt-reconnect-check/heartbeat` every 2s forever, and
    subscribes to `homie/mqtt-reconnect-check/echo/set`, echoing whatever arrives back on
    `homie/mqtt-reconnect-check/echo`.
-2. Waits for the first heartbeat (up to 90s: boot + WiFi + connect).
+2. Waits for the first heartbeat (up to 90s: boot + WiFi + connect), reading the long-running
+   `homie/#` log from the line count taken right after the flash — see "Why the baseline is a
+   watermark".
 3. `Stop-DevEnv.ps1` — broker and subscriber both die, exactly as if the machine had lost it.
 4. Waits out the outage, then `Start-DevEnv.ps1 -Detached` brings up a **fresh** broker.
 5. Asserts a heartbeat reappears within 90s. Repeats for a second, longer outage.
@@ -44,7 +46,25 @@ publish failures during the outage, and `ReconnectingMqttClient`'s reconnect log
 The heartbeat is published **non-retained** deliberately: a retained message would be handed to
 any fresh subscriber by the broker itself, which looks identical to the device having
 republished when it hadn't. `Start-DevEnv.ps1` also truncates the subscriber log on every start,
-so each phase reads a log that can only contain heartbeats from after that phase's broker came up.
+so each post-outage read sees a log that can only contain heartbeats from after that outage's
+broker came up.
+
+## Why the baseline is a watermark
+
+The baseline heartbeat is the one read with no broker restart before it, so nothing truncated the
+log for it. It has to belong to the instance now on the device anyway: whatever was flashed before
+kept running and kept publishing on the same topic right through the build and the flash, and a
+counter compared against one of *those* lines proves nothing.
+
+So the runner records the log's line count immediately after the flash — after `nanoff`'s hard
+reset, before the new image has booted, associated and connected — and reads the baseline from
+there down. A line past that count cannot be the replaced image's.
+
+This used to be a full `Stop-DevEnv.ps1` + `Start-DevEnv.ps1` cycle before the first measurement,
+purely to get the log truncated; the watermark buys the same guarantee without that stop, that
+start, and the device reconnect they caused (issue #18). The flash-time watermark applies to the
+baseline read only — the first `Start-DevEnv.ps1` inside the outage loop truncates the log, and
+every read after it starts from the top again.
 
 ## Why step 6 exists
 
