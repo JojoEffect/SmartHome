@@ -52,6 +52,51 @@ namespace SmartHome.UnitTests
 
             property.Update(-3.456);
             Assert.AreEqual("-3.46", Payload(property));
+
+            // ... and the payload parses back to the value it represents. That is the
+            // whole complaint behind the defect: a consumer writing 21.5 and reading
+            // "21.499999999999999" back, and a device unable to parse its own published
+            // value into the number it meant.
+            property.Update(21.5);
+            Assert.IsTrue(double.TryParse(Payload(property), out var parsed));
+            Assert.AreEqual(21.5, parsed);
+        }
+
+        [TestMethod]
+        public void FloatProperty_Uses_A_Dot_As_The_Decimal_Separator()
+        {
+            // nanoFramework's Double has no ToString(format, IFormatProvider) overload,
+            // so this cannot be pinned at the call site: the formatter reads
+            // NumberFormatInfo.CurrentInfo, which is invariant only for as long as
+            // nothing in the solution references nanoFramework.System.Globalization.
+            // Adding that package anywhere would silently start publishing "21,50".
+            var property = BuildFloat(0);
+
+            property.Update(-3.25);
+            var payload = Payload(property);
+
+            Assert.AreEqual("-3.25", payload);
+            Assert.IsFalse(payload.IndexOf(',') >= 0, "a comma reached the payload");
+        }
+
+        [TestMethod]
+        public void FloatProperty_Renders_A_Value_The_Way_It_Would_Publish_It()
+        {
+            // The canonical encoding, exposed so that a consumer rendering a number
+            // *about* this property -- a declared bound, say -- writes it the same way
+            // the property writes its own values. Two renderings of the same number in
+            // one description is how a declared range ends up excluding values the
+            // property happily accepts.
+            var property = BuildFloat(0);
+
+            Assert.AreEqual("21.50", property.FormatValue(21.5));
+            Assert.AreEqual("-10.50", property.FormatValue(-10.5));
+            Assert.AreEqual("0.00", property.FormatValue(0));
+
+            // It renders; it does not validate. Callers pass finite values, and the
+            // property's own guards are what refuse the rest.
+            property.Update(21.5);
+            Assert.AreEqual(Payload(property), property.FormatValue(21.5));
         }
 
         [TestMethod]
@@ -71,6 +116,33 @@ namespace SmartHome.UnitTests
             Assert.AreEqual("42", Payload(property));
             Assert.AreEqual(Units.Percent, property.Unit);
             Assert.AreEqual((int)QuantityKind.Humidity, (int)property.QuantityKind);
+
+            var precise = BuildFloat(1234.5678, decimals: 4);
+            Assert.AreEqual("1234.5678", Payload(precise));
+
+            // No group separator at any precision -- "N" would produce "1,234.57", which
+            // no consumer could parse.
+            Assert.AreEqual(0, Payload(precise).Split(',').Length - 1);
+        }
+
+        [TestMethod]
+        public void FloatProperty_Refuses_A_Precision_It_Cannot_Deliver()
+        {
+            // 15 is the most a double carries; beyond it the extra places are noise, and
+            // the point of the fixed-decimal rendering is to stop publishing noise.
+            var tooFew = new DeviceBuilder(_deviceId, _deviceName)
+                .AddNode(_nodeId, _nodeName, _nodeType)
+                    .AddFloatProperty("temperature", "Temperature", 0)
+                        .WithDecimals(-1);
+
+            Assert.ThrowsException(typeof(ArgumentException), () => tooFew.BuildProperty());
+
+            var tooMany = new DeviceBuilder(_deviceId, _deviceName)
+                .AddNode(_nodeId, _nodeName, _nodeType)
+                    .AddFloatProperty("temperature", "Temperature", 0)
+                        .WithDecimals(16);
+
+            Assert.ThrowsException(typeof(ArgumentException), () => tooMany.BuildProperty());
         }
 
         [TestMethod]
@@ -83,6 +155,19 @@ namespace SmartHome.UnitTests
             // device's own parser -- can read that back.
             Assert.ThrowsException(typeof(ArgumentException), () => property.Update(double.NaN));
             Assert.ThrowsException(typeof(ArgumentException), () => property.Update(double.PositiveInfinity));
+            Assert.ThrowsException(typeof(ArgumentException), () => property.Update(double.NegativeInfinity));
+
+            // ... including as an initial value, which would otherwise be announced
+            // before anything had been Set.
+            var builder = new DeviceBuilder(_deviceId, _deviceName)
+                .AddNode(_nodeId, _nodeName, _nodeType)
+                    .AddFloatProperty("temperature", "Temperature", double.NaN);
+
+            Assert.ThrowsException(typeof(ArgumentException), () => builder.BuildProperty());
+
+            // A finite value still goes through.
+            property.Update(1.25);
+            Assert.AreEqual("1.25", Payload(property));
         }
 
         [TestMethod]
@@ -96,12 +181,19 @@ namespace SmartHome.UnitTests
             Assert.IsFalse(property.Set(Bytes("10.6")));
             Assert.AreEqual(10.5, property.Value, "a refused payload moved the property");
 
+            Assert.IsFalse(property.Set(Bytes("-10.1")));
+            Assert.AreEqual(10.5, property.Value, "a value below the declared minimum moved the property");
+
             Assert.IsFalse(property.Set(Bytes("warm")));
             Assert.AreEqual(10.5, property.Value);
 
             // A controller must not be able to reach Update()'s throw with a payload:
-            // Set() runs on the transport's dispatch thread.
+            // Set() runs on the transport's dispatch thread, whose catch-all treats an
+            // escaping exception as a dead connection. So every spelling this runtime's
+            // double.TryParse happens to accept has to be refused here, not there.
             Assert.IsFalse(property.Set(Bytes("NaN")));
+            Assert.IsFalse(property.Set(Bytes("Infinity")));
+            Assert.IsFalse(property.Set(Bytes("-Infinity")));
             Assert.AreEqual(10.5, property.Value);
         }
 
@@ -199,6 +291,12 @@ namespace SmartHome.UnitTests
             // The options were trimmed once, when they were declared; the payload is not
             // trimmed, because leading whitespace makes it a different value.
             Assert.IsFalse(property.Set(Bytes(" high")));
+            Assert.AreEqual("medium", property.Value);
+
+            // A prefix of a declared value is not a declared value. Worth a case of its
+            // own: a membership test written as a substring or a StartsWith search
+            // accepts this one and passes every other case in this test.
+            Assert.IsFalse(property.Set(Bytes("med")));
             Assert.AreEqual("medium", property.Value);
         }
 
@@ -436,6 +534,53 @@ namespace SmartHome.UnitTests
         }
 
         [TestMethod]
+        public void Property_Set_Announces_The_Payload_It_Will_Publish()
+        {
+            // The same event, from the other direction: a value a controller wrote is
+            // announced exactly as one the device measured, which is what makes a
+            // consumer's reflection of an accepted command automatic rather than
+            // something each of them has to remember to publish. It is also why OnUpdate
+            // cannot be used to *act* on a command -- it cannot tell the two apart.
+            var property = BuildFloat(0);
+
+            string? announced = null;
+            var announcements = 0;
+            property.OnUpdate += (args) =>
+            {
+                announcements++;
+                announced = Encoding.UTF8.GetString(args.Value, 0, args.Value.Length);
+            };
+
+            Assert.IsTrue(property.Set(Bytes("21.5")));
+
+            Assert.AreEqual(1, announcements);
+            Assert.AreEqual("21.50", announced, "the announced payload is the rendering, not the text the controller sent");
+            Assert.AreEqual(21.5, property.Value);
+        }
+
+        [TestMethod]
+        public void ColorValue_Round_Trips_Its_Own_Rendering()
+        {
+            // The value type behind a colour property. It used to emit and accept 6-digit
+            // hex only, so a payload in the decimal triple form every one of these
+            // conventions defines was dropped silently -- and the property could not read
+            // back its own rendering.
+            Assert.IsTrue(ColorValue.TryParse("255,128,0", out var parsed));
+            Assert.AreEqual((byte)255, parsed.R);
+            Assert.AreEqual((byte)128, parsed.G);
+            Assert.AreEqual((byte)0, parsed.B);
+
+            Assert.AreEqual("255,128,0", parsed.ToString());
+
+            Assert.IsTrue(ColorValue.TryParse(parsed.ToString(), out var reparsed));
+            Assert.AreEqual(parsed.ToString(), reparsed.ToString());
+
+            // Rejected rather than dereferenced: this parses payloads, and a caller
+            // handing it null must get an answer rather than a throw.
+            Assert.IsFalse(ColorValue.TryParse(null, out _));
+        }
+
+        [TestMethod]
         public void Property_Target_Is_Declared_And_Cleared_In_The_Values_Own_Encoding()
         {
             var property = BuildFloat(0);
@@ -474,13 +619,14 @@ namespace SmartHome.UnitTests
             return Encoding.UTF8.GetString(bytes, 0, bytes.Length);
         }
 
-        private static FloatProperty BuildFloat(double initialValue, string format = "")
+        private static FloatProperty BuildFloat(double initialValue, string format = "", int decimals = FloatProperty.DefaultDecimals)
         {
             new DeviceBuilder(_deviceId, _deviceName)
                 .AddNode(_nodeId, _nodeName, _nodeType)
                     .AddFloatProperty("temperature", "Temperature", initialValue)
                         .WithSettable(true)
                         .WithFormat(format)
+                        .WithDecimals(decimals)
                     .BuildProperty(out FloatProperty property)
                 .BuildNode()
                 .BuildDevice();

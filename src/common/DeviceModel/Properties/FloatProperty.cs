@@ -174,9 +174,18 @@ namespace SmartHome.DeviceModel.Properties
         }
 
         /// <summary>
-        /// Renders the value the way it goes on the wire.
+        /// Renders a value the way this property publishes it: the canonical encoding a
+        /// consumer uses to write a number the same way the property itself would.
         /// </summary>
         /// <remarks>
+        /// Public because a consumer has more to render than the value. Anything
+        /// republishing what this property *declares* -- a bound, an intended value --
+        /// has to write it exactly as the values will be written, or the declaration and
+        /// the readings disagree and a consumer can reject the property's own payloads.
+        /// Carries no validation of its own: callers pass finite values, which
+        /// <see cref="EnsurePublishable"/> and <see cref="Validate"/> already guarantee
+        /// for everything this class publishes.
+        ///
         /// Fixed-decimal, not <c>ToString()</c>. The conventions say only that a float
         /// payload is a number, so the device has to pick a rendering, and the default
         /// one is not a usable pick: nanoFramework's <c>double.ToString()</c> uses "G"
@@ -188,7 +197,7 @@ namespace SmartHome.DeviceModel.Properties
         /// and "N" inserts a thousands separator ("1,234.57") that would corrupt the
         /// payload and defeat any parser. "F&lt;n&gt;" is correct across the range tested.
         /// </remarks>
-        private string FormatValue(double value)
+        public string FormatValue(double value)
         {
             var formatted = value.ToString(_numericFormat);
 

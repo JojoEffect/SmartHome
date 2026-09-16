@@ -30,6 +30,13 @@ namespace SmartHome.DeviceModel
         private readonly IDictionary _alerts = new Hashtable();
         private readonly ILogger _logger;
 
+        // Two collections holding the same nodes, each for one thing the other cannot
+        // do: the table answers "is this id already taken" in one step, and the array
+        // remembers what order they were declared in. A Hashtable's enumeration order is
+        // neither stable nor the author's, and a consumer that lists the nodes and a
+        // consumer that walks them have to agree.
+        private Node[] _orderedNodes = new Node[0];
+
         public Device(string id, string name)
             : base(id, name)
         {
@@ -58,15 +65,26 @@ namespace SmartHome.DeviceModel
         /// </summary>
         public DeviceState State { get; private set; } = DeviceState.Disconnecting;
 
-        /// <summary>The device's nodes, in no particular order.</summary>
+        /// <summary>The device's nodes, in the order they were declared.</summary>
+        /// <remarks>
+        /// Declaration order, mirroring <see cref="Node.Properties"/>. A consumer that
+        /// publishes a list of the nodes and then walks them has to produce the same
+        /// order twice, and the order the author wrote is the only one that is both
+        /// stable and meaningful.
+        ///
+        /// A fresh array each time, for the reason <c>Node.Properties</c> and
+        /// <c>EnumOptions.Values</c> copy too: the stored one is this device's own
+        /// state, and handing it out would let a caller rewrite a tree the device may
+        /// already have announced.
+        /// </remarks>
         public Node[] Nodes
         {
             get
             {
                 lock (_lock)
                 {
-                    Node[] nodes = new Node[_nodes.Count];
-                    _nodes.Values.CopyTo(nodes, 0);
+                    Node[] nodes = new Node[_orderedNodes.Length];
+                    Array.Copy(_orderedNodes, nodes, _orderedNodes.Length);
                     return nodes;
                 }
             }
@@ -183,6 +201,15 @@ namespace SmartHome.DeviceModel
 
                     node.Parent = this;
                     _nodes.Add(node.Id, node);
+
+                    // Grown per node rather than in one block copy after the loop: the
+                    // guard above throws partway through a batch whose second node
+                    // duplicates an id, and the two collections must not be left
+                    // disagreeing about what the device holds.
+                    Node[] grown = new Node[_orderedNodes.Length + 1];
+                    Array.Copy(_orderedNodes, grown, _orderedNodes.Length);
+                    grown[_orderedNodes.Length] = node;
+                    _orderedNodes = grown;
                 }
             }
         }

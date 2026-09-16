@@ -236,7 +236,7 @@ namespace SmartHome.UnitTests
         [TestMethod]
         public void Formats_Render_Their_Declaration_Comma_Separated()
         {
-            // The rendering an adapter publishes as $format. Pinned because the joins
+            // The rendering an adapter publishes as the declared format. Pinned because the joins
             // behind it were rewritten from string accumulation to a StringBuilder, and
             // that had to be output-identical.
             Assert.AreEqual("low,medium,high", new EnumOptions(new string[] { "low", "medium", "high" }).ToString());
