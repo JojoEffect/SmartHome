@@ -277,10 +277,13 @@ src/
   common/                 Shared libraries, used by device apps and tests alike
     DeviceModel/          SmartHome.DeviceModel — Device/Node/Property, DeviceBuilder, values,
                             lifecycle, alerts. Protocol-neutral: no MQTT reference, no topics,
-                            no protocol constants (see below). Nothing consumes it yet
+                            no protocol constants (see below). SmartHome.Homie is its first
+                            consumer
     Protocol/             SmartHome.Protocol   — IDeviceProtocol, the seam an adapter implements.
-                            Nothing implements it yet
-    Homie/                SmartHome.Homie      — Homie v4 client (SmartHome.Homie.V4 inside)
+                            HomieClient is its first implementation
+    Homie/                SmartHome.Homie      — the Homie v4 adapter over those two
+                            (SmartHome.Homie.V4 inside): topics, attribute rendering, the
+                            $state vocabulary, the last will. Exposes no model types
     Mqtt/                 SmartHome.Mqtt       — ReconnectingMqttClient: auto-reconnect and
                             subscription replay over nanoFramework.M2Mqtt. Protocol-agnostic;
                             knows nothing about Homie
@@ -318,14 +321,16 @@ Two naming traps this layout exists to avoid, both hit for real:
   `Device` namespace collided with the `SmartHome.Homie.V4.Device` class, and
   `SmartHome.Tests.Unit` collided with the `Unit` enum — which is why the unit tests are
   `SmartHome.UnitTests`, not `SmartHome.Tests.Unit`. Check for a same-named type before adding
-  a namespace segment.
+  a namespace segment. (That Homie `Device` class is gone since #110; the type a `Device`
+  segment would shadow now is `SmartHome.DeviceModel.Device`, which every adapter and app uses.)
 - `AssemblyName` no longer equals the project file name, so anything hunting build output must
   read `<AssemblyName>` from the project. `Get-NfProjectAssemblyName` in `Common.ps1` does
   that; `Deploy-ToDevice.ps1` and `Run-Tests.ps1` use it. Don't reintroduce
   `GetFileNameWithoutExtension($projectPath)` for that purpose.
 
 `RoomSensor/Program.cs` is the main device logic; `HomieClient` (in `SmartHome.Homie`) is the
-shared Homie client, layered on `ReconnectingMqttClient` (in `SmartHome.Mqtt`).
+shared Homie v4 adapter over the neutral device model, layered on `ReconnectingMqttClient` (in
+`SmartHome.Mqtt`).
 
 `ReconnectingMqttClient`'s auto-reconnect handling was long marked WIP, "blocked on an ESP32
 nanoFramework target bug" — as of 2026-08-20 that is out of date: `MqttReconnectCheck` proves on
@@ -341,28 +346,51 @@ on first connect the connection-change handlers are registered after `ConnectInt
 initial CONNACK has already passed. Verified on hardware by destroying the broker under a running
 RoomSensor: the fresh broker sees the full announcement again, not just bare sensor values.
 
-Device apps talk to `IHomieClient` (in `SmartHome.Homie`), not to the MQTT client: `Connect()`,
-`Disconnect()`, `Alert()`, `Sleep()`, `Ready()`, plus `DeviceId`/`State`/`IsConnected` and an
-`OnCommand` event. It is deliberately **not** derived from `IReconnectingMqttClient` — a Homie
-device owns a connection rather than being one, and exposing `Publish`/`Subscribe` there would
-let an app publish an attribute non-retained or `$state` out of order. The `Device` model (built
-with `HomieDeviceBuilder`) says what the device *is*; `IHomieClient` is what you *do* with it.
+Device apps talk to `IDeviceProtocol` (in `SmartHome.Protocol`), not to the MQTT client:
+`Connect()`, `ConnectWithRetry()`, `Disconnect()`, `Ready()`, `Sleep()`,
+`RaiseAlert(id, message)`, `ClearAlert(id)`, plus `DeviceId`/`State`/`IsConnected` and an
+`OnCommand` event. It is deliberately **not** derived from `IReconnectingMqttClient` — a device
+owns a connection rather than being one, and exposing `Publish`/`Subscribe` there would let an
+app publish an attribute non-retained or a lifecycle state out of order. The `Device` model
+(built with `DeviceBuilder` in `SmartHome.DeviceModel`) says what the device *is*; the protocol
+is what you *do* with it.
 
-Five things to know when writing an actuator (Irrigation, Oven):
+As of 2026-09-15 `IHomieClient` (in `SmartHome.Homie`) is a thin extension of that seam:
+`IHomieClient : IDeviceProtocol` plus one read-only `HomieState`, the `$state` token the device's
+lifecycle *and* alert set currently map to (`HomieStates.From`). It adds no methods and no model
+types. An app that has to know the wire token takes `IHomieClient` — `HomieClientCheck` does,
+because it corrects its own `lifecycle` property with it; everything else takes `IDeviceProtocol`
+and never names Homie at all. A client is built from a neutral `Device` and an
+`IReconnectingMqttClient` (`new HomieClient(device, mqttClient)`), so which convention a device
+speaks is decided by which implementation gets constructed, and nothing above that line changes
+with it.
+
+Six things to know when writing an actuator (Irrigation, Oven):
 
 - Don't re-check the payload against `$datatype` or `$format` -- the property already did.
-  Since 2026-08-29 `PropertyBase.Set` validates a `/set` before anything is applied: an enum
-  payload must be one of the `$format` values, an integer or float inside a declared
-  `min:max` range, a boolean exactly `true` or `false`, a colour a real `<r>,<g>,<b>` triple.
+  Since 2026-08-29 `PropertyBase.Set` (in `SmartHome.DeviceModel` since #110) validates a `/set`
+  before anything is applied: an enum payload must be one of the declared options, an integer or
+  float inside a declared range, a boolean exactly `true` or `false`, a colour a real
+  `<r>,<g>,<b>` triple — the same declarations the adapter renders into `$format`.
   A rejected payload is logged and dropped -- the value does not move, nothing is published,
   nothing lands in the retained store -- and `HomieClient` does **not** raise `OnCommand` for
   it, so a handler only ever sees payloads its property can hold. That is narrower than it
   sounds and does not replace the rule below: the library refuses what the *declaration*
   forbids, and only the app can refuse what its *state* forbids (a legal enum value that is
   an illegal transition, a valid setpoint a relay then fails to reach). Issue #39.
-- Act on `IHomieClient.OnCommand`, not on `property.OnUpdate`. The property event fires both
+- Act on `IDeviceProtocol.OnCommand`, not on `property.OnUpdate`. The property event fires both
   when a controller sets a value and when the device updates its own, and cannot tell them
-  apart; `OnCommand` fires only for a controller's `/set`.
+  apart; `OnCommand` fires only for a controller's `/set`. It hands the handler a
+  `DeviceCommandEventArgs` carrying the `Property` itself (`args.Property.Id`, not a topic) and
+  the raw `Payload` the controller sent — a protocol-neutral pair, so a handler written against
+  it survives the adapter being swapped.
+- Drive the lifecycle through the protocol, never through the model. `Device.TryChangeState` is
+  public and calling it directly walks around the adapter: the model's transition table knows
+  only the states, not v4's rule that `alert` may go back to `ready` or disconnect and nowhere
+  else, so a direct `TryChangeState(Sleeping)` while the device is alerting puts `sleeping` on
+  the wire and fails the conformance run. `Ready()`, `Sleep()`, `Disconnect()`, `RaiseAlert` and
+  `ClearAlert` are the whole vocabulary, and each of them is the point where the adapter gets to
+  refuse.
 - Settable properties are subscribed on `homie/[device]/[node]/[property]/set`, as the spec
   requires. Until 2026-08-21 the code subscribed to the property *value* topic instead, so
   commands were never received and the device re-consumed its own retained publishes.
@@ -393,10 +421,12 @@ will setting `homie/[device-id]/$state` to `lost`, and a will can only be declar
 An app that connects the transport first — as RoomSensor did until 2026-08-21 — produces a
 session with no will at all, and `HomieClient` used to accept it ("MQTT client is already
 connected. Continue..."), silently discarding the will, the keepalive and the credentials. So:
-build the client, then call `HomieClient.Connect()`, which returns `bool` for retry loops. The
-MQTT client id defaults to the device's topic id, not a random Guid, so a reconnect takes over
-the dead session instead of leaving its `lost` will to fire after the new session already
-announced `ready`.
+build the `Device`, hand it and an `IReconnectingMqttClient` to `HomieClient`, then call
+`Connect()`, which returns `bool` for retry loops. The MQTT client id defaults to the device's
+id, not a random Guid, so a reconnect takes over the dead session instead of leaving its `lost`
+will to fire after the new session already announced `ready`. The will, the client id and the
+`lost` token are all the adapter's — `lost` is the one `$state` no device ever publishes, which
+is also why nothing in the model may transition *to* `DeviceState.Lost`.
 
 Anything that needs a broker connection that survives the broker going away uses
 `ReconnectingMqttClient` from `src/common/Mqtt`. It was called `HomieMqttClient` and lived in the
@@ -418,9 +448,22 @@ for the interface instead of racing it.
 
 `SmartHome.DeviceModel` and `SmartHome.Protocol` are the first slice of issue #108, which
 replaces "the device description *is* Homie v4" with "the description is neutral and exactly one
-injected adapter decides what it goes out as". **Nothing consumes them yet** — `SmartHome.Homie`
-is rewritten over them in #110, Home Assistant follows in #111, and RoomSensor picks an adapter
-in #112. Until then they are additive, and everything above still runs on `SmartHome.Homie.V4`.
+injected adapter decides what it goes out as". As of 2026-09-15 they have a consumer: #110
+rewrote `SmartHome.Homie` as the v4 adapter over them, so `HomieClient` implements
+`IDeviceProtocol`, and `HomieClientCheck` and RoomSensor build neutral `Device`s with
+`DeviceBuilder` and never mention a Homie model type. Home Assistant follows in #111; #112 is
+what makes the adapter an injected *choice* rather than the one type an app names in a `new`.
+
+The contract that rewrite was held to is **byte-identical on the wire** — same topics, payloads,
+retained flags, QoS, order, last will, client id — measured on 2026-09-16 by capturing
+`HomieClientCheck` and RoomSensor on hardware from the unchanged tree, capturing them again
+afterwards and diffing the two, because a refactor of this size is only distinguishable from a
+regression by evidence. Neither capture moved and the conformance suite passed on both. The one
+deliberate difference is that a multi-node device now announces its node blocks in declaration
+order rather than hash order, which is what `$nodes` always claimed; both devices in this tree
+have one node, so it does not arise here. Those captures are also transcribed into
+`HomieGoldenWireTests`, which is what CI can check on every change; the hardware run remains the
+only thing that catches a device app's own description drifting.
 
 What the model owns: the device/node/property tree with ids and friendly names, the datatype,
 the *structured* format, the unit, the `QuantityKind`, settable and retained, the value and its
@@ -434,8 +477,10 @@ Four things about it are easy to get wrong, and each is deliberate:
 - **`GetTopic()` did not come across.** That single omission is what makes the rest possible:
   the old `HomieEntityBase` built `homie/<device>/<node>/<property>` from the parent chain, so
   Homie's topic grammar was in every entity in the tree. Adapters walk `EntityBase.Parent` and
-  name things their own way. The same reasoning removes the datatype and lifecycle *tokens* —
-  `"integer"`, `"init"` — which are a convention's vocabulary, not the model's.
+  name things their own way — the v4 one does it in one place, `HomieTopics`, which is the whole
+  of what that base class used to spread across the tree. The same reasoning removes the datatype
+  and lifecycle *tokens* — `"integer"`, `"init"` — which are a convention's vocabulary, not the
+  model's; v4's live in `HomieStates` and in the adapter's datatype rendering.
   `DeviceStateExtensions.GetName()` returns capitalised names for logs precisely so that
   publishing one would fail conformance loudly.
 - **Formats are types, not a string.** `NumericRange`, `EnumOptions`, `BooleanLabels`,
@@ -447,15 +492,55 @@ Four things about it are easy to get wrong, and each is deliberate:
   set, `Device.RaiseAlert(id, message)` / `ClearAlert(id)`. A lifecycle state can only say
   *that* something is wrong, where an alert carries an id and a message. An adapter whose
   convention has only the coarser spelling folds the set back into a state, and that mapping is
-  one-way and lossy — which is why it lives in the adapter. #110 carries the concrete one.
+  one-way and lossy — which is why it lives in the adapter. The v4 one is `HomieStates.From`:
+  any alert raised while the model says `Ready` publishes `$state = alert`, clearing the last
+  one publishes `ready` again, and a second alert or a changed message publishes nothing,
+  because the wire has no way to say which. The ids and messages are logged instead of
+  published — v4 has nowhere to put them, and #108 records that as expected rather than a
+  defect. Alerts raised while the device is `Sleeping` (or still connecting, or disconnecting)
+  change nothing on the wire at all, and the adapter refuses `Sleep()` outright while the token
+  is `alert`, since v4's `alert` may only return to `ready` or disconnect. That refusal is the
+  adapter's own: `Device.CanChangeState` allows `Ready` -> `Sleeping` whatever alerts are
+  raised, which is exactly why an app must go through `IDeviceProtocol` and never call
+  `TryChangeState` itself.
 - **`double?` is not available.** `NumericRange` spells its optional bounds as
   `HasMinimum`/`Minimum` pairs because nanoFramework's mscorlib carries no `System.Nullable`,
   so a nullable value type does not compile at all on this runtime. Checked against the
   `CoreLibrary` checkout, not assumed.
 
-**Nothing in the protocol-neutral layer names a convention, and nothing should.** That layer is
-`SmartHome.DeviceModel`, `SmartHome.Protocol`, their unit tests, and the generic infrastructure
-underneath them — `SmartHome.Mqtt`, `SmartHome.Networking`, `SmartHome.Text`. The paragraphs
+The model holding more than a convention can say is the point of it, so the adapter is where the
+two meet — and the v4 one refuses rather than improvises. `HomieClient`'s constructor walks the
+tree once and throws `ArgumentException`, naming the offending property by its topic and the
+reason, for a `DateTime`, `Duration` or `Json` property (v4 has six datatypes, not nine;
+inventing a token would advertise a payload no controller can parse), for a numeric range that
+is open-ended or carries a `Step` (a v4 `$format` is `min:max` and nothing else, so publishing
+one would declare a constraint the property does not enforce), and for a range bound the
+property's own encoding cannot render exactly — a non-integral bound on an integer property, or
+a float bound needing more precision than that property's `Decimals`. The constructor is the
+first adapter-owned moment and the only one where the failure is still a developer's rather than
+a controller's; the tree cannot change afterwards, so everything fixed at build — every topic,
+every attribute payload, the command-topic table — is computed there too.
+
+`$format` is rendered from the parsed model value now, not echoed back from the string the
+builder was handed: `NumericRange` -> `min:max` with each bound rendered the way a controller
+will read it back — an integral bound as a plain integer, which is what keeps `WithFormat("0:100")`
+going out as `0:100` whatever the datatype, and anything else through `FloatProperty.FormatValue`,
+the same fixed-decimal encoding the value itself goes out as. Never `NumericRange.ToString()`,
+whose `"G"` formatting prints 21.5 as `21.499999999999999`. `EnumOptions` -> its comma-joined
+options, `ColorFormats` -> `Preferred` alone since v4 declares exactly one encoding,
+`BooleanLabels` dropped entirely. Byte-for-byte the same for every declaration in this tree. What did change is a
+*malformed* one: the model parses it to nothing, the property therefore declares no format, the
+adapter never sees the text, and `$format` goes out empty rather than carrying something a
+controller would misread. Nothing reports the malformed text today — not the model, which parsed
+it away, and not the adapter, which cannot see it.
+
+**Nothing in the protocol-neutral layer names a convention, and nothing should** — not in code,
+not in comments, not in a test's name. That layer is `SmartHome.DeviceModel`,
+`SmartHome.Protocol`, their unit tests (`DeviceModel*Tests.cs`), and the generic infrastructure
+underneath them — `SmartHome.Mqtt`, `SmartHome.Networking`, `SmartHome.Text`. A test that moves
+down into the model from an adapter's suite gets renamed and re-commented on the way, for the
+same reason: a neutral assertion carrying a convention's vocabulary is how the vocabulary creeps
+back. The paragraphs
 above are this repo's roadmap and may name whatever they like; that code may not, because naming
 a convention there is what turns a neutral mechanism back into that convention with the labels
 filed off — and the point of the exercise is to outlive the three adapters currently planned.
@@ -468,7 +553,8 @@ that only makes sense if you already know which convention is meant, or that ins
 particular adapter. A mapping note of that second kind belongs in that adapter's issue, and the
 ones that were in the code have been moved: **Homie v4 → #110, Home Assistant → #111, Homie v5 →
 #108** until a v5 issue exists. Read those before writing an adapter; they carry the per-datatype
-and per-format detail the model deliberately no longer states.
+and per-format detail the model deliberately no longer states. The v4 set has since been acted
+on — it is `SmartHome.Homie`, and the code is now the better reference of the two.
 
 The one citation left in the tree is `Units.cs`, which names the list its constants were taken
 from. That is provenance for the pinned codepoints, not a dependency.
@@ -478,11 +564,11 @@ convention everywhere: `SmartHome.Homie`, `HomieClientCheck`, and the conformanc
 `Run-IntegrationTests.ps1` all should.
 
 `SmartHome.Protocol` is one interface, `IDeviceProtocol`, plus the command event it raises. It is
-deliberately not derived from `IReconnectingMqttClient`, for the reason `IHomieClient` already
-documents: a device owns a connection rather than being one, and exposing `Publish`/`Subscribe`
-would let an app publish an attribute non-retained or a state out of order. An implementation
-takes an `IReconnectingMqttClient` by constructor injection and owns the session, last will
-included.
+deliberately not derived from `IReconnectingMqttClient`, and its own remarks are where that
+reasoning now lives (`IHomieClient` extends it and does not restate it): a device owns a
+connection rather than being one, and exposing `Publish`/`Subscribe` would let an app publish an
+attribute non-retained or a state out of order. An implementation takes an
+`IReconnectingMqttClient` by constructor injection and owns the session, last will included.
 
 ### Four kinds of test, deliberately kept apart
 
@@ -680,6 +766,7 @@ Likely first candidates here: RoomSensor current readings, Irrigation/Oven comma
 | Sensor type | `BMP280` |
 | Properties | `temperature`, `humidity`, `pressure` |
 | Update interval | `5000 ms` |
+| Alert id for an invalid reading | `sensor` (raised/cleared through `IDeviceProtocol`; the v4 adapter turns it into `$state=alert`) |
 
 Note that `MqttCheck` hardcodes its own broker (`192.168.1.238`) separately — these two constants
 drift apart easily, and a stale one is the usual reason a healthy device "can't reach the

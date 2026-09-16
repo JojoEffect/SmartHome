@@ -170,8 +170,13 @@ namespace SmartHome.DeviceModel.Formats
         /// minimum above its maximum, a step of zero -- declares no range at all rather
         /// than an empty one, and this returns false. That is deliberate and long-standing:
         /// a device author's malformed declaration is not a reason to start refusing a
-        /// controller's otherwise valid payloads, and the malformed text is visible in
-        /// the adapter's own build-time check.
+        /// controller's otherwise valid payloads.
+        ///
+        /// Nothing reports the text afterwards either. A consumer reads the range this
+        /// produced, never the string it came from, so text that failed to parse is
+        /// indistinguishable from bounds that were never declared -- check the return
+        /// value, or use the factories above, which say the same thing without the
+        /// silence.
         ///
         /// <c>":"</c> parses to false as well. A convention may well accept it as its
         /// default format, but it declares neither end, which is the same as declaring

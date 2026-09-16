@@ -34,11 +34,16 @@ namespace SmartHome.DeviceModel.Builder
         /// above its maximum -- declares no range at all, rather than stopping the device
         /// from being built. That is long-standing and deliberate: a malformed
         /// declaration is a device author's bug, and refusing every payload because of it
-        /// would punish the controller instead. The malformed text still surfaces, in the
-        /// adapter's own check of what it can publish.
+        /// would punish the controller instead.
         ///
-        /// Use <see cref="WithRange"/> to state the bounds directly, which is both
-        /// clearer and the only way to express an open end or a step.
+        /// Nothing reports the text afterwards, though, and nothing can: the property
+        /// keeps the parsed range and not the string it came from, so a declaration that
+        /// failed to parse is indistinguishable from one that was never written -- the
+        /// property simply declares no bounds, and a consumer republishing them
+        /// republishes none.
+        ///
+        /// Use <see cref="WithRange"/> to state the bounds directly, which is clearer,
+        /// cannot fail silently, and is the only way to express an open end or a step.
         /// </remarks>
         public FloatPropertyBuilder WithFormat(string format)
         {

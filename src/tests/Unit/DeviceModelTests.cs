@@ -88,9 +88,50 @@ namespace SmartHome.UnitTests
         [TestMethod]
         public void Ids_Accept_Digits_And_Interior_Hyphens()
         {
-            var device = new DeviceBuilder("room-sensor-1", _deviceName).BuildDevice();
+            // At every level: one rule, one validator, and a device, a node and a
+            // property are all held to it. The refusals are checked a level at a time
+            // above; this is the other side of the same guard, and it is worth having
+            // both because an id rule that is too strict fails quietly -- as a device
+            // author renaming things until the exception stops.
+            var device = new DeviceBuilder("room-sensor-1", _deviceName)
+                .AddNode("sensor-2", _nodeName, _nodeType)
+                    .AddFloatProperty("temperature-c", "Temperature", 0)
+                    .BuildProperty()
+                .BuildNode(out Node node)
+                .BuildDevice();
 
             Assert.AreEqual("room-sensor-1", device.Id);
+            Assert.AreEqual("sensor-2", node.Id);
+            Assert.AreEqual("temperature-c", node.Properties[0].Id);
+        }
+
+        [TestMethod]
+        public void Device_Lists_Its_Nodes_In_Declaration_Order()
+        {
+            // Mirrors Node.Properties, and for the same reason: a consumer that
+            // publishes a list of the node ids and then one block per node has to
+            // produce the two in the same order, or the list it published names them in
+            // an order its own blocks contradict.
+            //
+            // The nodes are held in a Hashtable so that a duplicate id is caught where it
+            // is written, and a Hashtable enumerates in hash order -- which is neither
+            // declaration order nor predictable from the ids. The declaration order is
+            // kept alongside it.
+            var device = new DeviceBuilder(_deviceId, _deviceName)
+                .AddNode("zulu", "Zulu", _nodeType)
+                .BuildNode()
+                .AddNode("alpha", "Alpha", _nodeType)
+                .BuildNode()
+                .AddNode("mike", "Mike", _nodeType)
+                .BuildNode()
+                .BuildDevice();
+
+            var nodes = device.Nodes;
+
+            Assert.AreEqual(3, nodes.Length);
+            Assert.AreEqual("zulu", nodes[0].Id);
+            Assert.AreEqual("alpha", nodes[1].Id);
+            Assert.AreEqual("mike", nodes[2].Id);
         }
 
         [TestMethod]

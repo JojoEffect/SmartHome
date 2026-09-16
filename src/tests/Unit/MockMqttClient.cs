@@ -1,4 +1,3 @@
-using SmartHome.Homie.V4;
 using SmartHome.Mqtt;
 using nanoFramework.M2Mqtt;
 using nanoFramework.M2Mqtt.Messages;
@@ -10,12 +9,21 @@ namespace SmartHome.UnitTests
 {
     internal class MockMqttClient : IReconnectingMqttClient
     {
-        // Every publish, in order, topic and payload. PublishCount cannot express an
-        // ordering claim, and "reflect the outcome, not the command" is entirely about
-        // order -- a device's correction has to land AFTER the library's optimistic
-        // reflection, not instead of it, because the library's publish is already out by
-        // the time the OnCommand handler runs.
+        // Every publish, in order, with everything the adapter handed to the transport:
+        // topic, payload, retain flag and QoS. PublishCount cannot express an ordering
+        // claim, and "reflect the outcome, not the command" is entirely about order -- a
+        // device's correction has to land AFTER the library's optimistic reflection, not
+        // instead of it, because the library's publish is already out by the time the
+        // OnCommand handler runs.
+        //
+        // Retain and QoS are recorded because they are part of the wire contract and
+        // nothing else can see them: an attribute published non-retained vanishes from
+        // the broker's store the moment the device disconnects, and the golden wire tests
+        // are the only place in CI where that is checked at all.
         private readonly ArrayList _publishes = new ArrayList();
+
+        private string[] _subscribeTopics = new string[0];
+        private MqttQoSLevel[] _subscribeQosLevels = new MqttQoSLevel[0];
 
         public int PublishCount { get; private set; } = 0;
         public int SubscriptionCount { get; private set; } = 0;
@@ -137,19 +145,26 @@ namespace SmartHome.UnitTests
 
         public ushort Publish(string topic, byte[] message, string contentType, ArrayList userProperties, MqttQoSLevel qosLevel, bool retain)
         {
-            Record(topic, message);
+            Record(topic, message, retain, qosLevel);
             return 0;
         }
 
+        // The two short overloads record what M2Mqtt 5.1.221 actually does with them
+        // rather than "nothing was said": both forward to the six-argument overload with
+        // MqttQoSLevel.AtMostOnce and retain false (MqttClient.Publish in the sibling
+        // nanoFramework.m2mqtt checkout). So a publish that takes one of these is a
+        // fire-and-forget, non-retained publish, and a test asserting the wire contract
+        // has to see it as one -- an attribute sent this way would disappear from the
+        // broker's store even though the code never named a retain flag.
         public ushort Publish(string topic, byte[] message, string contentType)
         {
-            Record(topic, message);
+            Record(topic, message, false, MqttQoSLevel.AtMostOnce);
             return 0;
         }
 
         public ushort Publish(string topic, byte[] message)
         {
-            Record(topic, message);
+            Record(topic, message, false, MqttQoSLevel.AtMostOnce);
             return 0;
         }
 
@@ -161,12 +176,27 @@ namespace SmartHome.UnitTests
                 throw new Exception("Simulated SUBSCRIBE failure.");
             }
 
+            // Both arrays kept, not just a count. The SUBSCRIBE packet is part of the
+            // wire this library is held to: the topics decide which commands reach the
+            // device at all, and the QoS decides whether the broker may drop one --
+            // subscribing a /set topic at QoS 0 loses a controller's command silently.
+            // A counter can express neither, and until this recorded them the only thing
+            // standing behind either was a hardware run.
+            _subscribeTopics = topics;
+            _subscribeQosLevels = qosLevels;
+
             foreach (var _ in topics)
             {
                 SubscriptionCount++;
             }
             return 0;
         }
+
+        /// <summary>The topics of the last SUBSCRIBE, in the order they were sent.</summary>
+        public string[] SubscribedTopics => _subscribeTopics;
+
+        /// <summary>The QoS levels of the last SUBSCRIBE, in the same order.</summary>
+        public MqttQoSLevel[] SubscribedQosLevels => _subscribeQosLevels;
 
         /// <summary>
         /// The payloads published to one topic, in the order they were published.
@@ -192,25 +222,43 @@ namespace SmartHome.UnitTests
             return payloads;
         }
 
-        // Recorded from all three Publish overloads, so a test cannot miss a publish by
-        // which overload the code under test happened to take.
-        private void Record(string topic, byte[] message)
+        /// <summary>
+        /// Every publish, in order, as the adapter issued it.
+        /// </summary>
+        /// <remarks>
+        /// A copy, so a test cannot rewrite the record it is asserting against.
+        /// </remarks>
+        internal PublishedMessage[] Publishes
         {
-            PublishCount++;
-            _publishes.Add(new PublishedMessage(topic, message));
+            get => (PublishedMessage[])_publishes.ToArray(typeof(PublishedMessage));
         }
 
-        private class PublishedMessage
+        // Recorded from all three Publish overloads, so a test cannot miss a publish by
+        // which overload the code under test happened to take.
+        private void Record(string topic, byte[] message, bool retain, MqttQoSLevel qosLevel)
         {
-            internal PublishedMessage(string topic, byte[] message)
+            PublishCount++;
+            _publishes.Add(new PublishedMessage(topic, message, retain, qosLevel));
+        }
+
+        internal class PublishedMessage
+        {
+            internal PublishedMessage(string topic, byte[] message, bool retain, MqttQoSLevel qosLevel)
             {
                 Topic = topic;
                 Payload = message == null ? string.Empty : Encoding.UTF8.GetString(message, 0, message.Length);
+                Retain = retain;
+                QosLevel = qosLevel;
             }
 
             public string Topic { get; }
 
             public string Payload { get; }
+
+            /// <summary>The retain flag the caller passed, not what a broker would replay.</summary>
+            public bool Retain { get; }
+
+            public MqttQoSLevel QosLevel { get; }
         }
 
         public ushort Unsubscribe(string[] topics)

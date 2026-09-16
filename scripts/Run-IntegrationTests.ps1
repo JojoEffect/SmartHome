@@ -1906,7 +1906,7 @@ function Measure-HomieConformance {
     $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/integer-value/`$format" -Expected '0:100'
     $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/enum-value/`$format" -Expected 'low,medium,high'
     $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/color-value/`$format" -Expected 'rgb'
-    # Built by HomieClientCheck from the State enum rather than spelled out there, so
+    # Built by HomieClientCheck from HomieStates rather than spelled out there, so
     # that the vocabulary a controller is offered cannot drift from the vocabulary
     # $state is published in. This assertion is what notices if that derivation breaks.
     $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/lifecycle/`$format" -Expected 'ready,alert,sleeping'
