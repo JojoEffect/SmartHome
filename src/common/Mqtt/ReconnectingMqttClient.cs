@@ -21,7 +21,7 @@ namespace SmartHome.Mqtt
 
         private const int ReconnectDelayMs = 5_000;
 
-        private readonly MqttClient _mqttCient;
+        private readonly IMqttTransport _mqttCient;
         private readonly ILogger _logger;
         private Thread? _connectThread;
 
@@ -55,9 +55,27 @@ namespace SmartHome.Mqtt
         }
 
         public ReconnectingMqttClient(string brokerHostName, int brokerPort, bool secure, X509Certificate? caCert, X509Certificate? clientCert, MqttSslProtocols sslProtocol)
+            : this(new MqttClientTransport(brokerHostName, brokerPort, secure, caCert, clientCert, sslProtocol))
+        {
+        }
+
+        /// <summary>
+        /// Wraps an already-constructed transport.
+        /// </summary>
+        /// <remarks>
+        /// The seam that makes this class testable at all. Everything worth proving about
+        /// it -- that a throw out of the resubscribe is retried rather than treated as
+        /// success, that a <see cref="Disconnect"/> racing a reconnect closes the session
+        /// the reconnect just opened, that <see cref="Close"/> disarms the handler that
+        /// would otherwise reopen it -- is a response to something only the transport can
+        /// do, and none of it can be provoked from outside a real broker. The overloads
+        /// above build a <see cref="MqttClientTransport"/> and hand it here, so a caller
+        /// that does not care sees no difference.
+        /// </remarks>
+        public ReconnectingMqttClient(IMqttTransport transport)
         {
             _logger = this.GetCurrentClassLogger();
-            _mqttCient = new MqttClient(brokerHostName, brokerPort, secure, caCert, clientCert, sslProtocol);
+            _mqttCient = transport;
         }
 
         public bool IsConnected => _mqttCient.IsConnected;

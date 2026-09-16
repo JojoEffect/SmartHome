@@ -18,7 +18,9 @@
   </PropertyGroup>
   <Import Project="$(NanoFrameworkProjectSystemPath)NFProjectSystem.props" Condition="Exists('$(NanoFrameworkProjectSystemPath)NFProjectSystem.props')" />
   <ItemGroup>
+    <Compile Include="IMqttTransport.cs" />
     <Compile Include="IReconnectingMqttClient.cs" />
+    <Compile Include="MqttClientTransport.cs" />
     <Compile Include="ReconnectingMqttClient.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
