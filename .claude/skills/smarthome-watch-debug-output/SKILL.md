@@ -9,7 +9,7 @@ description: Stream a SmartHome device's real managed-code debug output (Debug.W
 .\scripts\Watch-DeviceDebugOutput.ps1                              # 30s, reboots device to capture from boot
 .\scripts\Watch-DeviceDebugOutput.ps1 -DurationSeconds 60
 .\scripts\Deploy-ToDevice.ps1; .\scripts\Watch-DeviceDebugOutput.ps1 -NoReboot   # attach right after a flash
-.\scripts\Watch-DeviceDebugOutput.ps1 -Until 'ITEST'               # stop on a matching line; duration becomes a timeout
+.\scripts\Watch-DeviceDebugOutput.ps1 -Until 'ITEST'               # stop on a line containing this text; duration becomes a timeout
 .\scripts\Watch-DeviceDebugOutput.ps1 -BuildOnly                   # build the monitor, capture nothing
 .\scripts\Watch-DeviceDebugOutput.ps1 -DumpConfig                  # flash partition table instead of a capture
 ```
