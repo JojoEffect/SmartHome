@@ -129,7 +129,7 @@ What then happens, in `.github/workflows/release.yml`:
 1. `minver-cli` derives the version from the tag. (The MinVer *NuGet package* is not used
    — it works by setting the MSBuild `$(Version)` property, which SDK-style projects turn
    into assembly attributes and classic `.nfproj` projects ignore entirely.)
-2. `scripts\Set-AssemblyVersion.ps1` writes that version into all 14
+2. `scripts\Set-AssemblyVersion.ps1` writes that version into all 16
    `Properties/AssemblyInfo.cs` files. `.nfproj` has no generated assembly info, so
    without this step every assembly would ship claiming `1.0.0.0`. Nothing is committed —
    this happens in the runner's working tree.
