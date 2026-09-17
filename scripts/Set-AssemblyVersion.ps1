@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Stamps a version into every Properties\AssemblyInfo.cs in the solution.
+    Stamps a version into every AssemblyInfo.cs under src.
 
 .DESCRIPTION
     .nfproj is a classic MSBuild project: it has no auto-generated assembly info, so it
-    takes its version from a checked-in AssemblyInfo.cs. All 14 in this repository are
+    takes its version from a checked-in AssemblyInfo.cs, and every one checked in here is
     hardcoded to 1.0.0.0. That is why MinVer alone is not enough here -- MinVer sets the
     MSBuild $(Version) property, which SDK-style projects turn into assembly attributes
     and classic ones ignore entirely.
@@ -87,8 +87,9 @@ foreach ($file in $files) {
     # ReadAllText, not Get-Content -Raw. On Windows PowerShell 5.1, Get-Content reads a
     # file without a BOM as Windows-1252, so the UTF-8 bytes C2 A9 for the (c) in the
     # copyright line come back as two characters, and writing them out as UTF-8 again
-    # produces C3 82 C2 A9 -- a mojibake "Ac" that silently corrupts 13 of the 14
-    # assemblies. ReadAllText decodes as UTF-8 and strips a BOM if present.
+    # produces C3 82 C2 A9 -- a mojibake "Ac" that silently corrupts every assembly
+    # whose AssemblyInfo.cs carries it. ReadAllText decodes as UTF-8 and strips a BOM
+    # if present.
     $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
     $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
 
