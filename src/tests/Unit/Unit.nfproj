@@ -46,6 +46,7 @@
     <Compile Include="HomieGoldenWireTests.cs" />
     <Compile Include="RoomSensorConfigurationTests.cs" />
     <Compile Include="MockMqttClient.cs" />
+    <Compile Include="ReconnectingMqttClientTests.cs" />
     <!-- Linked, not referenced. RoomSensorConfiguration is pure validation logic with no
          hardware in it, and it carries the rules that decide whether that device comes up
          configured or alerting, so it belongs under test. A ProjectReference would drag

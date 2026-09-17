@@ -1,6 +1,7 @@
 using SmartHome.DeviceConfiguration;
 using SmartHome.DeviceModel;
 using SmartHome.DeviceModel.Builder;
+using SmartHome.DeviceModel.Enums;
 using SmartHome.DeviceModel.Properties;
 using SmartHome.Homie.V4;
 using SmartHome.Protocol;
@@ -68,10 +69,8 @@ namespace SmartHome.Devices.RoomSensor
                 // The one line that couples this app to a convention. Everything above
                 // describes the device and everything below talks to IDeviceProtocol, so
                 // speaking a different convention is a different adapter constructed
-                // here and nothing else. (Two log strings further down still say "Homie"
-                // about whatever is constructed here -- they are this app's own output,
-                // and #112 is where the adapter becomes a compiled choice and they have
-                // to stop naming one.)
+                // here and nothing else -- this app's own log lines and exceptions say
+                // "the device", because they are about whatever was constructed here.
                 IDeviceProtocol protocol = new HomieClient(device, mqttClient);
 
                 // Before the connect, so the announcement itself already carries the
@@ -126,15 +125,23 @@ namespace SmartHome.Devices.RoomSensor
         }
 
         /// <summary>
-        /// Describes the device, with the sensor node only when there is a configuration
-        /// that says how it is wired.
+        /// What the device is, in terms every adapter reads, with the sensor node only
+        /// when there is a configuration that says how it is wired.
         /// </summary>
         /// <remarks>
-        /// A device with no nodes is the deliberate shape of the degraded case, not an
-        /// oversight. Announcing the node anyway would advertise three properties that
-        /// will never carry a reading, and announcing it with made-up pins would be worse
-        /// still. What a controller sees instead is a device that is present, alerting,
-        /// and claiming nothing.
+        /// Nothing here says how any of it goes out. The quantity kinds are part of that
+        /// description and not decoration: a unit does not say what a number means, since
+        /// % is humidity here and a battery charge elsewhere. The v4 adapter has nowhere
+        /// to carry the distinction and ignores it, which is why declaring it costs
+        /// nothing and is worth doing -- a convention with a semantic category of its own
+        /// reads it off the model, rather than this app growing a second, adapter-shaped
+        /// description.
+        ///
+        /// A device with no nodes at all is the deliberate shape of the degraded case,
+        /// not an oversight. Announcing the node anyway would advertise three properties
+        /// that will never carry a reading, and announcing it with made-up pins would be
+        /// worse still. What a controller sees instead is a device that is present,
+        /// alerting, and claiming nothing.
         /// </remarks>
         public static Device SetupDevice(RoomSensorConfiguration configuration)
         {
@@ -148,15 +155,18 @@ namespace SmartHome.Devices.RoomSensor
                     .AddNode(Constants.NodeSensorTopicId, Constants.NodeSensorName, Constants.NodeSensorType)
                         .AddFloatProperty(Constants.PropertyTemperatureTopicId, Constants.PropertyTemperatureName, 0.0)
                             .WithUnit(Units.DegreeCelsius)
+                            .WithQuantityKind(QuantityKind.Temperature)
                         .BuildProperty(out _temperatureProperty)
                         .AddFloatProperty(Constants.PropertyHumidityTopicId, Constants.PropertyHumidityName, 0.0)
                             .WithUnit(Units.Percent)
+                            .WithQuantityKind(QuantityKind.Humidity)
                         .BuildProperty(out _humidityProperty)
                         // Pascals, not hectopascals: Pa is the unit the recommended list
                         // these constants come from carries, and a unit should say what
                         // the value actually is.
                         .AddFloatProperty(Constants.PropertyPressureTopicId, Constants.PropertyPressureName, 0.0)
                             .WithUnit(Units.Pascal)
+                            .WithQuantityKind(QuantityKind.Pressure)
                         .BuildProperty(out _pressureProperty)
                     .BuildNode()
                 .BuildDevice();
@@ -246,10 +256,10 @@ namespace SmartHome.Devices.RoomSensor
         {
             if (!protocol.ConnectWithRetry())
             {
-                throw new Exception("Could not connect the Homie device.");
+                throw new Exception("Could not connect the device.");
             }
 
-            _logger.LogInformation("Homie device connected.");
+            _logger.LogInformation("Device connected.");
         }
     }
 }

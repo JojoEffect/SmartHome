@@ -1,5 +1,6 @@
 using SmartHome.DeviceModel;
 using SmartHome.DeviceModel.Builder;
+using SmartHome.DeviceModel.Enums;
 using SmartHome.DeviceModel.Formats;
 using SmartHome.Homie.V4;
 using SmartHome.Text;
@@ -268,17 +269,25 @@ namespace SmartHome.UnitTests
 
         // The shape of src\devices\RoomSensor\Program.cs, rebuilt here for the same
         // reason.
+        //
+        // The quantity kinds are declared because that app declares them, and the
+        // capture above was taken from a tree that did not. That is the assertion: v4
+        // has nowhere to carry what a number means, so a description that states it
+        // must go out byte for byte as one that does not.
         private static Device BuildRoomSensorDevice()
             => new DeviceBuilder("room-sensor-office", "Raumsensor Buero")
                 .AddNode("sensor", "Sensor", "BMP280")
                     .AddFloatProperty("temperature", "Temperatur", 0.0)
                         .WithUnit(Units.DegreeCelsius)
+                        .WithQuantityKind(QuantityKind.Temperature)
                     .BuildProperty()
                     .AddFloatProperty("humidity", "Luftfeuchte", 0.0)
                         .WithUnit(Units.Percent)
+                        .WithQuantityKind(QuantityKind.Humidity)
                     .BuildProperty()
                     .AddFloatProperty("pressure", "Luftdruck", 0.0)
                         .WithUnit(Units.Pascal)
+                        .WithQuantityKind(QuantityKind.Pressure)
                     .BuildProperty()
                 .BuildNode()
                 .BuildDevice();
