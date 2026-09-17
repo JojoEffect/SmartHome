@@ -690,8 +690,19 @@ function Wait-Heartbeat {
         [int]$Skip = 0
     )
 
+    # StartsWith("$Topic "), with the space, and not -like "$Topic*". Log lines are
+    # "<topic> <0|1> <payload>", so a bare prefix also matches any topic that merely
+    # begins with this one -- and this wait does not just report *that* something matched:
+    # the trailing integer of the line it returns becomes the counter that decides PASS
+    # against RESTARTED, so a sibling topic's number would be measured as this device's.
+    # The two waits either side refuse the same hazard, Wait-ForEcho with "$Topic *" and
+    # Wait-ForAnnounceWitnessed by comparing the whole line.
+    #
+    # A method call rather than a third -like: a topic is data here (the catalog's
+    # HeartbeatTopic), and -like would read a '[' in it as the start of a character class
+    # -- the #71 defect class, which this file has met twice in paths already.
     $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds -Skip $Skip `
-        -Predicate { $_ -like "$Topic*" }
+        -Predicate { $_.StartsWith("$Topic ") }
     if (-not $hit) {
         return $null
     }

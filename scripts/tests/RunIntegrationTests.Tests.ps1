@@ -920,6 +920,31 @@ Describe 'The subscriber-log waits' {
         Assert-Null -Value (Wait-Heartbeat -Topic 'homie/x/heartbeat' -TimeoutSeconds 1 -Port '1883')
     }
 
+    It 'Wait-Heartbeat will not take a line from a topic that merely starts with the one asked for' {
+        # The counter comes from the line this wait returns, so a sibling topic sharing the
+        # prefix would have *its* trailing integer measured as this device's -- and that
+        # number is the whole difference between PASS and RESTARTED. The two waits either
+        # side of this one already refuse the same hazard.
+        Set-SubscriberLog -Lines @(
+            'homie/x/heartbeat-debug 0 heartbeat 99'
+            'homie/x/heartbeat/count 0 heartbeat 98'
+            'homie/x/heartbeat 0 heartbeat 4'
+        )
+
+        Assert-Equal -Expected 4 -Actual (Wait-Heartbeat -Topic 'homie/x/heartbeat' -TimeoutSeconds 2 -Port '1883').Counter
+    }
+
+    It 'Wait-Heartbeat compares the topic literally, not as a wildcard pattern' {
+        # A topic is data -- the catalog's HeartbeatTopic -- and -like would read '[' in it
+        # as the start of a character class, which is the #71 defect class in a predicate
+        # rather than in a path. Nothing in Homie's grammar puts a bracket in a topic; this
+        # pins the comparison anyway, because the reason to prefer it is that it cannot be
+        # wrong about one.
+        Set-SubscriberLog -Lines @('homie/x[1]/heartbeat 0 heartbeat 7')
+
+        Assert-Equal -Expected 7 -Actual (Wait-Heartbeat -Topic 'homie/x[1]/heartbeat' -TimeoutSeconds 2 -Port '1883').Counter
+    }
+
     It 'Wait-Heartbeat reads the counter from past the watermark, not from the top' {
         # The counter is what Invoke-BrokerOutageCheck compares across an outage, so which
         # line it comes from decides the verdict. Same topic on both lines: the watermark,
