@@ -16,9 +16,11 @@
          device path, a .json payload that does not parse, or a SerialPort (see below).
       3. Writes a resolved copy to a temp file: source paths made absolute against this
          checkout, so nanoff does not resolve them against whatever directory it was
-         started in.
-      4. Runs `nanoff --serialport <port> --filedeployment <resolved>`, and reads its
-         OUTPUT rather than only its exit code -- see the note on
+         started in, and SMARTHOME_COM_PORT filled in as its SerialPort.
+      4. Runs `nanoff --filedeployment <resolved>` -- the port inside the JSON and NOT on
+         the command line, which is the whole reason step 3 puts it there; see the comment
+         on that call for what naming a serial port there does instead. Then reads
+         nanoff's OUTPUT rather than only its exit code -- see the note on
          Get-FileDeploymentFailure.
 
     This does NOT flash firmware and does not touch the deployment partition: the files
@@ -32,10 +34,11 @@
 
       - SourceFilePath is relative to the repository root. nanoff resolves a relative
         path against its own working directory, which is whatever shell started it.
-      - There is no SerialPort. That is machine-specific and lives in
-        scripts\local.env.ps1 as SMARTHOME_COM_PORT. A manifest carrying one is refused:
-        a committed COM port is a per-machine value in a version-controlled file, and the
-        next person's device is on a different port.
+      - There is no SerialPort in the committed manifest. That is machine-specific and
+        lives in scripts\local.env.ps1 as SMARTHOME_COM_PORT. A manifest carrying one is
+        refused: a committed COM port is a per-machine value in a version-controlled file,
+        and the next person's device is on a different port. The resolved copy does carry
+        one, because that is where nanoff has to read it from.
 
 .PARAMETER Manifest
     The deployment manifest, relative to the repository root (or absolute).
