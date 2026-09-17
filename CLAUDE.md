@@ -53,7 +53,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Start-DevEnv.ps1 [-NoSync] [-Detached]` | Syncs the sibling repos (unless `-NoSync`), then starts local Mosquitto (explicit `0.0.0.0` listener — a bare `-p` binds localhost-only on Mosquitto 2.x and silently can't be reached from a real device) and subscribes to `homie/#`. `-Detached` backgrounds both and returns | No | `smarthome-dev-env` |
 | `scripts\Stop-DevEnv.ps1 [-KeepLog] [-IncludeOrphans]` | Stops whatever `Start-DevEnv.ps1` recorded for the configured port, verifying pid+name+start-time first so a recycled pid is never killed. No-op + exit 0 if nothing is running, so it's safe to call unconditionally. `-IncludeOrphans` also clears brokers/subscribers this repo started that no state file covers | No | `smarthome-dev-env` |
 | `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`), has the device erase whatever sits past the new image's end, then flashes via `nanoff` (see Clearing the deployment area below) | **Yes** | `smarthome-deploy` |
-| `scripts\Deploy-DeviceConfig.ps1 [-Manifest <path>] [-ResolveOnly]` | Writes a device's configuration file to its internal storage via `nanoff --filedeployment`. Files only — no firmware, no deployment partition, and the app on the device is untouched. Resolves the versioned manifest against this checkout and `SMARTHOME_COM_PORT` first, and reads nanoff's *output* rather than only its exit code. **Fails on this device's current firmware — see "The deployment half does not work on this device yet" under On-device configuration, and issue #132.** `-ResolveOnly` validates everything and touches nothing | Writes files only | `smarthome-deploy-config` |
+| `scripts\Deploy-DeviceConfig.ps1 [-Manifest <path>] [-ResolveOnly]` | Writes a device's configuration file to its internal storage via `nanoff --filedeployment`. Files only — no firmware, no deployment partition, and the app on the device is untouched. Resolves the versioned manifest against this checkout and `SMARTHOME_COM_PORT` first, and reads nanoff's *output* rather than only its exit code. **Needs nanoff 2.5.163 or newer, which is not the version that can flash this board — see the nanoff version note under On-device configuration, and issue #135.** `-ResolveOnly` validates everything and touches nothing | Writes files only | `smarthome-deploy-config` |
 | `scripts\Run-Tests.ps1` | Builds `SmartHome.UnitTests` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** | `smarthome-test` |
 | `scripts\Run-ScriptTests.ps1 [-File <names>] [-Name <wildcard>] [-Detailed]` | The host-side script tests: `scripts\tests\*.Tests.ps1`, run by this repo's own `TestRunner.ps1`. ~250 cases in about 50s, needing nothing installed — no device, no broker, no `local.env`, no `packages\`, no Pester. A run that executed zero tests fails | No | `smarthome-script-tests` |
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
@@ -180,7 +180,10 @@ stops the run at its first line, ahead of any build, flash or broker start.
   *and* by every deploy (which now has the device clear its deployment area first). A
   machine that installed `nanoff` as a global tool has only the runtime, so this does not
   come for free with the line below it
-- `nanoff` CLI: `dotnet tool install -g nanoff`
+- `nanoff` CLI: `dotnet tool install -g nanoff`. **The version matters, and no single one
+  currently does both device workflows on this machine** — `2.5.131` flashes but cannot deploy
+  files, `2.5.163` deploys files but cannot flash. See the nanoff version note under On-device
+  configuration and issue #135 before blaming a script or the board
 - [Mosquitto](https://mosquitto.org/download/)
 - Git on PATH
 - [GitHub CLI](https://cli.github.com/) (`gh`), **authenticated** — `gh auth login`, then
@@ -495,38 +498,42 @@ Four things about it that are decisions rather than details:
   COM port is a per-machine value in a version-controlled file). A device-only file was considered
   and rejected: it would have no history, no review, and no way back after a mass erase.
 
-#### The deployment half does not work on this device yet — issue #132
+#### nanoff version: the two workflows want different ones — issue #135
 
-Read this before assuming a device can be configured. Measured on 2026-09-17, on the ESP32 on
-COM3 running `ESP32_REV3` / nanoCLR `1.17.0.339` (built Aug 1 2026):
+**Read this before touching the device.** Measured on 2026-09-17 on the ESP32 on COM3
+(`ESP32_REV3`, nanoCLR `1.17.0.339`), same board and same session, only the tool version
+differing:
 
-**`nanoff --filedeployment` cannot place a file on it.** The device answers the wire-protocol
-`Monitor_StorageOperation` write with `PlatformError`, for every destination tried —
-`I:\…`, `I:/…`, `i:\…` and a `D:\…` that certainly does not exist, all identical. In
-`nf-interpreter`'s `src/HAL/nanoHAL_StorageOperation.cpp` that code has exactly two sources,
-`CLR_RT_FileStream::SplitFilePath` failing or `FileSystemVolumeList::FindVolume` returning
-`NULL`, and the first is ruled out: `API_System.IO.FileSystem` selects the real `FileStream.cpp`
-over `FileStream_stub.cpp` (`CMake/Modules/FindNF_CoreCLR.cmake`), and the device's own native
-assembly list carries `System.IO.FileSystem v1.1.0.4`, which only that build produces. So the
-volume lookup finds nothing, although `target_FileSystem.cpp` registers `"I:"` during
-`nanoHAL_Initialize` and ships in the same source list as the API.
+| nanoff | `Deploy-ToDevice.ps1` (flash) | `Deploy-DeviceConfig.ps1` (files) |
+|---|---|---|
+| `2.5.131` | works | **fails** — `PlatformError` on every destination |
+| `2.5.163` | **fails** — cannot sync the ESP32 bootloader | works |
 
-It is not "command unsupported" — that path replies with a negative acknowledge, which
-`nf-debugger` reports as `NotSupported`, not `PlatformError`. And it is not a host-side problem:
-the same code comes back from `AddStorageFile` called directly, with nanoff out of the picture.
+So no single installed version does both jobs here today, which is #135. Whichever is installed,
+one of the two scripts will fail, and neither failure names the version as the cause. Flash with
+2.5.131, deploy files with 2.5.163, and expect to switch with
+`dotnet tool uninstall -g nanoff` followed by `dotnet tool install -g nanoff --version <v>`
+(`dotnet tool update` refuses to go backwards).
 
-**Reading it works.** The same device resolved `I:` from managed code on the same boot:
-`File.Exists("I:\configuration.json")` returned false cleanly rather than throwing, which is how
-RoomSensor produced its `configuration` alert. So a device that *has* a configuration file can
-read it; what cannot be done today is getting one onto it over the debugger connection.
+The file-deployment half is a **wire-protocol mismatch, not a device fault**, and the diagnosis is
+worth keeping because the symptom is mute. `nf-interpreter` #3502 (2026-07-27) removed the
+`NameLength` field from `Monitor_StorageOperation_Command`; `nf-debugger` #396 removed it on the
+host the same day. A nanoff older than that still sends the 16-byte header, so the firmware reads
+`DataLength` out of the old `NameLength`, `Offset` out of the old `DataLength`, and the file name
+four bytes early — i.e. an empty string. `SplitFilePath("")` then matches no volume and
+`HAL_StorageOperation` returns `PlatformError`, which is why *every* destination failed
+identically, including a `D:\…` that does not exist. Nothing in nanoff's output says any of this;
+`Get-FileDeploymentFailure` now names it in the message instead.
 
-**A firmware update probably does not fix it.** `origin/main` at 2026-09-16 carries three later
-commits touching this area, and the only one in `HAL_StorageOperation` is #3523, a
-truncate-before-write fix. Nothing upstream has touched the volume lookup that is failing.
+Two things this ruled out, so nobody re-investigates them: the firmware's `I:` volume is fine (a
+device that has a configuration file reads it, verified), and `CLR_RT_FileStream` is not stubbed
+(`API_System.IO.FileSystem` selects the real `FileStream.cpp` in
+`CMake/Modules/FindNF_CoreCLR.cmake`, and the device's native assembly list carries
+`System.IO.FileSystem v1.1.0.4`, which only that build produces).
 
-So everything in this section is in the tree, unit-tested and verified on hardware **except** the
-step that writes the file. `Deploy-DeviceConfig.ps1` refuses loudly rather than reporting success,
-which is what #132 exists to resolve.
+The sibling checkouts are the reason this was findable at all, and they were six weeks stale when
+it mattered — `nf-interpreter` and `nf-debugger` both had the answer only on `origin/main`. Sync
+before concluding anything about firmware behaviour, as the top of this file says.
 
 Three measured facts behind all of this, checked against the sibling checkouts and the device
 rather than assumed:
@@ -544,7 +551,8 @@ rather than assumed:
   file ...`, continues the loop, and returns `ExitCodes.OK` regardless; its README says as much.
   So `Deploy-DeviceConfig.ps1` reads the output as well as the exit code, and refuses a run that
   confirmed fewer files than the manifest named. Never trust that exit code on its own. That check
-  is the only reason #132 was found rather than shipped as a working deployment.
+  is the only reason the stale-nanoff mismatch above was found rather than shipped as a
+  deployment that reported success and wrote nothing.
 - **Never pass `--serialport` alongside `--filedeployment`.** The port goes *inside* the JSON,
   which is why the resolved copy carries a `SerialPort`. On the installed nanoff 2.5.131, naming a
   serial port on the command line makes it classify the run as an ESP32 *firmware* operation,
@@ -885,10 +893,10 @@ Since 2026-09-16 the first four rows are **configuration, not code**: they live 
 as a *fallback*, used only when that file could not be read, so the alert has an address to go
 out from.
 
-**Until #132 is resolved the file cannot be written to this device**, so a RoomSensor built from
-this tree comes up on the fallback identity, alerting `configuration`, with no `sensor` node and
-no readings. `main`'s RoomSensor, which carries all of it compiled in, is what to flash for a
-device that has to keep working — that is what is on the device as of 2026-09-17.
+Verified end to end on hardware on 2026-09-17: the device read
+`I:\configuration.json`, announced `$nodes` as `sensor`, went `init` -> `ready` without an alert,
+and published real readings at the configured interval. Getting the file there needs a nanoff new
+enough to speak the current wire protocol — see the version note above and #135.
 
 | Fact | Value | Where |
 |---|---|---|

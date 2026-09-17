@@ -5,11 +5,11 @@ is in, which pin a valve is on, where the broker lives, how deep a tank is. None
 compiled into the image any more, so changing one is a JSON edit and one command rather than an
 edit, a rebuild and a reflash.
 
-> **The deployment step does not work on the ESP32 on COM3 yet — issue #132.** Its firmware
-> (`ESP32_REV3`, nanoCLR 1.17.0.339) answers the wire-protocol file write with `PlatformError`
-> for every destination, so no file can be placed on it. Reading works: a device that has a
-> configuration file reads it correctly. Everything below is right, and the last step is blocked.
-> `-ResolveOnly` is unaffected and is worth running whenever you edit a file here.
+> **Needs nanoff 2.5.163 or newer — issue #135.** An older one (2.5.131 is what this machine
+> had) still sends the pre-2026-07-27 `Monitor_StorageOperation` header and every write comes
+> back `PlatformError`, with nothing in the output to say why. Awkwardly, 2.5.163 is *not* the
+> version that can flash this board, so the two workflows currently want different ones; #135 is
+> where that lives. `-ResolveOnly` needs no device and is unaffected.
 
 ```powershell
 .\scripts\Deploy-DeviceConfig.ps1

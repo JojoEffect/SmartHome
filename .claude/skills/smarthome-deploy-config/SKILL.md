@@ -11,17 +11,26 @@ the broker address, the room a sensor claims to be in, a GPIO pin, a measurement
 calibration constant is an edit here plus one command, not an edit, a rebuild and a 90-second
 flash.
 
-## Known blocked on the current device — issue #132
+## Check the nanoff version first — issue #135
 
-**Say this before offering to deploy.** The ESP32 on COM3 (`ESP32_REV3`, nanoCLR 1.17.0.339)
-answers the wire-protocol file write with `PlatformError` for every destination, so
-`Deploy-DeviceConfig.ps1` cannot place a file on it and will refuse rather than report success.
-Reading is fine — a device that already has a configuration file reads it correctly.
+**Say this before offering to deploy.** The two device workflows currently want different nanoff
+versions on this machine, measured on 2026-09-17:
 
-So: `-ResolveOnly` is useful today and worth running after any edit under `config\`. The actual
-deployment is not, until #132 is resolved. Don't spend a device session rediscovering this, and
-don't reach for a compiled-in default as a workaround — that is the failure the whole mechanism
-exists to prevent.
+- **`2.5.163` or newer** is required here. Older ones send the pre-2026-07-27
+  `Monitor_StorageOperation` header and every write returns `PlatformError`, with nothing in the
+  output naming the cause.
+- **`2.5.131`** is what `Deploy-ToDevice.ps1` needs on this board — 2.5.163 cannot sync its
+  bootloader to flash at all.
+
+So check `dotnet tool list -g` before a deploy, and switch with
+`dotnet tool uninstall -g nanoff` then `dotnet tool install -g nanoff --version <v>`
+(`dotnet tool update` refuses to move backwards). #135 tracks getting to one version that does
+both.
+
+If a deployment does fail with `Error deploying content file`, the script's own message now names
+the version mismatch as the likely cause — take it at face value before suspecting the device or
+the file. And never reach for a compiled-in default as a workaround: that is the failure the
+whole mechanism exists to prevent.
 
 ```powershell
 .\scripts\Deploy-DeviceConfig.ps1                     # config\room-sensor.deploy.json

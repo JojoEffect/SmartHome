@@ -223,6 +223,29 @@ Describe 'Get-FileDeploymentFailure' {
         Assert-Match -Actual $failure -Pattern 'could not deploy 1 file'
     }
 
+    It 'names the stale-nanoff cause, because nothing in the output does' {
+        # This failure looks identical whether the device is broken, the file is wrong, or
+        # the host tool is four months behind the firmware's wire protocol. It was the
+        # third, and finding that out took a whole session; the message now says so.
+        $output = @('Error deploying content file C:\repo\config\room-sensor.json to I:\configuration.json')
+        $failure = Get-FileDeploymentFailure -Output $output -ExitCode 0 -ExpectedFileCount 1
+
+        Assert-Match -Actual $failure -Pattern '2\.5\.163'
+        Assert-Match -Actual $failure -Pattern 'dotnet tool update -g nanoff'
+    }
+
+    It 'does not blame nanoff for a failure that is not a per-file error' {
+        # An exit code or a silent run says something else entirely, and pointing at the
+        # tool version there would send the next person down the wrong path.
+        foreach ($failure in @(
+            (Get-FileDeploymentFailure -Output @() -ExitCode 2 -ExpectedFileCount 1),
+            (Get-FileDeploymentFailure -Output @('Connected to nanoDevice') -ExitCode 0 -ExpectedFileCount 1)
+        )) {
+            Assert-True -Condition ($failure -notmatch '2\.5\.163') `
+                        -Because "only a per-file error carries the version hint, got: $failure"
+        }
+    }
+
     It 'fails an exception line too' {
         $output = @('Exception deploying content file C:\repo\config\room-sensor.json to I:\configuration.json')
         Assert-Match -Actual (Get-FileDeploymentFailure -Output $output -ExitCode 0 -ExpectedFileCount 1) `

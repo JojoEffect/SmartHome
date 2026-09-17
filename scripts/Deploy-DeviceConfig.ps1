@@ -314,7 +314,20 @@ function Get-FileDeploymentFailure {
 
     $errors = @($lines | Where-Object { $_ -match '^\s*(Error|Exception) deploying content file' })
     if ($errors.Count -gt 0) {
-        return "nanoff could not deploy $($errors.Count) file(s): " + (($errors | ForEach-Object { $_.Trim() }) -join '; ')
+        # The hint is not decoration: this exact failure cost a whole session before the
+        # cause was found, and the cause is not visible anywhere in the output. nanoff
+        # 2.5.131 still sends the pre-2026-07-27 Monitor_StorageOperation header, which
+        # carried a NameLength field the firmware's rework (nf-interpreter #3502) removed.
+        # Every field after Operation is then off by four bytes, so the firmware reads an
+        # empty file name, fails to match a volume, and answers PlatformError -- which
+        # nanoff prints as this line and nothing more. nf-debugger #396 dropped the field
+        # on the host side the same day; 2.5.163 carries it and works.
+        return ("nanoff could not deploy $($errors.Count) file(s): " +
+                (($errors | ForEach-Object { $_.Trim() }) -join '; ') + [Environment]::NewLine +
+                'If nanoff is older than 2.5.163 this is most likely the wire-protocol mismatch ' +
+                'in its bundled debugger library, not a problem with the device or the file: ' +
+                'run `dotnet tool update -g nanoff` and try again. 2.5.131 fails here every time; ' +
+                '2.5.163 was measured working on 2026-09-17.')
     }
 
     if ($ExitCode -ne 0) {
