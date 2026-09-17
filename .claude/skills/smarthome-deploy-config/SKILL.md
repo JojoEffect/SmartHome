@@ -11,6 +11,18 @@ the broker address, the room a sensor claims to be in, a GPIO pin, a measurement
 calibration constant is an edit here plus one command, not an edit, a rebuild and a 90-second
 flash.
 
+## Known blocked on the current device — issue #132
+
+**Say this before offering to deploy.** The ESP32 on COM3 (`ESP32_REV3`, nanoCLR 1.17.0.339)
+answers the wire-protocol file write with `PlatformError` for every destination, so
+`Deploy-DeviceConfig.ps1` cannot place a file on it and will refuse rather than report success.
+Reading is fine — a device that already has a configuration file reads it correctly.
+
+So: `-ResolveOnly` is useful today and worth running after any edit under `config\`. The actual
+deployment is not, until #132 is resolved. Don't spend a device session rediscovering this, and
+don't reach for a compiled-in default as a workaround — that is the failure the whole mechanism
+exists to prevent.
+
 ```powershell
 .\scripts\Deploy-DeviceConfig.ps1                     # config\room-sensor.deploy.json
 .\scripts\Deploy-DeviceConfig.ps1 -ResolveOnly        # validate everything, touch no device

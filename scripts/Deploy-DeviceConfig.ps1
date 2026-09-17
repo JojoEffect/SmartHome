@@ -399,11 +399,25 @@ try {
     Write-Host ""
     Write-Host "Deploying to $comPort via nanoff..." -ForegroundColor Cyan
 
+    # --filedeployment ALONE, with the port inside the JSON. Not --serialport as well,
+    # which is why the resolved copy carries a SerialPort at all.
+    #
+    # Measured on 2026-09-17, not a style choice: `nanoff --serialport COM3
+    # --filedeployment <file>` on the installed 2.5.131 classifies the run as an ESP32
+    # *firmware* operation because a serial port was named, connects through the esptool
+    # bootloader, and the device is then unable to answer the wire-protocol requests the
+    # file deployment is made of. It printed the chip details, "No operation was performed
+    # with the options supplied", the entire help text, and then "Error deploying content
+    # file" -- while still exiting 0. nanoFirmwareFlasher's own Program.cs has since grown
+    # a guard for exactly this (the esp32 branch now also requires FileDeployment and
+    # NetworkDeployment to be empty), and its README documents the port-in-the-JSON form
+    # as the way to deploy files on their own.
+    #
     # stdout captured so the failure check below can read it; stderr deliberately left to
     # flow to the console. Piping a native tool through 2>&1 in Windows PowerShell 5.1
     # wraps its ordinary stderr in a NativeCommandError and sets $? to false, which is how
     # a healthy tool gets read as a failed one.
-    $output = nanoff --serialport $comPort --filedeployment $resolvedManifest
+    $output = nanoff --filedeployment $resolvedManifest
     $nanoffExit = $LASTEXITCODE
 
     $output | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }

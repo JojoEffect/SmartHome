@@ -29,7 +29,7 @@ namespace SmartHome.Devices.RoomSensor
         // stale-constant pre-flight can find it: that check greps for exactly this
         // shape, and an inline literal was invisible to it. That check now guards the
         // fallback rather than the address the device actually uses -- the versioned
-        // configuration file needs the same check, which is filed separately.
+        // configuration file needs the same check, which is issue #133.
         private const string FallbackBrokerHost = "192.168.1.238";
 
         // What is wrong, as an id: the sensor. Alerts are keyed, so raising and clearing
