@@ -36,6 +36,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="AssemblyIdentityTests.cs" />
+    <Compile Include="DeviceConfigurationTests.cs" />
     <Compile Include="DeviceModelFormatTests.cs" />
     <Compile Include="DeviceModelGuardTests.cs" />
     <Compile Include="DeviceModelTests.cs" />
@@ -51,6 +52,7 @@
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\common\DeviceConfiguration\DeviceConfiguration.nfproj" />
     <ProjectReference Include="..\..\common\DeviceModel\DeviceModel.nfproj" />
     <ProjectReference Include="..\..\common\Homie\Homie.nfproj" />
     <ProjectReference Include="..\..\common\Mqtt\Mqtt.nfproj" />
@@ -61,8 +63,14 @@
     <Reference Include="mscorlib">
       <HintPath>..\..\..\packages\nanoFramework.CoreLibrary.1.17.11\lib\mscorlib.dll</HintPath>
     </Reference>
+    <Reference Include="nanoFramework.Json">
+      <HintPath>..\..\..\packages\nanoFramework.Json.2.2.213\lib\nanoFramework.Json.dll</HintPath>
+    </Reference>
     <Reference Include="nanoFramework.Logging">
       <HintPath>..\..\..\packages\nanoFramework.Logging.1.1.161\lib\nanoFramework.Logging.dll</HintPath>
+    </Reference>
+    <Reference Include="System.IO.FileSystem">
+      <HintPath>..\..\..\packages\nanoFramework.System.IO.FileSystem.1.1.94\lib\System.IO.FileSystem.dll</HintPath>
     </Reference>
     <Reference Include="nanoFramework.M2Mqtt">
       <HintPath>..\..\..\packages\nanoFramework.M2Mqtt.5.1.221\lib\nanoFramework.M2Mqtt.dll</HintPath>

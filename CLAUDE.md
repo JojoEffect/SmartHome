@@ -53,6 +53,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Start-DevEnv.ps1 [-NoSync] [-Detached]` | Syncs the sibling repos (unless `-NoSync`), then starts local Mosquitto (explicit `0.0.0.0` listener — a bare `-p` binds localhost-only on Mosquitto 2.x and silently can't be reached from a real device) and subscribes to `homie/#`. `-Detached` backgrounds both and returns | No | `smarthome-dev-env` |
 | `scripts\Stop-DevEnv.ps1 [-KeepLog] [-IncludeOrphans]` | Stops whatever `Start-DevEnv.ps1` recorded for the configured port, verifying pid+name+start-time first so a recycled pid is never killed. No-op + exit 0 if nothing is running, so it's safe to call unconditionally. `-IncludeOrphans` also clears brokers/subscribers this repo started that no state file covers | No | `smarthome-dev-env` |
 | `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`), has the device erase whatever sits past the new image's end, then flashes via `nanoff` (see Clearing the deployment area below) | **Yes** | `smarthome-deploy` |
+| `scripts\Deploy-DeviceConfig.ps1 [-Manifest <path>] [-ResolveOnly]` | Writes a device's configuration file to its internal storage via `nanoff --filedeployment`. Files only — no firmware, no deployment partition, and the app on the device is untouched. Resolves the versioned manifest against this checkout and `SMARTHOME_COM_PORT` first, and reads nanoff's *output* rather than only its exit code (see On-device configuration below). `-ResolveOnly` validates everything and touches nothing | Writes files only | `smarthome-deploy-config` |
 | `scripts\Run-Tests.ps1` | Builds `SmartHome.UnitTests` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** | `smarthome-test` |
 | `scripts\Run-ScriptTests.ps1 [-File <names>] [-Name <wildcard>] [-Detailed]` | The host-side script tests: `scripts\tests\*.Tests.ps1`, run by this repo's own `TestRunner.ps1`. ~250 cases in about 50s, needing nothing installed — no device, no broker, no `local.env`, no `packages\`, no Pester. A run that executed zero tests fails | No | `smarthome-script-tests` |
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
@@ -289,6 +290,13 @@ src/
                             knows nothing about Homie
     Networking/           SmartHome.Networking — NetworkHelper, the only WiFi connect path
     Text/                 SmartHome.Text       — StringUtils
+    DeviceConfiguration/  SmartHome.DeviceConfiguration — installation data read from a file on
+                            the device's internal storage, and the alert every device raises
+                            identically when it cannot be. Protocol-neutral (see below).
+                            Named DeviceConfiguration, not Configuration: a `SmartHome.
+                            Configuration` namespace would shadow
+                            nanoFramework.Hardware.Esp32.Configuration in every device app that
+                            sets a pin function — the same collision as the `Unit` one below
   devices/                Real device apps — the things that actually get shipped
     RoomSensor/           SmartHome.Devices.RoomSensor — temperature/humidity/pressure, BMP280
     IrrigationControl/    SmartHome.Devices.IrrigationControl
@@ -305,6 +313,10 @@ src/
                             the conformance test's device, deliberately not a real one
   tests/
     Unit/                 SmartHome.UnitTests — nanoFramework.TestFramework, runs on hardware
+config/                   Per-installation data, versioned: <device>.json is what a device reads
+                          at boot, <device>.deploy.json says where it lands on the device.
+                          Deployed with scripts\Deploy-DeviceConfig.ps1 -- see config\README.md
+                          and On-device configuration below
 tools/
   DeviceDebugMonitor/     Host-side .NET console app (NOT nanoFramework) -- CLI device debugger,
                           see scripts\Watch-DeviceDebugOutput.ps1
@@ -444,6 +456,62 @@ Anything that needs WiFi calls `NetworkHelper.ConnectToConfiguredNetwork()` from
 2026-08-20 and would not join the network on a clean boot; `WifiNetworkHelper.Reconnect()` waits
 for the interface instead of racing it.
 
+### On-device configuration
+
+Anything that describes **where a device is installed** rather than what it does is read from a
+file on the device at boot, not compiled in: `SmartHome.DeviceConfiguration`'s `ConfigurationStore`
+reads `I:\configuration.json`, `ConfigurationParser` turns it into that device's own configuration
+class, and `ConfigurationResult` is either the object or the reason there isn't one. Issue #103 is
+the design; RoomSensor is the first consumer, as of 2026-09-16. RainwaterCistern's calibration
+(#37) and the window map are the migrations after it.
+
+Four things about it that are decisions rather than details:
+
+- **The failure behaviour is the contract, and it lives in the shared library so it cannot
+  drift.** A configuration that is missing, unreadable or malformed leaves the device
+  *connecting anyway* and raising one alert — id `configuration`, the reason as the message — and
+  announcing **none** of the nodes that would have come from data it does not have. A device that
+  falls back to a compiled-in map instead is the wrong-but-plausible failure this whole mechanism
+  exists to prevent. `ConfigurationResult.ReportTo(protocol)` is called **before** `Connect()`:
+  an alert raised beforehand is already part of what the announcement says, so a misconfigured
+  device never advertises a healthy state, not even for one publish.
+- **What stays compiled in is only what the alert needs to be reachable.** A device with no id
+  cannot announce, and a device that cannot announce cannot say what is wrong with it — so
+  RoomSensor keeps a fallback id, name and broker address, used *only* when the file could not be
+  read, and the live values come from the file. That is also why the fallback id is the device's
+  real one rather than something recognisably a fallback: a distinct id would leave the real
+  device's retained tree in the broker looking healthy while a phantom alerted elsewhere.
+- **Zero is not a value.** nanoFramework.Json leaves an absent member at its type's default, so a
+  misspelt key yields pin 0 and interval 0 rather than an error. Two things catch that: the
+  parser sets `ThrowExceptionWhenPropertyNotFound`, and each device's `Validate()` rejects zero
+  for every numeric field. Both, because a configuration this repository cannot see is worse than
+  one it rejects twice. The key names are the class's property names spelled exactly — the parser
+  is case-sensitive, so the file and the class read as the same thing.
+- **The file is versioned here and deployed with `nanoff --filedeployment`**, which needs no
+  rebuild and no firmware update. `config/<device>.json` is the payload and
+  `config/<device>.deploy.json` is nanoff's own manifest, minus two things the script fills in:
+  `SourceFilePath` is relative to the repository root (nanoff would resolve it against whatever
+  shell started it) and there is no `SerialPort` (that is `SMARTHOME_COM_PORT`, and a committed
+  COM port is a per-machine value in a version-controlled file). A device-only file was considered
+  and rejected: it would have no history, no review, and no way back after a mass erase.
+
+Two measured facts behind that, both checked against the pinned sibling checkouts and the device
+rather than assumed:
+
+- **`I:` is the littlefs partition the firmware already carries.** `INTERNAL_DRIVE0_LETTER` is
+  `"I:"` (`nf-interpreter`'s `src/HAL/Include/nanoHAL_System_IO_FileSystem.h`) and the ESP32 mounts
+  littlefs at `/I` over the `config` partition (`targets/ESP32/_common/targetHAL_ConfigStorageLittlefs.c`),
+  which the 4MB table already declares at `0x3C0000`. Nothing has to be re-flashed to create it.
+  `nanoff --nanodevice --devicedetails` on 2026-09-16 confirmed the flashed image carries
+  `System.IO.FileSystem v1.1.0.4` natively, which is exactly the native version the managed
+  package 1.1.94 asks for. ESP32 NVS is *not* an option and was checked: the managed surface of
+  `nanoFramework.Hardware.Esp32` exposes no NVS type.
+- **`nanoff --filedeployment` exits 0 when an individual file fails to upload.**
+  `FileDeploymentManager.DeployAsync` in `nanoFirmwareFlasher` prints `Error deploying content
+  file ...`, continues the loop, and returns `ExitCodes.OK` regardless; its README says as much.
+  So `Deploy-DeviceConfig.ps1` reads the output as well as the exit code, and refuses a run that
+  confirmed fewer files than the manifest named. Never trust that exit code on its own.
+
 ### The protocol-neutral model, and the adapter seam
 
 `SmartHome.DeviceModel` and `SmartHome.Protocol` are the first slice of issue #108, which
@@ -537,7 +605,9 @@ it away, and not the adapter, which cannot see it.
 **Nothing in the protocol-neutral layer names a convention, and nothing should** — not in code,
 not in comments, not in a test's name. That layer is `SmartHome.DeviceModel`,
 `SmartHome.Protocol`, their unit tests (`DeviceModel*Tests.cs`), and the generic infrastructure
-underneath them — `SmartHome.Mqtt`, `SmartHome.Networking`, `SmartHome.Text`. A test that moves
+underneath and beside them — `SmartHome.Mqtt`, `SmartHome.Networking`, `SmartHome.Text`,
+`SmartHome.DeviceConfiguration` (and `DeviceConfigurationTests.cs`, which says "a device" and
+"an alert" and never names a `$state`). A test that moves
 down into the model from an adapter's suite gets renamed and re-commented on the way, for the
 same reason: a neutral assertion carrying a convention's vocabulary is how the vocabulary creeps
 back. The paragraphs
@@ -726,7 +796,16 @@ Fall back to web search only after those.
 
 This repo references package baselines such as `nanoFramework.CoreLibrary` `1.17.11`,
 `nanoFramework.Hardware.Esp32` `1.6.42`, `nanoFramework.Logging` `1.1.161`,
-`nanoFramework.M2Mqtt` `5.1.221`.
+`nanoFramework.M2Mqtt` `5.1.221`, `nanoFramework.Json` `2.2.213`,
+`nanoFramework.System.IO.FileSystem` `1.1.94`.
+
+The last two arrived with #103 and neither was on this machine: `Restore-Packages.ps1` restores
+from the local NuGet cache and does not hit the network, so they had to be fetched into
+`%USERPROFILE%\.nuget\packages` once before a restore could see them. The same will be true of the
+next machine and of a fresh CI runner (which restores from nuget.org and is unaffected).
+`System.IO.FileSystem`'s managed 1.1.94 asks for native `1.1.0.4`, which is what the flashed
+firmware carries — check that pairing with `nanoff --nanodevice --devicedetails` before bumping
+it, since a managed/native mismatch is refused at load time by the CLR rather than at build time.
 
 Companion repos default to the branch configured in `scripts\nanoFramework.local.env.ps1`
 (`main`) — except `CoreLibrary`, `nanoFramework.Hardware.Esp32`, `nanoFramework.Logging`,
@@ -758,20 +837,28 @@ Likely first candidates here: RoomSensor current readings, Irrigation/Oven comma
 
 ## Current RoomSensor facts
 
-| Fact | Value |
-|---|---|
-| Device Homie ID | `room-sensor-office` |
-| MQTT broker in code | `192.168.1.238` in `Program.cs` (verified against the source, 2026-08-20) |
-| Sensor node | `sensor` |
-| Sensor type | `BMP280` |
-| Properties | `temperature`, `humidity`, `pressure` |
-| Update interval | `5000 ms` |
-| Alert id for an invalid reading | `sensor` (raised/cleared through `IDeviceProtocol`; the v4 adapter turns it into `$state=alert`) |
+Since 2026-09-16 the first four rows are **configuration, not code**: they live in
+`config\room-sensor.json` and reach the device through `Deploy-DeviceConfig.ps1` (see On-device
+configuration above). `Program.cs` still carries the id, the name and the broker as a *fallback*,
+used only when that file could not be read, so the alert has an address to go out from.
+
+| Fact | Value | Where |
+|---|---|---|
+| Device Homie ID | `room-sensor-office` | `config\room-sensor.json`; fallback in `Constants.cs` |
+| MQTT broker | `192.168.1.238` | `config\room-sensor.json`; fallback in `Program.cs` |
+| I2C wiring | bus `1`, data `21`, clock `22` | `config\room-sensor.json` — no fallback |
+| Update interval | `5000 ms` | `config\room-sensor.json` — no fallback |
+| Sensor node | `sensor` | `Constants.cs` — what the firmware is, not where it is |
+| Sensor type | `BMP280` | `Constants.cs` |
+| Properties | `temperature`, `humidity`, `pressure` | `Constants.cs` |
+| Alert id for an invalid reading | `sensor` (raised/cleared through `IDeviceProtocol`; the v4 adapter turns it into `$state=alert`) | `Program.cs` |
+| Alert id for an unreadable configuration | `configuration` | `ConfigurationResult.AlertId`, shared by every device |
 
 Note that `MqttCheck` hardcodes its own broker (`192.168.1.238`) separately — these two constants
 drift apart easily, and a stale one is the usual reason a healthy device "can't reach the
 broker". `Run-IntegrationTests.ps1` warns when `MqttCheck`'s constant isn't an address of the
-host machine.
+host machine. It also still checks RoomSensor's, which is now the fallback rather than the live
+value; the versioned `config\room-sensor.json` needs the same check.
 
 ## Open work
 

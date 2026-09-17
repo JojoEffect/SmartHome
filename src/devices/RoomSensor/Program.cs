@@ -1,3 +1,4 @@
+using SmartHome.DeviceConfiguration;
 using SmartHome.DeviceModel;
 using SmartHome.DeviceModel.Builder;
 using SmartHome.DeviceModel.Properties;
@@ -20,21 +21,21 @@ namespace SmartHome.Devices.RoomSensor
 {
     public class Program
     {
-        private const int I2cBusId = 1;
-        private const int I2cDataPin = 21;
-        private const int I2cClockPin = 22;
-        private const int MeasurementIntervalMs = 5000;
-
+        // Where this device's installation data is compiled in and where it is not: the
+        // broker address below is a fallback, used only when config\room-sensor.json
+        // could not be read. The live value comes from that file.
+        //
         // Named rather than inline at the call site, so Run-IntegrationTests.ps1's
         // stale-constant pre-flight can find it: that check greps for exactly this
-        // shape, and an inline literal was invisible to it. This address drifts from
-        // SMARTHOME_MQTT_BROKER in local.env.ps1 and is the usual reason a healthy
-        // device "can't reach the broker".
-        private const string BrokerHost = "192.168.1.238";
+        // shape, and an inline literal was invisible to it. That check now guards the
+        // fallback rather than the address the device actually uses -- the versioned
+        // configuration file needs the same check, which is filed separately.
+        private const string FallbackBrokerHost = "192.168.1.238";
 
         // What is wrong, as an id: the sensor. Alerts are keyed, so raising and clearing
-        // both name the condition, and a second condition on this device would get its
-        // own id rather than overwriting this one.
+        // both name the condition, and a second condition on this device gets its own id
+        // rather than overwriting this one. (The configuration failure is the second one,
+        // and its id is the shared ConfigurationResult.AlertId.)
         private const string SensorAlertId = "sensor";
 
         private static FloatProperty _temperatureProperty;
@@ -51,10 +52,18 @@ namespace SmartHome.Devices.RoomSensor
 
                 _logger = LogDispatcher.LoggerFactory.CreateLogger("MainLogger");
 
+                // Before the network, because nothing about reading a local file needs
+                // one and a device whose configuration is missing should find that out in
+                // milliseconds rather than after WiFi's 60-second connect timeout. It has
+                // to be before the protocol client is constructed in any case: the nodes
+                // it announces are decided here.
+                var configuration = new ConfigurationStore().Load(typeof(RoomSensorConfiguration));
+                var settings = (RoomSensorConfiguration)configuration.Value;
+
                 NetworkHelper.ConnectToConfiguredNetwork();
 
-                var device = SetupDevice();
-                var mqttClient = SetupMqttClient();
+                var device = SetupDevice(settings);
+                var mqttClient = SetupMqttClient(settings);
 
                 // The one line that couples this app to a convention. Everything above
                 // describes the device and everything below talks to IDeviceProtocol, so
@@ -65,9 +74,26 @@ namespace SmartHome.Devices.RoomSensor
                 // to stop naming one.)
                 IDeviceProtocol protocol = new HomieClient(device, mqttClient);
 
+                // Before the connect, so the announcement itself already carries the
+                // degraded state. Raising it afterwards would publish a healthy state
+                // first and correct it a moment later, which every controller would see.
+                configuration.ReportTo(protocol);
+
                 ConnectWithRetry(protocol);
 
-                using var sensor = SetupSensor();
+                if (settings == null)
+                {
+                    // Connected, announced, alerting, and holding there. There is nothing
+                    // honest left to do: the I2C pins are in the file that could not be
+                    // read, so the sensor cannot be opened, and guessing at them is
+                    // exactly the wrong-but-plausible behaviour this device is built to
+                    // refuse. Someone deploys the configuration and resets the device.
+                    _logger.LogError("No usable configuration; staying connected and alerting, with no sensor node announced.");
+                    Thread.Sleep(Timeout.Infinite);
+                    return;
+                }
+
+                using var sensor = SetupSensor(settings.Sensor);
 
                 while (true)
                 {
@@ -89,7 +115,7 @@ namespace SmartHome.Devices.RoomSensor
                         _logger.LogError(ex, "Failed to publish a reading; continuing with the next measurement.");
                     }
 
-                    Thread.Sleep(MeasurementIntervalMs);
+                    Thread.Sleep(settings.Sensor.MeasurementIntervalMs);
                 }
             }
             catch (Exception ex)
@@ -99,9 +125,25 @@ namespace SmartHome.Devices.RoomSensor
             }
         }
 
-        public static Device SetupDevice()
+        /// <summary>
+        /// Describes the device, with the sensor node only when there is a configuration
+        /// that says how it is wired.
+        /// </summary>
+        /// <remarks>
+        /// A device with no nodes is the deliberate shape of the degraded case, not an
+        /// oversight. Announcing the node anyway would advertise three properties that
+        /// will never carry a reading, and announcing it with made-up pins would be worse
+        /// still. What a controller sees instead is a device that is present, alerting,
+        /// and claiming nothing.
+        /// </remarks>
+        public static Device SetupDevice(RoomSensorConfiguration configuration)
         {
-            var builder = new DeviceBuilder(Constants.DeviceTopicId, Constants.DeviceName);
+            if (configuration == null)
+            {
+                return new DeviceBuilder(Constants.FallbackDeviceTopicId, Constants.FallbackDeviceName).BuildDevice();
+            }
+
+            var builder = new DeviceBuilder(configuration.DeviceId, configuration.DeviceName);
             var device = builder
                     .AddNode(Constants.NodeSensorTopicId, Constants.NodeSensorName, Constants.NodeSensorType)
                         .AddFloatProperty(Constants.PropertyTemperatureTopicId, Constants.PropertyTemperatureName, 0.0)
@@ -122,16 +164,22 @@ namespace SmartHome.Devices.RoomSensor
             return device;
         }
 
-        public static IReconnectingMqttClient SetupMqttClient() => new ReconnectingMqttClient(BrokerHost);
+        /// <remarks>
+        /// The fallback address is used only when there is no configuration to read one
+        /// from. It exists so the device can still reach a broker to say so: an alert
+        /// nobody can see is the same as no alert.
+        /// </remarks>
+        public static IReconnectingMqttClient SetupMqttClient(RoomSensorConfiguration configuration)
+            => new ReconnectingMqttClient(configuration == null ? FallbackBrokerHost : configuration.BrokerHost);
 
-        private static Bme280 SetupSensor()
+        private static Bme280 SetupSensor(SensorConfiguration sensor)
         {
             // Same wiring as Bmp280Check, which is the isolated proof that this sensor
             // reads correctly over I2C on this board.
-            Configuration.SetPinFunction(I2cDataPin, DeviceFunction.I2C1_DATA);
-            Configuration.SetPinFunction(I2cClockPin, DeviceFunction.I2C1_CLOCK);
+            Configuration.SetPinFunction(sensor.DataPin, DeviceFunction.I2C1_DATA);
+            Configuration.SetPinFunction(sensor.ClockPin, DeviceFunction.I2C1_CLOCK);
 
-            var settings = new I2cConnectionSettings(I2cBusId, Bme280.SecondaryI2cAddress);
+            var settings = new I2cConnectionSettings(sensor.I2cBusId, Bme280.SecondaryI2cAddress);
             var device = I2cDevice.Create(settings);
 
             return new Bme280(device)
@@ -171,7 +219,9 @@ namespace SmartHome.Devices.RoomSensor
 
             // HasAlerts rather than the lifecycle state: an alerting device is still Ready
             // as far as the model is concerned -- it is running and it is publishing --
-            // and only clearing the alert takes the wire's degraded state back.
+            // and only clearing the alert takes the wire's degraded state back. A device
+            // that reached this loop has no configuration alert raised, so the sensor's is
+            // the only one there can be.
             if (device.HasAlerts)
             {
                 _logger.LogInformation("BMP280 reading valid again.");

@@ -1,0 +1,8 @@
+{
+  "Files": [
+    {
+      "DestinationFilePath": "I:\\configuration.json",
+      "SourceFilePath": "config/room-sensor.json"
+    }
+  ]
+}
