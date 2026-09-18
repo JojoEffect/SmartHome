@@ -20,6 +20,7 @@
   <ItemGroup>
     <Compile Include="Constants.cs" />
     <Compile Include="Program.cs" />
+    <Compile Include="RoomSensorConfiguration.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
@@ -28,6 +29,12 @@
     </Reference>
     <Reference Include="nanoFramework.Hardware.Esp32">
       <HintPath>..\..\..\packages\nanoFramework.Hardware.Esp32.1.6.42\lib\nanoFramework.Hardware.Esp32.dll</HintPath>
+    </Reference>
+    <Reference Include="nanoFramework.Json">
+      <HintPath>..\..\..\packages\nanoFramework.Json.2.2.213\lib\nanoFramework.Json.dll</HintPath>
+    </Reference>
+    <Reference Include="System.IO.FileSystem">
+      <HintPath>..\..\..\packages\nanoFramework.System.IO.FileSystem.1.1.94\lib\System.IO.FileSystem.dll</HintPath>
     </Reference>
     <Reference Include="nanoFramework.Logging">
       <HintPath>..\..\..\packages\nanoFramework.Logging.1.1.161\lib\nanoFramework.Logging.dll</HintPath>
@@ -112,6 +119,7 @@
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\common\DeviceConfiguration\DeviceConfiguration.nfproj" />
     <ProjectReference Include="..\..\common\Networking\Networking.nfproj" />
     <ProjectReference Include="..\..\common\DeviceModel\DeviceModel.nfproj" />
     <ProjectReference Include="..\..\common\Homie\Homie.nfproj" />

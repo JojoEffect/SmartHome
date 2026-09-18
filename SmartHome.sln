@@ -45,6 +45,8 @@ Project("{11A8DD76-328B-46DF-9F39-F559912D0360}") = "Unit", "src\tests\Unit\Unit
 EndProject
 Project("{11A8DD76-328B-46DF-9F39-F559912D0360}") = "Text", "src\common\Text\Text.nfproj", "{F81AF571-B647-4F7C-B6E0-3A18BFB83262}"
 EndProject
+Project("{11A8DD76-328B-46DF-9F39-F559912D0360}") = "DeviceConfiguration", "src\common\DeviceConfiguration\DeviceConfiguration.nfproj", "{5B1D0C74-9E38-4A62-B0F7-8C5A21D4E693}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -147,6 +149,12 @@ Global
 		{2DF70F2D-6891-4662-958F-89734C2A98D9}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{2DF70F2D-6891-4662-958F-89734C2A98D9}.Release|Any CPU.Build.0 = Release|Any CPU
 		{2DF70F2D-6891-4662-958F-89734C2A98D9}.Release|Any CPU.Deploy.0 = Release|Any CPU
+		{5B1D0C74-9E38-4A62-B0F7-8C5A21D4E693}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5B1D0C74-9E38-4A62-B0F7-8C5A21D4E693}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5B1D0C74-9E38-4A62-B0F7-8C5A21D4E693}.Debug|Any CPU.Deploy.0 = Debug|Any CPU
+		{5B1D0C74-9E38-4A62-B0F7-8C5A21D4E693}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5B1D0C74-9E38-4A62-B0F7-8C5A21D4E693}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5B1D0C74-9E38-4A62-B0F7-8C5A21D4E693}.Release|Any CPU.Deploy.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -172,6 +180,7 @@ Global
 		{F81AF571-B647-4F7C-B6E0-3A18BFB83262} = {3787F1EA-8995-47B8-B281-952F9D2E5428}
 		{F0728ACB-CE35-4FF3-9B38-187C513977DB} = {3787F1EA-8995-47B8-B281-952F9D2E5428}
 		{2DF70F2D-6891-4662-958F-89734C2A98D9} = {3787F1EA-8995-47B8-B281-952F9D2E5428}
+		{5B1D0C74-9E38-4A62-B0F7-8C5A21D4E693} = {3787F1EA-8995-47B8-B281-952F9D2E5428}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {C81F4631-4324-4719-8A6D-ECCF3C66DD0B}

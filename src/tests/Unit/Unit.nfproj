@@ -36,6 +36,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="AssemblyIdentityTests.cs" />
+    <Compile Include="DeviceConfigurationTests.cs" />
     <Compile Include="DeviceModelFormatTests.cs" />
     <Compile Include="DeviceModelGuardTests.cs" />
     <Compile Include="DeviceModelTests.cs" />
@@ -43,8 +44,20 @@
     <Compile Include="HomieAdapterTests.cs" />
     <Compile Include="HomieClientTests.cs" />
     <Compile Include="HomieGoldenWireTests.cs" />
+    <Compile Include="RoomSensorConfigurationTests.cs" />
     <Compile Include="MockMqttClient.cs" />
     <Compile Include="ReconnectingMqttClientTests.cs" />
+    <!-- Linked, not referenced. RoomSensorConfiguration is pure validation logic with no
+         hardware in it, and it carries the rules that decide whether that device comes up
+         configured or alerting, so it belongs under test. A ProjectReference would drag
+         in a device exe, and with it a second Main() beside UnitTestLauncher's, which is
+         the assembly-resolution corner this suite has already been bitten by. Linking one
+         source file is the pattern Bmp280Check already uses for IntegrationTest.cs.
+         (No double hyphens anywhere in this comment: XML forbids them inside one, and
+         MSBuild rejects the whole project file rather than ignoring the comment.) -->
+    <Compile Include="..\..\devices\RoomSensor\RoomSensorConfiguration.cs">
+      <Link>RoomSensorConfiguration.cs</Link>
+    </Compile>
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
@@ -52,6 +65,7 @@
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\common\DeviceConfiguration\DeviceConfiguration.nfproj" />
     <ProjectReference Include="..\..\common\DeviceModel\DeviceModel.nfproj" />
     <ProjectReference Include="..\..\common\Homie\Homie.nfproj" />
     <ProjectReference Include="..\..\common\Mqtt\Mqtt.nfproj" />
@@ -62,8 +76,14 @@
     <Reference Include="mscorlib">
       <HintPath>..\..\..\packages\nanoFramework.CoreLibrary.1.17.11\lib\mscorlib.dll</HintPath>
     </Reference>
+    <Reference Include="nanoFramework.Json">
+      <HintPath>..\..\..\packages\nanoFramework.Json.2.2.213\lib\nanoFramework.Json.dll</HintPath>
+    </Reference>
     <Reference Include="nanoFramework.Logging">
       <HintPath>..\..\..\packages\nanoFramework.Logging.1.1.161\lib\nanoFramework.Logging.dll</HintPath>
+    </Reference>
+    <Reference Include="System.IO.FileSystem">
+      <HintPath>..\..\..\packages\nanoFramework.System.IO.FileSystem.1.1.94\lib\System.IO.FileSystem.dll</HintPath>
     </Reference>
     <Reference Include="nanoFramework.M2Mqtt">
       <HintPath>..\..\..\packages\nanoFramework.M2Mqtt.5.1.221\lib\nanoFramework.M2Mqtt.dll</HintPath>

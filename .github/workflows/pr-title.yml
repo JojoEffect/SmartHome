@@ -45,6 +45,13 @@ jobs:
             revert
           # Scopes are optional, but when present should name the area touched, matching
           # the repository's issue labels and layout.
+          # A fixed list, so a new area of the repository has to be added here before a
+          # title can name it. Note the consequence, which cost this list a red check
+          # once: the job runs on pull_request_target, so the workflow file comes from the
+          # BASE branch. Adding a scope in the same pull request that first uses it does
+          # not work -- the run reads main's list, not the branch's. Add the scope, retitle
+          # that pull request without one (requireScope is false), and the scope is
+          # available to everything after it.
           scopes: |
             homie
             mqtt
@@ -52,6 +59,7 @@ jobs:
             roomsensor
             irrigation
             oven
+            config
             tests
             scripts
             ci
