@@ -950,6 +950,12 @@ reported at confidence `Low`, marked `?` in the ranking table, and is the one to
 trusting a rank. An `-Overrides` file that sets `Where` alone now warns, because before the
 split that key was how a row got moved and it no longer is.
 
+`Trust` is marked the same way, for the same reason: it is the heaviest term, one matched phrase
+can set it, and a `Trust` at confidence `Medium` shows as `T?`. Both marks are listed together
+under `Needs a human call`, and both are declared in one place, the axis table in the script,
+which also drives every axis's scores, `Confidence` and `Signals` — so an axis cannot be scored
+without being reported, and a new mark is one entry there (#82).
+
 ### File what you find
 
 **Anything found and verified that falls outside the change in hand gets a GitHub issue,

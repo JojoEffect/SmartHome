@@ -21,9 +21,12 @@
     CLASSIFICATION IS A KEYWORD HEURISTIC AND IT IS NOT AUTHORITATIVE. Every axis records
     which patterns fired and a confidence (High/Medium/Low/None), because a heuristic that
     hides its reasoning is worse than no heuristic at all. Anything it could not read is
-    reported as Unknown rather than guessed into a bucket. Correct it with -Overrides: the
-    caller reads the issue bodies, decides, and hands the decisions back, so the ranking
-    stays reproducible instead of living in a conversation.
+    reported as Unknown rather than guessed into a bucket, and the calls it knows to be its
+    least reliable -- a Trust set at Medium confidence, a VerifyNeeds read from the body
+    rather than the title -- are marked `?` in the ranking and listed under Needs a human
+    call, not left for -Json to say. Correct it with -Overrides: the caller reads the issue
+    bodies, decides, and hands the decisions back, so the ranking stays reproducible
+    instead of living in a conversation.
 
     The eight axes, and what each answers:
 
@@ -111,8 +114,10 @@
 
 .PARAMETER Handoff
     Print the top N as pointers for spinning each one off into its own session: url, axes,
-    the full scoring trail, any override note, and a marker on the ones that need hardware
-    to verify, so the confirm-before-device-scripts rule reaches the new session.
+    the full scoring trail, any override note, a marker on the ones that need hardware to
+    verify, so the confirm-before-device-scripts rule reaches the new session, and a line on
+    any whose Trust was set at Medium confidence, so a false one is caught before a session
+    is spent on it.
 
     Three kinds of row are never handed out, however high they rank: blocked (it names what
     it is waiting for, not work that can start), closed (settled), and in-progress (a
@@ -179,54 +184,11 @@ $ErrorActionPreference = 'Stop'
 # no restored packages, so it must not inherit the one thing that would make it fail in a
 # fresh worktree.
 
-$repoRoot = Get-SmartHomeRepoRoot
-
-# --------------------------------------------------------------------- fetch ----
-
-if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-    Write-Error "gh is not on PATH. The backlog is GitHub issues, so there is nothing to rank without it. Install the GitHub CLI, then run: gh auth login"
-    exit 1
-}
-
-# Never pipe a native tool through 2>&1 in Windows PowerShell 5.1: the redirect wraps
-# ordinary stderr in a NativeCommandError and reports a healthy call as a failure. Let
-# stderr reach the console and judge by the exit code.
-Push-Location $repoRoot
-try {
-    $raw = & gh issue list --state $State --limit $Limit --json number,title,body,labels,createdAt,updatedAt,comments,url,state
-    $ghExit = $LASTEXITCODE
-}
-finally {
-    Pop-Location
-}
-
-if ($ghExit -ne 0) {
-    Write-Error "gh issue list failed with exit code $ghExit. Not authenticated? Run: gh auth login (scripts\Test-Setup.ps1 reports this too)."
-    exit 1
-}
-
-# ForEach-Object, not just @(): ConvertFrom-Json in Windows PowerShell returns a single
-# object rather than a one-element array when the payload has one element.
-$issues = @($raw | ConvertFrom-Json | ForEach-Object { $_ })
-
-# A cap that silently trims the backlog would make a partial ranking read as a complete
-# one -- the same "no silent caps" rule the rest of this repo holds its scripts to.
-if ($issues.Count -ge $Limit) {
-    Write-Warning "Fetched $($issues.Count) issues, which is the -Limit. There are probably more, and anything beyond the cap is missing from this ranking. Re-run with a larger -Limit."
-}
-
-if ($issues.Count -eq 0) {
-    if ($Json) {
-        [pscustomobject]@{
-            Session = [pscustomobject]@{ Hardware = $Hardware; TimeBudget = $TimeBudget; Theme = $Theme; State = $State; Overrides = $Overrides; Count = 0 }
-            Issues  = @()
-        } | ConvertTo-Json -Depth 8
-    }
-    else {
-        Write-Warning "No $State issues found. Nothing to rank."
-    }
-    exit 0
-}
+# Dot-sourcing this script defines the rules, the axis table and the functions that classify
+# one issue, and runs nothing: fetching the backlog, reading -Overrides and the whole report
+# sit below the guard further down. That is what lets scripts\tests classify a synthetic
+# issue without `gh` or a live backlog, so keep everything between here and the guard a
+# declaration.
 
 # ----------------------------------------------------- classification rules ----
 #
@@ -312,6 +274,46 @@ $dependsPatterns = @(
     'requires\s+#(?<n>\d+)'
 )
 
+# ---------------------------------------------------------------------- axes ----
+#
+# The axes those rules decide, in the order the report lists them. Each row names the $rules
+# groups that vote on its axis and which part of the issue they read, and the classification
+# walks this one table for every group's hits and score, every axis's Confidence and every
+# group's Signals -- so no axis can be scored without being reported. Before it, those three
+# were each spelled out an axis at a time, in three lists that had to stay in step, and
+# Trust's confidence was computed for every issue and shown nowhere, with nothing to say so
+# (#82).
+#
+# LowEvidenceWhen is an axis saying when its own call is too thin to trust unread. It is
+# judged on the finished record, after -Overrides, and every call it matches is marked `?`
+# in the ranking and listed under Needs a human call -- so an axis gains the marker here,
+# in one place, or not at all.
+#
+#   Trust        set at Medium. The flag needs a score of 3 and three of its six patterns
+#                weigh 3 on their own, so one matched phrase earns the +30 and the -Theme
+#                Trust multiplier. Medium is not the same as wrong -- some of those rows are
+#                genuine -- it is a call nothing short of reading the body can check, which
+#                is why it is marked rather than thresholded away.
+#   VerifyNeeds  read from the body because the title said nothing. Right about three times
+#                in four against a hand-labelled reading, where a title-derived call has not
+#                yet been wrong.
+#
+# Both rules mark a call the heuristic made, never an absent one. An unset Trust claims
+# nothing, and an Unknown VerifyNeeds is already listed under Needs a human call as a row
+# with no signal, which is the stronger thing to say about it.
+#
+# Risk and Effort are decided differently -- the worst band that fires, and a size judgement
+# -- and are not rows here.
+$axes = [ordered]@{
+    Trust        = @{ Signals = @('Trust'); Reads = 'Issue'
+                      LowEvidenceWhen = { param($Record) $Record.Trust -and $Record.Confidence.Trust -eq 'Medium' } }
+    EvidenceDebt = @{ Signals = @('EvidenceDebt'); Reads = 'Issue' }
+    Where        = @{ Signals = @('Hardware', 'Desk'); Reads = 'Issue' }
+    VerifyNeeds  = @{ Signals = @('VerifyHardware', 'VerifyCI', 'VerifyNone'); Reads = 'Subject'
+                      LowEvidenceWhen = { param($Record) $Record.VerifyFromBody -and $Record.VerifyNeeds -ne 'Unknown' } }
+    Track        = @{ Signals = @('Capability', 'Velocity'); Reads = 'Issue' }
+}
+
 function Get-AxisHits {
     param(
         [Parameter(Mandatory = $true)][string]$Axis,
@@ -343,6 +345,260 @@ function Get-Confidence {
     if ($Score -ge 3) { return 'Medium' }
     if ($Score -ge 1) { return 'Low' }
     return 'None'
+}
+
+function Read-Signals {
+    # Scores each named $rules group against one text, into the two maps the classification
+    # decides from. Reading a group again replaces what was read for it, which is how the
+    # VerifyNeeds body fallback swaps the title's reading for the body's.
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Signals,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text,
+        [hashtable]$Hits,
+        [hashtable]$Score
+    )
+
+    foreach ($signal in $Signals) {
+        $Hits[$signal] = Get-AxisHits -Axis $signal -Text $Text
+        $Score[$signal] = Get-HitScore $Hits[$signal]
+    }
+}
+
+# -------------------------------------------------------- classify one issue ----
+
+function Get-IssueRecord {
+    # One issue, classified: every axis's call, the confidence it was made with and the
+    # signals behind it. A reading of the issue alone -- -Overrides, the dependency edges and
+    # the scores are applied to the finished records afterwards.
+    param([Parameter(Mandatory = $true)]$Issue)
+
+    $body = if ($null -eq $Issue.body) { '' } else { [string]$Issue.body }
+    $labels = @($Issue.labels | ForEach-Object { $_.name })
+    $text = "$($Issue.title)`n$body`n$($labels -join ' ')"
+
+    # VerifyNeeds reads the subject line first, not the whole issue. The title says what an
+    # issue IS; the body says what it MENTIONS, and in this repo every body mentions the
+    # device -- the Dependabot issue names ESP32 packages, a Homie library issue walks
+    # through the conformance check, this very issue quotes `Run-IntegrationTests.ps1`.
+    # Scoring the body first made 33 of 37 issues read as hardware-verified, which is an
+    # axis carrying no information at all. The body is the fallback for a title that says
+    # nothing, and what it produces is reported at Low confidence.
+    $scopes = @{ Issue = $text; Subject = "$($Issue.title)`n$($labels -join ' ')" }
+
+    $hits = @{}
+    $score = @{}
+    foreach ($name in $axes.Keys) {
+        Read-Signals -Signals $axes[$name].Signals -Text $scopes[$axes[$name].Reads] -Hits $hits -Score $score
+    }
+
+    # Labels are evidence too, and stronger than prose: someone chose them deliberately.
+    if ($labels -contains 'area: sensor') { $score.Hardware += 3; $score.VerifyHardware += 3; $score.Capability += 2 }
+    if ($labels -contains 'area: homie') { $score.Capability += 2 }
+    if ($labels -contains 'area: infra') { $score.Velocity += 3 }
+    if ($labels -contains 'type: feature') { $score.Capability += 3 }
+
+    $trust = ($score.Trust -ge 3)
+    $debt = ($score.EvidenceDebt -ge 3)
+
+    $where = 'Unknown'
+    if ($score.Hardware -gt $score.Desk) { $where = 'Hardware' }
+    elseif ($score.Desk -gt $score.Hardware) { $where = 'Desk' }
+    elseif ($score.Hardware -gt 0) { $where = 'Either' }
+
+    # VerifyNeeds asks what *proving* the change takes, which is a different question from
+    # where the edit lands and answers differently for a whole class of issue here: host-side
+    # tooling for the integration suite reads as desk work because the prose is about scripts
+    # and parsing, while nothing but a real suite run can show the change works. Where used to
+    # answer for both and carried the session multiplier, so that disagreement moved an issue
+    # further than any other single axis (#57).
+    #
+    # Ties resolve to the stricter environment rather than to Unknown, because the two
+    # mistakes do not cost the same: calling hardware work desk work burns a session that
+    # cannot finish it, while the reverse only sorts a desk issue lower than it deserved in a
+    # session that has the device anyway.
+    $verifyScope = 'title'
+    if (($score.VerifyHardware + $score.VerifyCI + $score.VerifyNone) -eq 0) {
+        $verifyScope = 'body'
+        Read-Signals -Signals $axes['VerifyNeeds'].Signals -Text $body -Hits $hits -Score $score
+    }
+
+    $verifyTop = [Math]::Max($score.VerifyHardware, [Math]::Max($score.VerifyCI, $score.VerifyNone))
+    $verifyNeeds = 'Unknown'
+    if ($verifyTop -gt 0) {
+        if ($score.VerifyHardware -eq $verifyTop) { $verifyNeeds = 'Hardware' }
+        elseif ($score.VerifyCI -eq $verifyTop) { $verifyNeeds = 'CI' }
+        else { $verifyNeeds = 'None' }
+    }
+
+    $track = 'Unknown'
+    if ($score.Capability -gt $score.Velocity) { $track = 'Capability' }
+    elseif ($score.Velocity -gt $score.Capability) { $track = 'Velocity' }
+    elseif ($score.Capability -gt 0) { $track = 'Either' }
+
+    # Risk: the worst band that fires, not a sum. A crash and a silent wrong answer are
+    # not additive -- the worse one is what leaving the issue open actually costs.
+    $silentHits = Get-AxisHits -Axis 'SilentWrong' -Text $text
+    $loudHits = Get-AxisHits -Axis 'LoudFailure' -Text $text
+    $frictionHits = Get-AxisHits -Axis 'Friction' -Text $text
+    $risk = 'Cosmetic'
+    $riskHits = @()
+    if ((Get-HitScore $frictionHits) -ge 2) { $risk = 'Friction'; $riskHits = $frictionHits }
+    if ((Get-HitScore $loudHits) -ge 3) { $risk = 'LoudFailure'; $riskHits = $loudHits }
+    if ((Get-HitScore $silentHits) -ge 3) { $risk = 'SilentWrong'; $riskHits = $silentHits }
+
+    $effort = 'M'
+    $effortWhy = 'no size signal; defaulted'
+    if ($text -match $effortLarge) { $effort = 'L'; $effortWhy = 'large-work phrasing' }
+    elseif ($body.Length -gt 2600) { $effort = 'L'; $effortWhy = "long body ($($body.Length) chars)" }
+    elseif (($text -match $effortSmall) -and $body.Length -lt 900) { $effort = 'S'; $effortWhy = 'small-work phrasing, short body' }
+    elseif ($body.Length -lt 700) { $effort = 'S'; $effortWhy = "short body ($($body.Length) chars)" }
+    if ($labels -contains 'type: feature') { $effort = 'L'; $effortWhy = 'labelled type: feature' }
+
+    $effortConfidence = 'Medium'
+    if ($effortWhy -like 'no size signal*') { $effortConfidence = 'None' }
+    elseif ($effortWhy -like '*body (*') { $effortConfidence = 'Low' }
+
+    $dependsOn = @()
+    foreach ($pattern in $dependsPatterns) {
+        foreach ($match in ([regex]::Matches($text, $pattern, 'IgnoreCase'))) {
+            $dependsOn += [int]$match.Groups['n'].Value
+        }
+    }
+    $dependsOn = @($dependsOn | Sort-Object -Unique)
+
+    # Confidence and Signals from the same rows the scores came from. An axis's confidence
+    # is its strongest group's score, labels included; its signals are the patterns that
+    # fired, labels not.
+    $confidence = [ordered]@{}
+    $signals = [ordered]@{}
+    foreach ($name in $axes.Keys) {
+        $top = 0
+        foreach ($signal in $axes[$name].Signals) {
+            $top = [Math]::Max($top, $score[$signal])
+            $signals[$signal] = @($hits[$signal] | ForEach-Object { $_.Why })
+        }
+        $confidence[$name] = Get-Confidence $top
+    }
+
+    # A body-derived call is capped at Low however many patterns fired. On the 37 issues in
+    # this repository every title-derived call was right and every wrong one came from the
+    # body, so the score is not what separates them -- the scope is.
+    if ($verifyScope -eq 'body' -and $confidence['VerifyNeeds'] -ne 'None') { $confidence['VerifyNeeds'] = 'Low' }
+
+    $confidence['Risk'] = Get-Confidence (Get-HitScore $riskHits)
+    $confidence['Effort'] = $effortConfidence
+    $signals['Risk'] = @($riskHits | ForEach-Object { $_.Why })
+    $signals['Effort'] = $effortWhy
+
+    return [pscustomobject]@{
+        Number       = [int]$Issue.number
+        Title        = [string]$Issue.title
+        Url          = [string]$Issue.url
+        State        = [string]$Issue.state
+        Labels       = $labels
+        Blocked      = ($labels -contains 'status: blocked')
+        InProgress   = ($labels -contains 'status: in-progress')
+        AgeDays      = [int]((Get-Date) - [datetime]$Issue.createdAt).TotalDays
+        Comments     = @($Issue.comments).Count
+        Trust        = $trust
+        EvidenceDebt = $debt
+        Where        = $where
+        VerifyNeeds  = $verifyNeeds
+        # Not folded into Signals: every member of that object is a list of the Why strings
+        # that fired, and a bare scalar among them breaks anything walking it. This is also
+        # what the report marks with `?`, so it belongs where the axis it qualifies is.
+        VerifyFromBody = ($verifyScope -eq 'body')
+        Track        = $track
+        Risk         = $risk
+        Effort       = $effort
+        DependsOn    = $dependsOn
+        Unblocks     = @()
+        Heuristic    = [pscustomobject]@{
+            Trust = $trust; EvidenceDebt = $debt; Where = $where; VerifyNeeds = $verifyNeeds
+            Track = $track; Risk = $risk; Effort = $effort
+        }
+        Overridden   = @()
+        Confidence   = [pscustomobject]$confidence
+        # Which axes' calls rest on the least evidence those axes accept. Filled in by
+        # Get-LowEvidence once -Overrides has been applied, not here.
+        LowEvidence  = @()
+        Signals      = [pscustomobject]$signals
+        Note         = ''
+        BaseScore    = 0.0
+        Score        = 0.0
+        Why          = @()
+    }
+}
+
+function Get-LowEvidence {
+    # The axes whose call on this record rests on the least evidence that axis accepts, by the
+    # LowEvidenceWhen rule its row in $axes declares. Judged on the finished record, after
+    # -Overrides and never before: an overridden axis is the caller's reading of the body,
+    # reports confidence Override, and leaves nothing to mark.
+    param([Parameter(Mandatory = $true)]$Record)
+
+    # Indexed, not dotted: most rows declare no rule, and under strict mode a dotted read of
+    # a key a hashtable does not have throws rather than returning nothing.
+    foreach ($name in $axes.Keys) {
+        $rule = $axes[$name]['LowEvidenceWhen']
+        if ($rule -and (& $rule $Record)) { $name }
+    }
+}
+
+# $MyInvocation.InvocationName is '.' for every spelling of a dot-source and the path or '&'
+# for every spelling of a run, so a dot-source can never reach `gh`. `return`, not `exit`:
+# at file scope `exit` in a dot-sourced script ends the host.
+if ($MyInvocation.InvocationName -eq '.') {
+    return
+}
+
+$repoRoot = Get-SmartHomeRepoRoot
+
+# --------------------------------------------------------------------- fetch ----
+
+if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+    Write-Error "gh is not on PATH. The backlog is GitHub issues, so there is nothing to rank without it. Install the GitHub CLI, then run: gh auth login"
+    exit 1
+}
+
+# Never pipe a native tool through 2>&1 in Windows PowerShell 5.1: the redirect wraps
+# ordinary stderr in a NativeCommandError and reports a healthy call as a failure. Let
+# stderr reach the console and judge by the exit code.
+Push-Location $repoRoot
+try {
+    $raw = & gh issue list --state $State --limit $Limit --json number,title,body,labels,createdAt,updatedAt,comments,url,state
+    $ghExit = $LASTEXITCODE
+}
+finally {
+    Pop-Location
+}
+
+if ($ghExit -ne 0) {
+    Write-Error "gh issue list failed with exit code $ghExit. Not authenticated? Run: gh auth login (scripts\Test-Setup.ps1 reports this too)."
+    exit 1
+}
+
+# ForEach-Object, not just @(): ConvertFrom-Json in Windows PowerShell returns a single
+# object rather than a one-element array when the payload has one element.
+$issues = @($raw | ConvertFrom-Json | ForEach-Object { $_ })
+
+# A cap that silently trims the backlog would make a partial ranking read as a complete
+# one -- the same "no silent caps" rule the rest of this repo holds its scripts to.
+if ($issues.Count -ge $Limit) {
+    Write-Warning "Fetched $($issues.Count) issues, which is the -Limit. There are probably more, and anything beyond the cap is missing from this ranking. Re-run with a larger -Limit."
+}
+
+if ($issues.Count -eq 0) {
+    if ($Json) {
+        [pscustomobject]@{
+            Session = [pscustomobject]@{ Hardware = $Hardware; TimeBudget = $TimeBudget; Theme = $Theme; State = $State; Overrides = $Overrides; Count = 0 }
+            Issues  = @()
+        } | ConvertTo-Json -Depth 8
+    }
+    else {
+        Write-Warning "No $State issues found. Nothing to rank."
+    }
+    exit 0
 }
 
 # ----------------------------------------------------------------- overrides ----
@@ -519,183 +775,7 @@ function Set-OverriddenAxes {
 
 # ------------------------------------------------------------------ classify ----
 
-$records = @()
-
-foreach ($issue in $issues) {
-    $body = if ($null -eq $issue.body) { '' } else { [string]$issue.body }
-    $labels = @($issue.labels | ForEach-Object { $_.name })
-    $text = "$($issue.title)`n$body`n$($labels -join ' ')"
-
-    $trustHits = Get-AxisHits -Axis 'Trust' -Text $text
-    $debtHits = Get-AxisHits -Axis 'EvidenceDebt' -Text $text
-    $hardwareHits = Get-AxisHits -Axis 'Hardware' -Text $text
-    $deskHits = Get-AxisHits -Axis 'Desk' -Text $text
-    # VerifyNeeds reads the subject line first, not the whole issue. The title says what an
-    # issue IS; the body says what it MENTIONS, and in this repo every body mentions the
-    # device -- the Dependabot issue names ESP32 packages, a Homie library issue walks
-    # through the conformance check, this very issue quotes `Run-IntegrationTests.ps1`.
-    # Scoring the body first made 33 of 37 issues read as hardware-verified, which is an
-    # axis carrying no information at all. The body is the fallback for a title that says
-    # nothing, and what it produces is reported at Low confidence.
-    $verifySubject = "$($issue.title)`n$($labels -join ' ')"
-    $verifyScope = 'title'
-    $verifyHardwareHits = Get-AxisHits -Axis 'VerifyHardware' -Text $verifySubject
-    $verifyCiHits = Get-AxisHits -Axis 'VerifyCI' -Text $verifySubject
-    $verifyNoneHits = Get-AxisHits -Axis 'VerifyNone' -Text $verifySubject
-    $capabilityHits = Get-AxisHits -Axis 'Capability' -Text $text
-    $velocityHits = Get-AxisHits -Axis 'Velocity' -Text $text
-
-    $trustScore = Get-HitScore $trustHits
-    $debtScore = Get-HitScore $debtHits
-    $hardwareScore = Get-HitScore $hardwareHits
-    $deskScore = Get-HitScore $deskHits
-    $verifyHardwareScore = Get-HitScore $verifyHardwareHits
-    $verifyCiScore = Get-HitScore $verifyCiHits
-    $verifyNoneScore = Get-HitScore $verifyNoneHits
-    $capabilityScore = Get-HitScore $capabilityHits
-    $velocityScore = Get-HitScore $velocityHits
-
-    # Labels are evidence too, and stronger than prose: someone chose them deliberately.
-    if ($labels -contains 'area: sensor') { $hardwareScore += 3; $verifyHardwareScore += 3; $capabilityScore += 2 }
-    if ($labels -contains 'area: homie') { $capabilityScore += 2 }
-    if ($labels -contains 'area: infra') { $velocityScore += 3 }
-    if ($labels -contains 'type: feature') { $capabilityScore += 3 }
-
-    $trust = ($trustScore -ge 3)
-    $debt = ($debtScore -ge 3)
-
-    $where = 'Unknown'
-    if ($hardwareScore -gt $deskScore) { $where = 'Hardware' }
-    elseif ($deskScore -gt $hardwareScore) { $where = 'Desk' }
-    elseif ($hardwareScore -gt 0) { $where = 'Either' }
-
-    # VerifyNeeds asks what *proving* the change takes, which is a different question from
-    # where the edit lands and answers differently for a whole class of issue here: host-side
-    # tooling for the integration suite reads as desk work because the prose is about scripts
-    # and parsing, while nothing but a real suite run can show the change works. Where used to
-    # answer for both and carried the session multiplier, so that disagreement moved an issue
-    # further than any other single axis (#57).
-    #
-    # Ties resolve to the stricter environment rather than to Unknown, because the two
-    # mistakes do not cost the same: calling hardware work desk work burns a session that
-    # cannot finish it, while the reverse only sorts a desk issue lower than it deserved in a
-    # session that has the device anyway.
-    if (($verifyHardwareScore + $verifyCiScore + $verifyNoneScore) -eq 0) {
-        $verifyScope = 'body'
-        $verifyHardwareHits = Get-AxisHits -Axis 'VerifyHardware' -Text $body
-        $verifyCiHits = Get-AxisHits -Axis 'VerifyCI' -Text $body
-        $verifyNoneHits = Get-AxisHits -Axis 'VerifyNone' -Text $body
-        $verifyHardwareScore = Get-HitScore $verifyHardwareHits
-        $verifyCiScore = Get-HitScore $verifyCiHits
-        $verifyNoneScore = Get-HitScore $verifyNoneHits
-    }
-
-    $verifyTop = [Math]::Max($verifyHardwareScore, [Math]::Max($verifyCiScore, $verifyNoneScore))
-    $verifyNeeds = 'Unknown'
-    if ($verifyTop -gt 0) {
-        if ($verifyHardwareScore -eq $verifyTop) { $verifyNeeds = 'Hardware' }
-        elseif ($verifyCiScore -eq $verifyTop) { $verifyNeeds = 'CI' }
-        else { $verifyNeeds = 'None' }
-    }
-
-    # A body-derived call is capped at Low however many patterns fired. On the 37 issues in
-    # this repository every title-derived call was right and every wrong one came from the
-    # body, so the score is not what separates them -- the scope is.
-    $verifyConfidence = Get-Confidence $verifyTop
-    if ($verifyScope -eq 'body' -and $verifyConfidence -ne 'None') { $verifyConfidence = 'Low' }
-
-    $track = 'Unknown'
-    if ($capabilityScore -gt $velocityScore) { $track = 'Capability' }
-    elseif ($velocityScore -gt $capabilityScore) { $track = 'Velocity' }
-    elseif ($capabilityScore -gt 0) { $track = 'Either' }
-
-    # Risk: the worst band that fires, not a sum. A crash and a silent wrong answer are
-    # not additive -- the worse one is what leaving the issue open actually costs.
-    $silentHits = Get-AxisHits -Axis 'SilentWrong' -Text $text
-    $loudHits = Get-AxisHits -Axis 'LoudFailure' -Text $text
-    $frictionHits = Get-AxisHits -Axis 'Friction' -Text $text
-    $risk = 'Cosmetic'
-    $riskHits = @()
-    if ((Get-HitScore $frictionHits) -ge 2) { $risk = 'Friction'; $riskHits = $frictionHits }
-    if ((Get-HitScore $loudHits) -ge 3) { $risk = 'LoudFailure'; $riskHits = $loudHits }
-    if ((Get-HitScore $silentHits) -ge 3) { $risk = 'SilentWrong'; $riskHits = $silentHits }
-
-    $effort = 'M'
-    $effortWhy = 'no size signal; defaulted'
-    if ($text -match $effortLarge) { $effort = 'L'; $effortWhy = 'large-work phrasing' }
-    elseif ($body.Length -gt 2600) { $effort = 'L'; $effortWhy = "long body ($($body.Length) chars)" }
-    elseif (($text -match $effortSmall) -and $body.Length -lt 900) { $effort = 'S'; $effortWhy = 'small-work phrasing, short body' }
-    elseif ($body.Length -lt 700) { $effort = 'S'; $effortWhy = "short body ($($body.Length) chars)" }
-    if ($labels -contains 'type: feature') { $effort = 'L'; $effortWhy = 'labelled type: feature' }
-
-    $effortConfidence = 'Medium'
-    if ($effortWhy -like 'no size signal*') { $effortConfidence = 'None' }
-    elseif ($effortWhy -like '*body (*') { $effortConfidence = 'Low' }
-
-    $dependsOn = @()
-    foreach ($pattern in $dependsPatterns) {
-        foreach ($match in ([regex]::Matches($text, $pattern, 'IgnoreCase'))) {
-            $dependsOn += [int]$match.Groups['n'].Value
-        }
-    }
-    $dependsOn = @($dependsOn | Sort-Object -Unique)
-
-    $records += [pscustomobject]@{
-        Number       = [int]$issue.number
-        Title        = [string]$issue.title
-        Url          = [string]$issue.url
-        State        = [string]$issue.state
-        Labels       = $labels
-        Blocked      = ($labels -contains 'status: blocked')
-        InProgress   = ($labels -contains 'status: in-progress')
-        AgeDays      = [int]((Get-Date) - [datetime]$issue.createdAt).TotalDays
-        Comments     = @($issue.comments).Count
-        Trust        = $trust
-        EvidenceDebt = $debt
-        Where        = $where
-        VerifyNeeds  = $verifyNeeds
-        # Not folded into Signals: every member of that object is a list of the Why strings
-        # that fired, and a bare scalar among them breaks anything walking it. This is also
-        # what the report marks with `?`, so it belongs where the axis it qualifies is.
-        VerifyFromBody = ($verifyScope -eq 'body')
-        Track        = $track
-        Risk         = $risk
-        Effort       = $effort
-        DependsOn    = $dependsOn
-        Unblocks     = @()
-        Heuristic    = [pscustomobject]@{
-            Trust = $trust; EvidenceDebt = $debt; Where = $where; VerifyNeeds = $verifyNeeds
-            Track = $track; Risk = $risk; Effort = $effort
-        }
-        Overridden   = @()
-        Confidence   = [pscustomobject]@{
-            Trust        = Get-Confidence $trustScore
-            EvidenceDebt = Get-Confidence $debtScore
-            Where        = Get-Confidence ([Math]::Max($hardwareScore, $deskScore))
-            VerifyNeeds  = $verifyConfidence
-            Track        = Get-Confidence ([Math]::Max($capabilityScore, $velocityScore))
-            Risk         = Get-Confidence (Get-HitScore $riskHits)
-            Effort       = $effortConfidence
-        }
-        Signals      = [pscustomobject]@{
-            Trust        = @($trustHits | ForEach-Object { $_.Why })
-            EvidenceDebt = @($debtHits | ForEach-Object { $_.Why })
-            Hardware     = @($hardwareHits | ForEach-Object { $_.Why })
-            Desk         = @($deskHits | ForEach-Object { $_.Why })
-            VerifyHardware = @($verifyHardwareHits | ForEach-Object { $_.Why })
-            VerifyCI     = @($verifyCiHits | ForEach-Object { $_.Why })
-            VerifyNone   = @($verifyNoneHits | ForEach-Object { $_.Why })
-            Capability   = @($capabilityHits | ForEach-Object { $_.Why })
-            Velocity     = @($velocityHits | ForEach-Object { $_.Why })
-            Risk         = @($riskHits | ForEach-Object { $_.Why })
-            Effort       = $effortWhy
-        }
-        Note         = ''
-        BaseScore    = 0.0
-        Score        = 0.0
-        Why          = @()
-    }
-}
+$records = @($issues | ForEach-Object { Get-IssueRecord -Issue $_ })
 
 # ------------------------------------------------------------ apply overrides ----
 
@@ -704,9 +784,12 @@ foreach ($issue in $issues) {
 Set-OverriddenAxes -Records $records -Axes @('Trust', 'EvidenceDebt', 'Where', 'VerifyNeeds', 'Track', 'Risk', 'Effort', 'Blocked', 'DependsOn', 'Note')
 
 # A corrected VerifyNeeds is the caller's judgment, not a reading of the body, so the marker
-# that says "this came from the body" has to go with the value it described.
+# that says "this came from the body" has to go with the value it described. LowEvidence is
+# worked out after that, and after every other override, for the same reason: an axis the
+# caller corrected has been read by someone, and there is nothing left about it to mark.
 foreach ($record in $records) {
     if (@($record.Overridden) -contains 'VerifyNeeds') { $record.VerifyFromBody = $false }
+    $record.LowEvidence = @(Get-LowEvidence -Record $record)
 }
 
 # Where stopped carrying the session multiplier when VerifyNeeds took it over, so correcting
@@ -964,9 +1047,33 @@ Write-Cluster -Title 'Blocked' -Color DarkGray -Items @($ranked | Where-Object {
     -Meaning 'status: blocked - the body names what it is waiting for'
 
 $unclassified = @($ranked | Where-Object { $_.Where -eq 'Unknown' -or $_.VerifyNeeds -eq 'Unknown' -or $_.Track -eq 'Unknown' -or $_.Confidence.Effort -eq 'None' })
-if ($unclassified.Count -gt 0) {
+
+# The other half of the script's blind spots: calls it did make, on the least evidence their
+# axis accepts. One line per axis with a LowEvidenceWhen rule in $axes, carrying exactly the
+# rows the ranking marks `?`. Numbers only, and after the titled rows -- a title apiece would
+# repeat the ranking and bury the rows with no signal at all, which stay the first bodies
+# worth reading.
+$lowEvidence = [ordered]@{}
+foreach ($name in $axes.Keys) {
+    if (-not $axes[$name]['LowEvidenceWhen']) { continue }
+    $marked = @($ranked | Where-Object { @($_.LowEvidence) -contains $name })
+    if ($marked.Count -gt 0) { $lowEvidence[$name] = $marked }
+}
+
+if ($unclassified.Count -gt 0 -or $lowEvidence.Count -gt 0) {
     Write-Cluster -Title 'Needs a human call' -Color DarkYellow -Items $unclassified `
         -Meaning 'no signal on at least one axis - read the body and correct it with -Overrides'
+    if ($lowEvidence.Count -gt 0) {
+        Write-Host '    and a call on the least evidence its axis accepts - marked ? in the ranking' -ForegroundColor DarkGray
+        foreach ($name in $lowEvidence.Keys) {
+            $numbers = @($lowEvidence[$name] | ForEach-Object { "#$($_.Number)" })
+            for ($i = 0; $i -lt $numbers.Count; $i += 12) {
+                $label = if ($i -eq 0) { '{0} ({1})' -f $name, $numbers.Count } else { '' }
+                $chunk = $numbers[$i..([Math]::Min($i + 11, $numbers.Count - 1))] -join ' '
+                Write-Host ('      {0,-17} {1}' -f $label, $chunk) -ForegroundColor DarkGray
+            }
+        }
+    }
 }
 
 }  # -RankingOnly
@@ -984,8 +1091,13 @@ foreach ($record in $shown) {
     $title = $record.Title
     if ($title.Length -gt 44) { $title = $title.Substring(0, 41) + '...' }
 
+    # `?` is an axis admitting its call is thin, by the rule its row in $axes declares -- on
+    # Trust, a flag one matched phrase can set, and it carries the heaviest term in the
+    # script. On 2026-09-18 three of the top four rows of a -Theme Trust ranking were false
+    # positives resting on exactly that, and nothing on screen told them from the rest.
     $flags = ''
     if ($record.Trust) { $flags += 'T' }
+    if (@($record.LowEvidence) -contains 'Trust') { $flags += '?' }
     if ($record.EvidenceDebt) { $flags += 'E' }
     if (@($record.Unblocks).Count -gt 0) { $flags += 'U' }
     if ($record.Blocked) { $flags += 'B' }
@@ -1000,12 +1112,12 @@ foreach ($record in $shown) {
     if ($record.Blocked) { $color = 'DarkGray' }
     if ($record.State -ne 'OPEN') { $color = 'DarkGray' }
 
-    # `?` is the axis admitting where it read the answer. A body-derived call is right about
-    # three times in four against a hand-labelled reading of this backlog, where a
-    # title-derived one has not yet been wrong -- and the multiplier it feeds is the largest
+    # On Verify, `?` is the axis admitting where it read the answer. A body-derived call is
+    # right about three times in four against a hand-labelled reading of this backlog, where
+    # a title-derived one has not yet been wrong -- and the multiplier it feeds is the largest
     # in the script, so the difference has to be on screen and not only in -Json.
     $verifyCell = $record.VerifyNeeds
-    if ($record.VerifyFromBody) { $verifyCell += '?' }
+    if (@($record.LowEvidence) -contains 'VerifyNeeds') { $verifyCell += '?' }
 
     Write-Host ('  {0,-4} #{1,-5} {2,-4} {3,-8} {4,-9} {5,-12} {6,-6} {7,-11} {8}' -f `
             $rank, $record.Number, $record.Relative, $record.Where, $verifyCell, $record.Risk, $record.Effort, $record.Track, $title) -ForegroundColor $color
@@ -1032,6 +1144,11 @@ if ($Handoff -gt 0) {
         Write-Host ("    prio {0}  edit {1}  verify {2}  risk {3}  effort {4}  {5}" -f `
                 $record.Relative, $record.Where, $verifyText, $record.Risk, $record.Effort, $record.Track)
         Write-Host ("    why: {0}" -f (@($record.Why) -join ' ; ')) -ForegroundColor DarkGray
+        # The handoff is where a false Trust costs a whole session, and it is usually run
+        # with -RankingOnly, so the Needs a human call line is not on screen to say it.
+        if (@($record.LowEvidence) -contains 'Trust') {
+            Write-Host '    trust: T? - set at Medium confidence, usually by one matched phrase; confirm it in the body' -ForegroundColor DarkGray
+        }
 
         if (@($record.Overridden).Count -gt 0) {
             Write-Host ("    overridden: {0}" -f (@($record.Overridden) -join ', ')) -ForegroundColor DarkGray
@@ -1061,6 +1178,8 @@ Write-Host '  Where is where the edit lands; Verify is what proving it needs, an
 Write-Host '  the -Hardware session weighting keys off. They disagree, and that is the point.' -ForegroundColor DarkGray
 Write-Host '  Verify marked ? was read from the issue body, not its title, and is the least' -ForegroundColor DarkGray
 Write-Host '  reliable call the script makes - read that body before trusting its rank.' -ForegroundColor DarkGray
+Write-Host '  T? is Trust set at Medium confidence, usually by one matched phrase, which cannot' -ForegroundColor DarkGray
+Write-Host '  tell a check that lies from prose about one - read that body too.' -ForegroundColor DarkGray
 Write-Host '  Prio is 0-100 against the top of this run, so the two rounds share one scale.' -ForegroundColor DarkGray
 if ($weighted) {
     Write-Host '  It is session-weighted; the raw and unweighted values are Score and BaseScore in -Json.' -ForegroundColor DarkGray
