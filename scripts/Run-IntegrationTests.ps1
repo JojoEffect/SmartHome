@@ -1529,6 +1529,10 @@ function Invoke-CommandRetryRounds {
         # Takes what -BeforePublish returned (or $null) and returns the round's single
         # observation -- a retained snapshot for one caller, a window's captured lines
         # for the other. It is handed to -IsSettled unchanged, so an array is fine here.
+        #
+        # When -BeforePublish opened a window this is also what closes it, including from
+        # a finally after a publish threw -- where a throw of its own would replace that
+        # one. Stop-HomieCapture warns rather than throws for exactly that reason.
         [Parameter(Mandatory = $true)]
         [scriptblock]$Observe,
 
@@ -1573,8 +1577,53 @@ function Invoke-CommandRetryRounds {
             $context = $opened[0]
         }
 
-        foreach ($item in $pending) {
-            & $Publish $item | Out-Null
+        # From here until -Observe runs, the window is this function's to close, so the
+        # publishes go inside a try whose finally closes it if they do not all go out: the
+        # guard the lifecycle step puts around its own window, taken once here for both
+        # rounds and any later caller. A caller hands the window over as two blocks
+        # precisely because it cannot wrap them itself (issue #98).
+        #
+        # An orphaned subscriber does not so much corrupt later windows as break them.
+        # Start-HomieCapture proves the capture file removed before every window, and a
+        # live subscriber keeps it undeletable, so each later window on the port throws "a
+        # previous subscriber still holds it open". Nor does that end with the run.
+        # Measured on 2026-09-18 against Mosquitto 2.0.22, no hardware involved: a
+        # mosquitto_sub that had connected outlived its broker being stopped, and rejoined
+        # the next broker on the same port. The suite's teardown only warns about orphans,
+        # so unguarded, one throw here would fail the next run's conformance check as well.
+        #
+        # The finally closes and does nothing else. What -Observe returns there is
+        # discarded, -IsSettled never sees it, and the throw carries on out of this
+        # function: a round that did not publish everything measured nothing, and settling
+        # items against its window -- or swallowing the throw so another round could run --
+        # would turn an ERROR into a round that looks like any other.
+        #
+        # And it closes only a window this function holds:
+        #
+        #   - With no -BeforePublish, nothing is open while the publishes run. The /set
+        #     round's -Observe is a whole fresh snapshot rather than the close of one, so
+        #     taking it after a throw would spend a window on a result that is thrown away,
+        #     and could throw in its turn -- replacing the publish's error with its own.
+        #   - A throw out of -BeforePublish never reaches this try, deliberately. The block
+        #     handed nothing over, so there is nothing to give -Observe, and the one shipped
+        #     -BeforePublish, Start-HomieCapture, is written to throw only before it starts
+        #     its subscriber: its connect wait warns rather than throws, so that it never
+        #     leaves a window open without handing it back.
+        #   - The count guard above is the one gap. A window was opened there, but which of
+        #     the returned values is its handle cannot be known -- and it is a programming
+        #     error, which the first round of the first run reports.
+        $allPublished = $false
+        try {
+            foreach ($item in $pending) {
+                & $Publish $item | Out-Null
+            }
+
+            $allPublished = $true
+        }
+        finally {
+            if ($BeforePublish -and -not $allPublished) {
+                & $Observe $context | Out-Null
+            }
         }
 
         $observation = & $Observe $context
