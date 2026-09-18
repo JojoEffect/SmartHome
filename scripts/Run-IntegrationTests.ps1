@@ -924,12 +924,16 @@ function Wait-ForAnnounceWitnessed {
     # or a device id that merely starts with this one, must not satisfy it. Log lines
     # are "<topic> <0|1> <payload>", per Get-SmartHomeSubscriberArguments.
     #
+    # -ceq, not -eq, which ignores case. MQTT topics are case-sensitive and v4's $state
+    # vocabulary is lowercase, so a line differing only in case is either another topic
+    # or a payload no controller accepts -- not this device announcing (issue #93).
+    #
     # 250ms rather than the helper's default 500. The log is a record, so a slower poll
     # would still find the line -- it only costs latency, and this one sits between the
     # flash and everything the test then does.
     $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds `
         -Skip $Watermark -PollMilliseconds 250 `
-        -Predicate { $_ -eq "$topic 0 init" -or $_ -eq "$topic 1 init" }
+        -Predicate { $_ -ceq "$topic 0 init" -or $_ -ceq "$topic 1 init" }
 
     return ($null -ne $hit)
 }
@@ -1330,7 +1334,14 @@ function ConvertTo-HomieSnapshot {
     # meaningful: a value delivered only live must not inherit the retained-ness of the
     # value it replaced, which is exactly the bug Wait-ForRetainedValue's flag check
     # exists to catch.
-    $snapshot = @{}
+    #
+    # Keyed ordinally, not with @{}, whose comparer is OrdinalIgnoreCase. MQTT topics are
+    # case-sensitive, so homie/d/$state and homie/d/$STATE are two topics -- under the
+    # default comparer they collapsed into one entry, the later overwriting the earlier,
+    # and a lookup of either spelling found whichever had arrived last (issue #93). Every
+    # reader of a snapshot keys into it through this comparer, so this is the one place
+    # that decides it.
+    $snapshot = [hashtable]::new([StringComparer]::Ordinal)
     foreach ($line in $Lines) {
         $parsed = ConvertFrom-HomieCaptureLine -Line $line
         if ($null -eq $parsed) {
@@ -1379,8 +1390,12 @@ function Get-HomieLivePayloads {
         # chosen in Get-SmartHomeSubscriberArguments, and a copy of it here is a place
         # where a change to the format could be fixed in one reader and silently keep
         # parsing in the other.
+        #
+        # -ceq, for the reason ConvertTo-HomieSnapshot keys ordinally: a topic differing
+        # only in case is a different topic, and -eq folded its payloads into this one's
+        # sequence (issue #93).
         $parsed = ConvertFrom-HomieCaptureLine -Line $line
-        if ($null -ne $parsed -and $parsed.Topic -eq $Topic -and -not $parsed.Retained) {
+        if ($null -ne $parsed -and $parsed.Topic -ceq $Topic -and -not $parsed.Retained) {
             $payloads += $parsed.Payload
         }
     }
@@ -1462,7 +1477,10 @@ function Wait-ForRetainedValue {
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $seen = '<nothing>'
-    $snapshot = @{}
+    # Returned only by a wait that ran no round at all, and empty, so its comparer cannot
+    # change an answer. Built by ConvertTo-HomieSnapshot anyway, so that every snapshot
+    # this function hands back is keyed the same way and nobody has to re-derive that.
+    $snapshot = ConvertTo-HomieSnapshot -Lines @()
 
     while ((Get-Date) -lt $deadline) {
         if ($RepublishTopic) {
@@ -1472,7 +1490,11 @@ function Wait-ForRetainedValue {
         $snapshot = Get-HomieRetainedSnapshot -Port $Port
         if ($snapshot.Contains($Topic)) {
             $seen = $snapshot[$Topic].Payload
-            if ($seen -eq $Expected -and ((-not $RequireRetained) -or $snapshot[$Topic].Retained)) {
+            # -ceq, not -eq: a device announcing $state = READY is not one announcing
+            # 'ready', and -eq read it as one (issue #93). This needs its own operator --
+            # the snapshot's ordinal comparer decides the topic key, and this reads the
+            # payload off the entry that key found.
+            if ($seen -ceq $Expected -and ((-not $RequireRetained) -or $snapshot[$Topic].Retained)) {
                 return @{ Ok = $true; Seen = $seen; Snapshot = $snapshot }
             }
         }
@@ -1760,10 +1782,22 @@ function Get-AttributeFailure {
         [Parameter(Mandatory = $true)]
         [string]$Topic,
 
+        # Exactly one of this and -AnyValue, and the binder enforces it: each is mandatory
+        # in a parameter set of its own, so naming both -- or neither -- is a binding error.
+        # Until issue #94 both were optional in one set. -AnyValue -Expected 'ready' bound
+        # without complaint and -AnyValue silently won, so the payload was never compared
+        # and the run reported PASS -- the shape a loosened assertion would have taken
+        # unnoticed. A call naming neither compared the payload against an empty string.
+        #
+        # [AllowEmptyString()] because Mandatory otherwise refuses '', and an empty string
+        # is a payload like any other here, not a missing argument.
+        [Parameter(Mandatory = $true, ParameterSetName = 'Exact')]
+        [AllowEmptyString()]
         [string]$Expected,
 
         # For an attribute whose value is the device's to choose ($name, $type). Presence
         # and the retain flag are still asserted; only the payload comparison is skipped.
+        [Parameter(Mandatory = $true, ParameterSetName = 'AnyValue')]
         [switch]$AnyValue
     )
 
@@ -1777,7 +1811,15 @@ function Get-AttributeFailure {
         $failures += "not retained: $Topic"
     }
 
-    if (-not $AnyValue -and $Snapshot[$Topic].Payload -ne $Expected) {
+    # Decided by the switch, not by $PSCmdlet.ParameterSetName. -AnyValue:$false binds
+    # the AnyValue set with the switch off, and a branch on the set's name would skip the
+    # comparison for it -- #94's silent skip again, by another spelling. Read this way it
+    # compares against the unbound -Expected, which is '', and reports the mismatch.
+    #
+    # -cne, not -ne, which ignores case: a $datatype of 'Integer' or a $state of 'READY'
+    # satisfied an assertion wanting the lowercase spelling v4 defines, and no controller
+    # accepts either (issue #93).
+    if (-not $AnyValue -and $Snapshot[$Topic].Payload -cne $Expected) {
         $failures += "$Topic is '$($Snapshot[$Topic].Payload)', expected '$Expected'"
     }
 
@@ -1908,8 +1950,11 @@ function Measure-HomieConformance {
     # zero-length retained payload as a delete of the retained message -- so an empty
     # $extensions is published and then provably absent from the store. That is the
     # convention and MQTT disagreeing, not the device misbehaving.
+    #
+    # -clike, not -like, which ignores case: homie/D/$EXTENSIONS is a different topic
+    # (issue #93).
     $liveLog = @(Get-Content -Path (Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog) -ErrorAction SilentlyContinue)
-    if (-not ($liveLog | Where-Object { $_ -like "$root/`$extensions*" })) {
+    if (-not ($liveLog | Where-Object { $_ -clike "$root/`$extensions*" })) {
         $script:conformanceFailures += "never published: $root/`$extensions"
     }
 
@@ -2006,7 +2051,10 @@ function Measure-HomieConformance {
             $seen = if ($snapshot.Contains($topic)) { $snapshot[$topic].Payload } else { $null }
             $lastSeen[$property] = $seen
 
-            # Every datatype, floats included, must match exactly.
+            # Every datatype, floats included, must match exactly -- and exactly includes
+            # case. This was -eq until issue #93, so the "exact string" comparison the
+            # comment on $expectedEcho promises accepted 'TRUE' for a boolean and 'HIGH'
+            # for an enum, payloads the property's own $datatype and $format forbid.
             #
             # The retain flag is deliberately not part of this. Unlike the waits above,
             # what is being proven here is that the device applied the command -- a live
@@ -2018,7 +2066,7 @@ function Measure-HomieConformance {
             # failure being measured and must not be retried away. Here there is nothing
             # to preserve -- a property still holding its old value is exactly what a lost
             # command looks like, so it is retried.
-            return ($seen -eq $expected)
+            return ($seen -ceq $expected)
         }
 
     foreach ($property in $setRound.Pending) {
@@ -2256,8 +2304,12 @@ function Measure-HomieConformance {
                 # moving $state somewhere else entirely (a CanChangeState regression
                 # leaving it at 'init' or 'lost'), and that is a defect this step used to
                 # catch before it read the wire.
+                #
+                # -cne, not -ne: 'ALERT' is not the value $state already holds but a
+                # payload outside v4's vocabulary, and -ne tolerated it as the value
+                # (issue #93).
                 $statePayloads = Get-HomieLivePayloads -Lines $lines -Topic "$root/`$state"
-                $moved = @($statePayloads | Where-Object { $_ -ne $step.Expect })
+                $moved = @($statePayloads | Where-Object { $_ -cne $step.Expect })
 
                 if ([array]::IndexOf($moved, $step.Command) -ge 0) {
                     $script:conformanceFailures += "forbidden $($step.Expect) -> $($step.Command) transition was applied (`$state went to '$($step.Command)'; saw: $($statePayloads -join ', '))"
@@ -2304,12 +2356,18 @@ function Measure-HomieConformance {
             elseif ($corrected -lt 0) {
                 $script:conformanceFailures += "device left the reflected '$($step.Command)' on $nodeId/lifecycle and never published '$($step.Expect)' over it (saw: $($lifecyclePayloads -join ', '))"
             }
-            elseif ($lifecycleAfter -eq $step.Command) {
+            elseif ($lifecycleAfter -ceq $step.Command) {
                 # The device corrected, and the topic still settled back on the value it
                 # corrected AWAY from. That is the duplicate #36 item 1 describes: a DUP of
                 # the reflection re-processed by the broker after the correction. The store
                 # disagrees with the device, and the device is not what is wrong -- so it is
                 # reported and not counted.
+                #
+                # -ceq, because only an exact repeat can be that duplicate: a retransmission
+                # repeats the reflection's bytes and cannot change their case. With -eq a
+                # device that published 'SLEEPING' over its own correction was excused here
+                # as the transport's fault; now it falls through to the counted branch below
+                # (issue #93).
                 #
                 # Not swallowed, because it is a real contradiction in the retained store
                 # while it lasts: a controller connecting before the next lifecycle publish
@@ -2321,7 +2379,7 @@ function Measure-HomieConformance {
                 # evidence #35 was unable to go back and read.
                 Add-ConformanceWarning ("refused '{0}': {1}/lifecycle settled back on '{2}' beside `$state='{3}' even though the correction to '{4}' is on the wire -- a retransmitted duplicate re-processed by the broker, not a device defect (saw: {5})" -f $step.Command, $nodeId, $lifecycleAfter, $stateAfter, $step.Expect, ($lifecyclePayloads -join ', '))
             }
-            elseif ($lifecycleAfter -ne $step.Expect) {
+            elseif ($lifecycleAfter -cne $step.Expect) {
                 # Settled on something that is neither the corrected value nor the value it
                 # corrected away from. A retransmission can only ever repeat a payload the
                 # device already published, and everything it published before this window

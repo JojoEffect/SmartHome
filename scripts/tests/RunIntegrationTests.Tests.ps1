@@ -625,6 +625,22 @@ Describe 'ConvertTo-HomieSnapshot' {
         Assert-False -Condition $snapshot['homie/d/n/p'].Retained
     }
 
+    It 'keys topics case-sensitively, the way MQTT does -- issue #93' {
+        # Two topics, not one. The snapshot used to be a plain @{}, whose comparer ignores
+        # case, so these collapsed into a single entry: the later overwrote the earlier and
+        # a lookup of either spelling found it. Every reader of a snapshot looks topics up
+        # through this comparer, which is why it is asserted here rather than per reader.
+        $snapshot = ConvertTo-HomieSnapshot -Lines @(
+            'homie/d/$state 1 ready'
+            'homie/d/$STATE 1 READY'
+        )
+
+        Assert-Equal -Expected 2 -Actual $snapshot.Keys.Count
+        Assert-Equal -Expected 'ready' -Actual $snapshot['homie/d/$state'].Payload
+        Assert-Equal -Expected 'READY' -Actual $snapshot['homie/d/$STATE'].Payload
+        Assert-False -Condition $snapshot.Contains('homie/D/$state') -Because 'a spelling nobody published is not in the store'
+    }
+
     It 'skips lines that are not messages' {
         $snapshot = ConvertTo-HomieSnapshot -Lines @(
             'Error: Connection refused'
@@ -672,6 +688,19 @@ Describe 'Get-HomieLivePayloads' {
 
         Assert-Equal -Expected 1 -Actual $payloads.Count
         Assert-Equal -Expected 'ignored' -Actual $payloads[0]
+    }
+
+    It 'does not read a topic differing only in case as this one -- issue #93' {
+        # The refused step's ordered reads of $state and lifecycle come through here, and
+        # the topic comparison was -eq: a wrong-case topic's payloads were folded into the
+        # right one's sequence, where they read as this device's own publishes.
+        $payloads = Get-HomieLivePayloads -Topic 'homie/d/n/p' -Lines @(
+            'homie/d/n/p 0 running'
+            'homie/d/n/P 0 impostor'
+            'homie/D/n/p 0 impostor'
+        )
+
+        Assert-ArrayEqual -Expected @('running') -Actual $payloads
     }
 }
 
@@ -764,6 +793,18 @@ Describe 'The subscriber-log waits' {
 
     It 'is not satisfied by a device id this one is a prefix of' {
         Set-SubscriberLog -Lines @('homie/d-two/$state 0 init')
+
+        Assert-False -Condition (Wait-ForAnnounceWitnessed -Port '1883' -DeviceId 'd' -TimeoutSeconds 1 -Watermark 0)
+    }
+
+    It 'is not satisfied by init in the wrong case, on the topic or in the payload -- issue #93' {
+        # MQTT topics are case-sensitive and v4's $state vocabulary is lowercase, so none of
+        # these is this device announcing. The comparison was -eq, which took all three.
+        Set-SubscriberLog -Lines @(
+            'homie/d/$STATE 0 init'
+            'homie/D/$state 0 init'
+            'homie/d/$state 0 INIT'
+        )
 
         Assert-False -Condition (Wait-ForAnnounceWitnessed -Port '1883' -DeviceId 'd' -TimeoutSeconds 1 -Watermark 0)
     }
@@ -2023,22 +2064,24 @@ Describe 'Wait-ForRetainedValue' {
         Assert-Equal -Expected 'init' -Actual $result.Snapshot['homie/x/$state'].Payload
     }
 
-    It 'accepts a payload in the wrong case -- issue #93' {
-        # Pinned as it behaves today, NOT endorsed. The comparison is -eq, which is
-        # case-insensitive, so a device announcing $state = READY is read as having
-        # announced 'ready' and the conformance run proceeds on it. The Homie
-        # vocabularies are lowercase, so this can only ever accept something it should
-        # reject -- the passing-while-lying shape #34 and #36 were.
+    It 'refuses a payload in the wrong case -- issue #93' {
+        # Inverted, not deleted. Until #93 this case pinned the defect: the comparison was
+        # -eq, which ignores case, so a device announcing $state = READY was read as having
+        # announced 'ready' and the conformance run proceeded on it. The Homie vocabularies
+        # are lowercase, so that could only ever accept something it should reject -- the
+        # passing-while-lying shape #34 and #36 were.
         #
         # A third site beyond the two #93's body lists, and not reached by either of its
         # fixes: the snapshot's comparer decides the topic KEY, and this reads .Payload
-        # off the entry that key found. Recorded on the issue with the measurement.
-        # Closing #93 must invert this case rather than delete it.
+        # off the entry that key found. So it has an operator of its own to get right,
+        # and this is the case that says so.
         Reset-SnapshotQueue -Snapshots @((New-Snapshot -Topic 'homie/x/$state' -Payload 'READY' -Retained $true))
 
         $result = Wait-ForRetainedValue -Port '1883' -Topic 'homie/x/$state' -Expected 'ready' -TimeoutSeconds 1
 
-        Assert-True -Condition $result.Ok -Because 'today READY satisfies a wait for ready'
+        Assert-False -Condition $result.Ok -Because 'READY is not the ready the wait asked for'
+        # Seen still carries what was there, so the caller's message shows the wrong case
+        # rather than reading as a value that never arrived.
         Assert-Equal -Expected 'READY' -Actual $result.Seen
     }
 }
@@ -2052,6 +2095,22 @@ Describe 'Get-AttributeFailure' {
     # Snapshots are built with the real ConvertTo-HomieSnapshot rather than by hand, so a
     # change to the entry shape breaks these cases instead of leaving them asserting
     # against a shape the capture no longer produces.
+
+    function Get-BindingErrorId {
+        # What a call's parameter binding failed with, or $null if it bound. The error's id
+        # rather than its message: PowerShell's messages are localised on this machine, the
+        # way MSBuild's are, and an English pattern would pass in CI and fail here.
+        param([scriptblock]$Body)
+
+        try {
+            & $Body | Out-Null
+        }
+        catch {
+            return $_.FullyQualifiedErrorId
+        }
+
+        return $null
+    }
 
     It 'reports nothing for a retained attribute carrying the expected payload' {
         $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$homie 1 4')
@@ -2104,6 +2163,25 @@ Describe 'Get-AttributeFailure' {
                           -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$homie' -Expected '4')
     }
 
+    It 'reports a topic differing only in case as missing -- issue #93' {
+        # MQTT topics are case-sensitive, so an attribute published under homie/d/$STATE was
+        # never published under homie/d/$state at all. The snapshot's comparer used to
+        # ignore case, and the wrong-case topic answered for the right one.
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$STATE 1 ready')
+
+        Assert-ArrayEqual -Expected @('missing: homie/d/$state') `
+                          -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$state' -Expected 'ready')
+    }
+
+    It 'reports a payload differing only in case as a mismatch -- issue #93' {
+        # v4's vocabularies are lowercase, so 'READY' is not a $state any controller
+        # accepts. The comparison was -ne, which took it for 'ready'.
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$state 1 READY')
+
+        Assert-ArrayEqual -Expected @("homie/d/`$state is 'READY', expected 'ready'") `
+                          -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$state' -Expected 'ready')
+    }
+
     It 'skips the payload comparison for -AnyValue' {
         # $name and $type are the device's to choose, so only presence and the retain
         # flag are the convention's business.
@@ -2124,6 +2202,75 @@ Describe 'Get-AttributeFailure' {
 
         Assert-ArrayEqual -Expected @('missing: homie/d/$name') `
                           -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$name' -AnyValue)
+    }
+
+    It 'refuses -Expected and -AnyValue together rather than skipping the comparison -- issue #94' {
+        # Both used to bind, and -AnyValue silently won: the payload below is not the one
+        # asked for, and the call reported nothing wrong with it. A binding error is loud
+        # where that was silent.
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$state 1 sleeping')
+
+        Assert-Equal -Expected 'AmbiguousParameterSet,Get-AttributeFailure' `
+                     -Actual (Get-BindingErrorId { Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$state' -Expected 'ready' -AnyValue })
+    }
+
+    It 'refuses a call naming neither -Expected nor -AnyValue -- issue #94' {
+        # The other half of the same binding. With both optional, a call that left the
+        # value out compared the payload against '' -- an expectation nobody wrote.
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$homie 1 4')
+
+        Assert-Equal -Expected 'AmbiguousParameterSet,Get-AttributeFailure' `
+                     -Actual (Get-BindingErrorId { Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$homie' })
+    }
+
+    It 'still compares the payload for -AnyValue:$false -- issue #94' {
+        # -AnyValue:$false binds the AnyValue set with the switch off. The function reads
+        # the switch, not the set's name, so this compares -- against the unbound -Expected,
+        # '' -- instead of skipping. This is the case that stops a tidier-looking
+        # $PSCmdlet.ParameterSetName branch from bringing the silent skip back.
+        $snapshot = ConvertTo-HomieSnapshot -Lines @('homie/d/$name 1 Office')
+
+        Assert-ArrayEqual -Expected @("homie/d/`$name is 'Office', expected ''") `
+                          -Actual @(Get-AttributeFailure -Snapshot $snapshot -Topic 'homie/d/$name' -AnyValue:$false)
+    }
+
+    It 'binds every call site in the shipped script to exactly one of -Expected and -AnyValue -- issue #94' {
+        # The half of #94 the cases above cannot reach. The parameter sets make naming both
+        # a binding error, but only when that call runs -- and every shipped call is in
+        # Measure-HomieConformance, which runs against a device and a broker. A call site
+        # naming both would pass everything else here and surface as an ERROR verdict
+        # partway through a hardware run. Bound statically, it fails here, and in CI.
+        #
+        # The binder is tried on a call known to be wrong first. A binder that could not
+        # resolve Get-AttributeFailure would bind names it knows nothing about and report
+        # no error for anything, and this case could then not fail.
+        $binder = [System.Management.Automation.Language.StaticParameterBinder]
+        $isCall = {
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq 'Get-AttributeFailure'
+        }
+
+        $control = [System.Management.Automation.Language.Parser]::ParseInput(
+            'Get-AttributeFailure -Snapshot $s -Topic t -Expected x -AnyValue', [ref]$null, [ref]$null).Find($isCall, $true)
+        $controlErrors = @($binder::BindCommand($control, $true).BindingExceptions.Values | ForEach-Object { $_.BindingException.ErrorId })
+        Assert-ArrayEqual -Expected @('AmbiguousParameterSet') -Actual $controlErrors -Because 'the binder has to see both parameter sets'
+
+        $calls = @([System.Management.Automation.Language.Parser]::ParseFile($subject, [ref]$null, [ref]$null).FindAll($isCall, $true))
+        Assert-True -Condition ($calls.Count -gt 0) -Because 'a case that finds no call site passes without checking one'
+
+        foreach ($call in $calls) {
+            $binding = $binder::BindCommand($call, $true)
+            $where = 'line {0}: {1}' -f $call.Extent.StartLineNumber, $call.Extent.Text
+
+            $errors = @($binding.BindingExceptions.Values | ForEach-Object { $_.BindingException.ErrorId })
+            Assert-ArrayEqual -Expected @() -Actual $errors -Because $where
+
+            # Asked directly, because the static binder does not enforce Mandatory: a call
+            # naming neither binds cleanly there and would fail only when it ran.
+            $named = @('Expected', 'AnyValue' | Where-Object { $binding.BoundParameters.ContainsKey($_) })
+            Assert-Equal -Expected 1 -Actual $named.Count -Because $where
+        }
     }
 
     It 'reads the snapshot it was passed, not one the caller happens to have in scope' {

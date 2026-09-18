@@ -58,10 +58,18 @@ table, already was. It was nested inside that function and closed over its snaps
 #84 gave it the snapshot as a parameter; the rest of the assertions still need a device, and the
 uncovered remainder is what #84 tracks.
 
-Two cases here pin a defect rather than endorse it, so the fix has to come past a failing test:
-`Test-DeviceConstant`'s silence under a bracketed path (#80) and `Wait-ForRetainedValue`
-accepting a payload in the wrong case (#93). Both say so in a comment; closing either issue means
-inverting its case, not deleting it.
+Its call sites are covered in one narrower sense. `Get-AttributeFailure` takes `-Expected` and
+`-AnyValue` as two parameter sets (#94), so a call naming both is a binding error — but only when
+it runs, and every call runs inside `Measure-HomieConformance`. So one case parses the shipped
+script and binds each call statically against the dot-sourced function. That is parsing the
+*callers*, not lifting the function out and running a copy, so it cannot drift the way #74
+describes.
+
+One case here pins a defect rather than endorses it, so the fix has to come past a failing test:
+`Test-DeviceConstant`'s silence under a bracketed path (#80). It says so in a comment; closing
+that issue means inverting the case, not deleting it. That is how #93 closed: its
+`Wait-ForRetainedValue` case pinned a wrong-case payload being accepted, and now asserts that one
+is refused.
 
 ## Adding a test
 
