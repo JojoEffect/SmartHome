@@ -1953,7 +1953,11 @@ function Measure-HomieConformance {
     #
     # -clike, not -like, which ignores case: homie/D/$EXTENSIONS is a different topic
     # (issue #93).
-    $liveLog = @(Get-Content -Path (Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog) -ErrorAction SilentlyContinue)
+    #
+    # -LiteralPath for the reason Wait-ForSubscriberLogLine gives: the log sits under the
+    # temp directory, where a '[' makes -Path a wildcard that matches nothing. That reads
+    # as an empty log, and a device that did publish $extensions fails (#71/#80).
+    $liveLog = @(Get-Content -LiteralPath (Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog) -ErrorAction SilentlyContinue)
     if (-not ($liveLog | Where-Object { $_ -clike "$root/`$extensions*" })) {
         $script:conformanceFailures += "never published: $root/`$extensions"
     }
