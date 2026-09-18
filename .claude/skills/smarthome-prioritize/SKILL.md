@@ -41,7 +41,8 @@ Two things to get right:
 
 - **Put the real counts in the theme options.** "Verification trust (5) — #21, #35, #54, #38,
   #36" is a choice the user can make; "Trust" alone is a guess. Round 1 printed those numbers;
-  use them.
+  use them. For Trust, also say how many of them are `T?` (the `Needs a human call` cluster
+  lists them) — on 2026-09-18 it was half the cluster.
 - **Offer only non-empty clusters.** A theme with nothing in it damps the whole backlog by 0.7
   and ranks nothing.
 
@@ -67,7 +68,8 @@ the clusters, which the user has already seen and just answered about.
 
 Then **read the bodies of the top three or four** before presenting the order. The
 classification is a keyword heuristic and the script says so itself; the top of the list is
-exactly where a wrong call is most expensive.
+exactly where a wrong call is most expensive. Any row marked `T?`, or with a `?` on `Verify`,
+is one the script itself says it cannot vouch for.
 
 ## Round 4 — offer to spin the top few off
 
@@ -79,7 +81,9 @@ many (3, 4 or 5 is the useful range) rather than picking a number — it is the 
 ```
 
 `-Handoff N` prints the selected issues with their url, axes, full scoring trail, any override
-note, and a marker on the ones whose `VerifyNeeds` is `Hardware`. Three kinds of row are never handed out, however
+note, a marker on the ones whose `VerifyNeeds` is `Hardware`, and a `trust: T?` line on any whose
+`Trust` rests on thin evidence — confirm that one in the body before writing its prompt, or
+correct it with `-Overrides` and re-run. Three kinds of row are never handed out, however
 high they rank:
 
 - **blocked** — it names what it is waiting for, not work that can start
@@ -176,7 +180,11 @@ Put the file in the scratchpad directory, not in the repository — it describes
 judgment, not a durable fact about the backlog.
 
 The `Needs a human call` cluster is the script naming its own blind spots: it lists every issue
-where at least one axis found no signal at all. Those are the first bodies worth reading.
+where at least one axis found no signal at all. Those are the first bodies worth reading. Under
+them it adds one quieter line per axis for the calls it did make on the least evidence that axis
+accepts — numbers only, exactly the rows the ranking marks `?`, described in the next two
+paragraphs. `-Json` carries the same thing per issue as `LowEvidence`, a list of axis names;
+an overridden axis is never in it.
 
 `VerifyNeeds` names a second blind spot through its confidence instead. It scores the **title
 and labels** first and falls back to the body only when those say nothing at all — the title
@@ -188,6 +196,16 @@ body-derived call is therefore reported at confidence `Low` however many pattern
 the body. The ranking table marks those rows `Hardware?`, `CI?`, `None?` — **a `?` on `Verify`
 means read the issue before trusting the rank.** Roughly half the backlog carries one, so this
 is not a rare corner; `-Json` carries the same thing as `VerifyFromBody`.
+
+`Trust` is the third, and the one that costs most: it is the heaviest term (+30) and the axis
+`-Theme Trust` multiplies. The flag needs a score of 3 and three of its patterns weigh 3 on their
+own, so one matched phrase sets it — and in this repository that phrase is often prose *about* a
+risk (a design the body rejects, a citation of another issue) rather than the risk. A `Trust` set
+at confidence `Medium` is marked `T?` — **a `?` after `T` means read the issue before trusting
+the rank**, exactly as on `Verify`. On 2026-09-18 the top four rows of a `-Theme Trust` ranking
+were all false positives, and three of them were `T?`. Neither form of the flag is a verdict: a
+`T?` can be genuine (#88 was), and a plain `T` can rest on two broad patterns that both matched
+prose about other issues (#103 did, at `High`).
 
 ## The eight axes
 
@@ -230,9 +248,10 @@ hardware-gated, device available x1.25 ; large, deep session x1.3 ; theme Capabi
 ```
 
 Flags in the title column: `T` verification trust, `E` evidence debt, `U` unblocks another
-issue, `B` blocked. A `?` after the `Verify` value is separate from those: it means that axis
-was read from the issue body rather than its title, which is the least reliable call the script
-makes.
+issue, `B` blocked. `T?` is a `Trust` set at confidence `Medium`, usually by one matched phrase.
+A `?` after the `Verify` value means that axis was read from the issue body rather than its
+title, which is the least reliable call the script makes. Both are covered under *Correcting
+the heuristic* above.
 
 ## What this does not decide
 
