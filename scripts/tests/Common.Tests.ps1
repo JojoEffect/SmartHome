@@ -41,7 +41,7 @@ function New-PackagesConfigFixture {
 Describe 'Get-SmartHomePackagesConfig' {
     It 'returns this checkout only: no bin\, no obj\, no linked worktree' {
         $root = New-PackagesConfigFixture
-        $found = Get-SmartHomePackagesConfig -RepoRoot $root
+        $found = @(Get-SmartHomePackagesConfig -RepoRoot $root)
 
         Assert-Equal -Expected 3 -Actual $found.Count -Because 'two real references plus the worktrees-archive one'
         Assert-Equal -Expected 0 -Actual @($found | Where-Object { $_.FullName -match '\\(bin|obj)\\' }).Count
@@ -52,7 +52,7 @@ Describe 'Get-SmartHomePackagesConfig' {
         # The anchor carries a trailing separator on purpose: '.claude\worktrees-archive'
         # is a different folder, and a bare name-prefix test would sweep it up (issue #68).
         $root = New-PackagesConfigFixture
-        $found = Get-SmartHomePackagesConfig -RepoRoot $root
+        $found = @(Get-SmartHomePackagesConfig -RepoRoot $root)
 
         Assert-Equal -Expected 1 -Actual @($found | Where-Object { $_.FullName -match 'worktrees-archive' }).Count
     }
@@ -64,7 +64,7 @@ Describe 'Get-SmartHomePackagesConfig' {
         $root = New-PackagesConfigFixture
         $worktree = Join-Path $root '.claude\worktrees\issue-99'
 
-        Assert-Equal -Expected 2 -Actual (Get-SmartHomePackagesConfig -RepoRoot $worktree).Count
+        Assert-Equal -Expected 2 -Actual @(Get-SmartHomePackagesConfig -RepoRoot $worktree).Count
     }
 
     It 'finds the same files under a checkout path containing brackets' {
@@ -72,19 +72,30 @@ Describe 'Get-SmartHomePackagesConfig' {
         # character-class syntax, so this returned nothing at all before issue #71.
         $root = New-PackagesConfigFixture -Name 'SmartHome [wip]'
 
-        Assert-Equal -Expected 3 -Actual (Get-SmartHomePackagesConfig -RepoRoot $root).Count
+        Assert-Equal -Expected 3 -Actual @(Get-SmartHomePackagesConfig -RepoRoot $root).Count
     }
 
-    It 'returns something whose .Count is readable when nothing matched' {
-        # The leading comma in the function's return is what makes this true: a plain
-        # `return @(...)` unrolls on the way out, no match reaches the caller as $null,
-        # and $null.Count throws under Set-StrictMode -- which is how Restore-Packages.ps1
-        # failed rather than reporting an empty checkout.
+    It 'emits nothing at all when nothing matched' {
+        # Not $null and not an empty array: nothing, the way Get-ChildItem emits nothing.
+        # That is what lets @(...) count it as 0 under Set-StrictMode and a pipeline see no
+        # item at all. An emitted $null would be one item to both, and so was the empty
+        # array the ,@() return used to emit -- which @(...) counted as 1 (issue #88).
         $empty = New-TestDirectory -Name 'no-configs'
-        $found = Get-SmartHomePackagesConfig -RepoRoot $empty
 
-        Assert-NotNull -Value $found
-        Assert-Equal -Expected 0 -Actual $found.Count
+        Assert-Equal -Expected 0 -Actual @(Get-SmartHomePackagesConfig -RepoRoot $empty).Count
+        Assert-Equal -Expected 0 -Actual (Get-SmartHomePackagesConfig -RepoRoot $empty | Measure-Object).Count
+    }
+
+    It 'can be piped straight into Where-Object -- issue #88' {
+        # The spelling the ,@() return broke. It reached the pipeline as ONE object, the
+        # whole array: $_.FullName member-enumerated every file, -match filtered that list
+        # rather than testing one path, and a match anywhere let the whole array through --
+        # all three files, from a filter that reads as keeping one.
+        $root = New-PackagesConfigFixture
+        $kept = @(Get-SmartHomePackagesConfig -RepoRoot $root | Where-Object { $_.FullName -match '\\RoomSensor\\' })
+
+        Assert-ArrayEqual -Expected @((Join-Path $root 'src\devices\RoomSensor\packages.config')) `
+                          -Actual @($kept | ForEach-Object { $_.FullName })
     }
 
     It 'propagates -ErrorAction to the enumeration' {
@@ -94,7 +105,7 @@ Describe 'Get-SmartHomePackagesConfig' {
         $missing = Join-Path (New-TestDirectory -Name 'gone') 'not-a-directory'
 
         Assert-Throws -Body { Get-SmartHomePackagesConfig -RepoRoot $missing } -Because 'the default must still abort'
-        Assert-Equal -Expected 0 -Actual (Get-SmartHomePackagesConfig -RepoRoot $missing -ErrorAction SilentlyContinue).Count
+        Assert-Equal -Expected 0 -Actual @(Get-SmartHomePackagesConfig -RepoRoot $missing -ErrorAction SilentlyContinue).Count
     }
 }
 
@@ -138,7 +149,7 @@ Describe 'Get-SmartHomeReferencedPackage' {
     }
 
     It 'returns one record per distinct reference, across every config in the checkout' {
-        $referenced = Get-SmartHomeReferencedPackage -RepoRoot (New-ReferenceFixture)
+        $referenced = @(Get-SmartHomeReferencedPackage -RepoRoot (New-ReferenceFixture))
 
         Assert-ArrayEqual -Expected @('nanoFramework.CoreLibrary.1.17.11', 'nanoFramework.M2Mqtt.5.1.221', 'nanoFramework.Hardware.Esp32.1.6.42') `
                           -Actual @($referenced | ForEach-Object { $_.Name }) `
@@ -147,7 +158,7 @@ Describe 'Get-SmartHomeReferencedPackage' {
 
     It 'splits each reference into Id, Version and the packages\ path it would be restored to' {
         $root = New-ReferenceFixture
-        $referenced = Get-SmartHomeReferencedPackage -RepoRoot $root
+        $referenced = @(Get-SmartHomeReferencedPackage -RepoRoot $root)
         $m2mqtt = @($referenced | Where-Object { $_.Id -eq 'nanoFramework.M2Mqtt' })
 
         Assert-Equal -Expected 1 -Actual $m2mqtt.Count
@@ -160,9 +171,19 @@ Describe 'Get-SmartHomeReferencedPackage' {
         # Inherited from Get-SmartHomePackagesConfig rather than re-implemented, which is
         # the reason both the restore and the preflight go through this one function
         # (issue #68 fixed that asymmetry once; issue #79 stopped it recurring).
-        $referenced = Get-SmartHomeReferencedPackage -RepoRoot (New-ReferenceFixture)
+        $referenced = @(Get-SmartHomeReferencedPackage -RepoRoot (New-ReferenceFixture))
 
         Assert-Equal -Expected 0 -Actual @($referenced | Where-Object { $_.Id -eq 'nanoFramework.Iot.Device.Ads1115' }).Count
+    }
+
+    It 'can be piped straight into Where-Object -- issue #88' {
+        # The exact spelling the issue was filed on. Under the ,@() return, $_ was the whole
+        # array, $_.Id member-enumerated all three Ids, and -eq kept the one that matched --
+        # truthy, so all three records came through a filter meant to keep one.
+        $kept = @(Get-SmartHomeReferencedPackage -RepoRoot (New-ReferenceFixture -Name 'piped-references') |
+            Where-Object { $_.Id -eq 'nanoFramework.M2Mqtt' })
+
+        Assert-ArrayEqual -Expected @('nanoFramework.M2Mqtt.5.1.221') -Actual @($kept | ForEach-Object { $_.Name })
     }
 
     It 'reads a packages.config with no <package> children instead of throwing -- issue #78' {
@@ -175,7 +196,7 @@ Describe 'Get-SmartHomeReferencedPackage' {
             '<packages></packages>'
         )
 
-        Assert-Equal -Expected 3 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $root).Count `
+        Assert-Equal -Expected 3 -Actual @(Get-SmartHomeReferencedPackage -RepoRoot $root).Count `
                      -Because 'the three references in the two configs beside it must still be read'
     }
 
@@ -192,18 +213,19 @@ Describe 'Get-SmartHomeReferencedPackage' {
         )
 
         $WarningPreference = 'SilentlyContinue'
-        $referenced = Get-SmartHomeReferencedPackage -RepoRoot $root
+        $referenced = @(Get-SmartHomeReferencedPackage -RepoRoot $root)
         $names = @($referenced | ForEach-Object { $_.Name })
 
         Assert-Contains -Item 'nanoFramework.System.Text.1.2.54' -Collection $names
         Assert-Equal -Expected 0 -Actual @($names | Where-Object { $_ -like 'nanoFramework.Logging*' }).Count
     }
 
-    It 'returns something whose .Count is readable when nothing is referenced' {
-        $found = Get-SmartHomeReferencedPackage -RepoRoot (New-TestDirectory -Name 'no-references')
+    It 'emits nothing at all when nothing is referenced' {
+        # For the reason given on the matching Get-SmartHomePackagesConfig case.
+        $empty = New-TestDirectory -Name 'no-references'
 
-        Assert-NotNull -Value $found
-        Assert-Equal -Expected 0 -Actual $found.Count
+        Assert-Equal -Expected 0 -Actual @(Get-SmartHomeReferencedPackage -RepoRoot $empty).Count
+        Assert-Equal -Expected 0 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $empty | Measure-Object).Count
     }
 
     It 'reads the config list a caller hands it instead of globbing again' {
@@ -218,12 +240,21 @@ Describe 'Get-SmartHomeReferencedPackage' {
     }
 
     It 'globs for itself when -Config is omitted, and reads an empty list as empty' {
-        # The two halves of the default, so neither can quietly become the other: $null
-        # means "go and look", an empty array means "there was nothing".
+        # The two halves of the default, so neither can quietly become the other: omitted
+        # means "go and look", an empty list means "there was nothing".
         $root = New-ReferenceFixture -Name 'config-default'
 
-        Assert-Equal -Expected 3 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $root).Count
-        Assert-Equal -Expected 0 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $root -Config @()).Count
+        Assert-Equal -Expected 3 -Actual @(Get-SmartHomeReferencedPackage -RepoRoot $root).Count
+        Assert-Equal -Expected 0 -Actual @(Get-SmartHomeReferencedPackage -RepoRoot $root -Config @()).Count
+    }
+
+    It 'reads a handed-over $null as an empty list, not as "go and look"' {
+        # What a caller holds after assigning an empty glob without @(), now that the glob
+        # streams. Read as "go and look", it would turn "there were none" into a second walk
+        # of the checkout -- and this fixture's own configs would then answer 3.
+        $root = New-ReferenceFixture -Name 'config-null'
+
+        Assert-Equal -Expected 0 -Actual @(Get-SmartHomeReferencedPackage -RepoRoot $root -Config $null).Count
     }
 
     It 'propagates -ErrorAction to the enumeration underneath it' {
@@ -233,7 +264,7 @@ Describe 'Get-SmartHomeReferencedPackage' {
         $missing = Join-Path (New-TestDirectory -Name 'gone-references') 'not-a-directory'
 
         Assert-Throws -Body { Get-SmartHomeReferencedPackage -RepoRoot $missing } -Because 'the default must still abort'
-        Assert-Equal -Expected 0 -Actual (Get-SmartHomeReferencedPackage -RepoRoot $missing -ErrorAction SilentlyContinue).Count
+        Assert-Equal -Expected 0 -Actual @(Get-SmartHomeReferencedPackage -RepoRoot $missing -ErrorAction SilentlyContinue).Count
     }
 }
 
@@ -263,16 +294,16 @@ Describe 'Get-SmartHomeUnreferencedPackageDir' {
     It 'returns the folders the referenced set does not account for' {
         # The shape issue #79 measured: an old version left behind beside the current one.
         $packagesDir = New-PackagesDirFixture -Folders @('nanoFramework.M2Mqtt.5.1.146', 'nanoFramework.M2Mqtt.5.1.221', 'nanoFramework.CoreLibrary.1.17.11')
-        $unreferenced = Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir `
-                            -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.M2Mqtt.5.1.221', 'nanoFramework.CoreLibrary.1.17.11'))
+        $unreferenced = @(Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir `
+                              -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.M2Mqtt.5.1.221', 'nanoFramework.CoreLibrary.1.17.11')))
 
         Assert-ArrayEqual -Expected @('nanoFramework.M2Mqtt.5.1.146') -Actual @($unreferenced | ForEach-Object { $_.Name })
     }
 
     It 'returns nothing when every folder is referenced' {
         $packagesDir = New-PackagesDirFixture -Folders @('nanoFramework.CoreLibrary.1.17.11')
-        $unreferenced = Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir `
-                            -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.CoreLibrary.1.17.11'))
+        $unreferenced = @(Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir `
+                              -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.CoreLibrary.1.17.11')))
 
         Assert-Equal -Expected 0 -Actual $unreferenced.Count
     }
@@ -282,16 +313,16 @@ Describe 'Get-SmartHomeUnreferencedPackageDir' {
         # not care either. A case-sensitive complement would call a restored package stale
         # and -Prune would then delete it.
         $packagesDir = New-PackagesDirFixture -Folders @('nanoframework.m2mqtt.5.1.221')
-        $unreferenced = Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir `
-                            -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.M2Mqtt.5.1.221'))
+        $unreferenced = @(Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir `
+                              -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.M2Mqtt.5.1.221')))
 
         Assert-Equal -Expected 0 -Actual $unreferenced.Count
     }
 
     It 'leaves loose files in packages\ alone' {
         $packagesDir = New-PackagesDirFixture -Folders @('nanoFramework.CoreLibrary.1.17.11') -Files @('some.nupkg', 'repositories.config')
-        $unreferenced = Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir `
-                            -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.CoreLibrary.1.17.11'))
+        $unreferenced = @(Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir `
+                              -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.CoreLibrary.1.17.11')))
 
         Assert-Equal -Expected 0 -Actual $unreferenced.Count -Because 'a .nupkg is not a stale package version'
     }
@@ -302,21 +333,34 @@ Describe 'Get-SmartHomeUnreferencedPackageDir' {
         # rather than clean. Pinned here so that guard cannot be dropped as redundant.
         $packagesDir = New-PackagesDirFixture -Folders @('nanoFramework.CoreLibrary.1.17.11', 'nanoFramework.M2Mqtt.5.1.221')
 
-        Assert-Equal -Expected 2 -Actual (Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir -ReferencedPackage @()).Count
+        Assert-Equal -Expected 2 -Actual @(Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir -ReferencedPackage @()).Count
     }
 
-    It 'reports nothing, rather than throwing, when packages\ is not there at all' {
+    It 'emits nothing, rather than throwing, when packages\ is not there at all' {
+        # The same nothing an empty packages\ gives -- see the matching
+        # Get-SmartHomePackagesConfig case for why that is not $null or an empty array.
         $absent = Join-Path (New-TestDirectory -Name 'no-packages-dir') 'packages'
-        $unreferenced = Get-SmartHomeUnreferencedPackageDir -PackagesDir $absent -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.CoreLibrary.1.17.11'))
+        $referenced = New-ReferenceRecord -Name @('nanoFramework.CoreLibrary.1.17.11')
 
-        Assert-NotNull -Value $unreferenced
-        Assert-Equal -Expected 0 -Actual $unreferenced.Count
+        Assert-Equal -Expected 0 -Actual @(Get-SmartHomeUnreferencedPackageDir -PackagesDir $absent -ReferencedPackage $referenced).Count
+        Assert-Equal -Expected 0 -Actual (Get-SmartHomeUnreferencedPackageDir -PackagesDir $absent -ReferencedPackage $referenced | Measure-Object).Count
+    }
+
+    It 'can be piped straight into Where-Object -- issue #88' {
+        # Two stale folders, so a filter that passed everything through would show it: the
+        # ,@() return handed Where-Object both as one item, and a name matching on either
+        # kept the pair.
+        $packagesDir = New-PackagesDirFixture -Folders @('nanoFramework.M2Mqtt.5.1.146', 'nanoFramework.CoreLibrary.1.17.10', 'nanoFramework.CoreLibrary.1.17.11')
+        $kept = @(Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.CoreLibrary.1.17.11')) |
+            Where-Object { $_.Name -like 'nanoFramework.M2Mqtt.*' })
+
+        Assert-ArrayEqual -Expected @('nanoFramework.M2Mqtt.5.1.146') -Actual @($kept | ForEach-Object { $_.Name })
     }
 
     It 'works under a checkout path containing brackets' {
         $packagesDir = New-PackagesDirFixture -Folders @('nanoFramework.M2Mqtt.5.1.146') -Name 'packages [wip]'
 
-        Assert-Equal -Expected 1 -Actual (Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.M2Mqtt.5.1.221'))).Count
+        Assert-Equal -Expected 1 -Actual @(Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir -ReferencedPackage (New-ReferenceRecord -Name @('nanoFramework.M2Mqtt.5.1.221'))).Count
     }
 }
 
@@ -411,9 +455,13 @@ Describe 'Get-NanoFrameworkTestAdapterDir' {
     }
 
     It 'reads a handed-over empty list as "nothing references it", not as "go and look"' {
+        # $null included: that is what a caller holds after assigning an empty stream from
+        # Get-SmartHomeReferencedPackage without @(). The fixture does reference a restored
+        # 3.0.80, so a resolver that went and looked would find it.
         $root = New-AdapterFixture -Restored @('3.0.80') -Referenced @('3.0.80') -Name 'handed-nothing'
 
         Assert-Null -Value (Get-NanoFrameworkTestAdapterDir -RepoRoot $root -ReferencedPackage @() -WarningAction SilentlyContinue)
+        Assert-Null -Value (Get-NanoFrameworkTestAdapterDir -RepoRoot $root -ReferencedPackage $null -WarningAction SilentlyContinue)
     }
 
     It 'ignores a restored version nothing references, rather than falling back to it' {
