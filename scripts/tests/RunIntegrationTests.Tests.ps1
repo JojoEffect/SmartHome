@@ -2356,6 +2356,102 @@ Describe 'Invoke-CommandRetryRounds' {
         Assert-Match -Pattern 'chatter from the window' -Actual $message
     }
 
+    It 'closes the window a publish threw inside, and lets the throw through' {
+        # Issue #98. Shaped as the failure would be: the binary goes missing part-way
+        # through a run, here between a round and its retry, so the round that throws is
+        # not the first to have opened a window. -Observe is the only thing that closes
+        # the window -BeforePublish opened, and skipping it orphans a mosquitto_sub on the
+        # capture path every later window has to clear first.
+        #
+        # Three claims, each of which some plausible fix gets wrong. Round 2's window is
+        # closed, not left open or mistaken for round 1's. The error that surfaces is the
+        # publish's own -- a catch that swallowed it would let the loop carry on as if the
+        # round had happened. And -IsSettled never sees round 2's window, whose round did
+        # not publish everything and so measured nothing.
+        Reset-Recorders
+        $seen = @{ Observations = @() }
+
+        $message = Assert-Throws -Body {
+            Invoke-CommandRetryRounds -Items @('a', 'b') -TimeoutSeconds 5 `
+                -BeforePublish { $script:retryRound++; return ("window-{0}" -f $script:retryRound) } `
+                -Publish {
+                    param($item)
+                    if ($script:retryRound -eq 2) { throw "mosquitto_pub.exe could not be resolved publishing $item" }
+                    $script:retryPublished += $item
+                } `
+                -Observe { param($context) $script:retryContexts += $context; return $context } `
+                -IsSettled { param($item, $observation) $seen['Observations'] += $observation; return $false }
+        }
+
+        Assert-Match -Pattern 'mosquitto_pub\.exe could not be resolved publishing a' -Actual $message `
+                     -Because 'the publish''s own error has to be what surfaces'
+        Assert-ArrayEqual -Expected @('window-1', 'window-2') -Actual $script:retryContexts `
+                          -Because 'the window round 2 opened has to be closed although its publish threw'
+        Assert-ArrayEqual -Expected @('window-1', 'window-1') -Actual $seen['Observations'] `
+                          -Because 'a window whose round did not publish everything must not settle anything'
+        Assert-ArrayEqual -Expected @('a', 'b') -Actual $script:retryPublished `
+                          -Because 'nothing may be published after the throw'
+    }
+
+    It 'does not observe when -BeforePublish throws, because no window was handed over' {
+        # The decision the helper records for a throw out of -BeforePublish itself.
+        # -Observe closes what -BeforePublish returned, and a block that threw returned
+        # nothing, so there is no handle to pass it -- calling it anyway would close a
+        # window that does not exist, and whatever that threw would replace the error that
+        # explains the failure.
+        Reset-Recorders
+
+        $message = Assert-Throws -Body {
+            Invoke-CommandRetryRounds -Items @('a') -TimeoutSeconds 5 `
+                -BeforePublish { throw 'the capture file could not be cleared' } `
+                -Publish { param($item) $script:retryPublished += $item } `
+                -Observe { param($context) $script:retryObserved += 'window'; return 'observation' } `
+                -IsSettled { param($item, $observation) return $true }
+        }
+
+        Assert-Match -Pattern 'the capture file could not be cleared' -Actual $message
+        Assert-ArrayEqual -Expected @() -Actual $script:retryObserved
+        Assert-ArrayEqual -Expected @() -Actual $script:retryPublished
+    }
+
+    It 'takes no observation after a publish throws when no window was opened' {
+        # The /set round's shape. Nothing is open while it publishes, and its -Observe is a
+        # whole fresh snapshot rather than the close of one, so running it after a throw
+        # would spend a window on a result that is thrown away -- and could throw in its
+        # turn, replacing the publish's error with its own.
+        Reset-Recorders
+
+        $message = Assert-Throws -Body {
+            Invoke-CommandRetryRounds -Items @('a', 'b') -TimeoutSeconds 5 `
+                -Publish { param($item) throw "mosquitto_pub.exe could not be resolved publishing $item" } `
+                -Observe { $script:retryObserved += 'snapshot'; return 'observation' } `
+                -IsSettled { param($item, $observation) return $true }
+        }
+
+        Assert-Match -Pattern 'mosquitto_pub\.exe could not be resolved publishing a' -Actual $message
+        Assert-ArrayEqual -Expected @() -Actual $script:retryObserved
+    }
+
+    It 'does not close a window twice when -Observe itself throws' {
+        # The finally closes only after a PUBLISH threw. An -Observe that fails on the
+        # ordinary path has already had its one go at the window, and a second call would
+        # close it again: another settle, a kill of a subscriber that is already gone --
+        # which Stop-HomieCapture then reports as one that died before its window closed --
+        # and a second evidence file for the same window.
+        Reset-Recorders
+
+        $message = Assert-Throws -Body {
+            Invoke-CommandRetryRounds -Items @('a') -TimeoutSeconds 5 `
+                -BeforePublish { return 'window-1' } `
+                -Publish { param($item) $script:retryPublished += $item } `
+                -Observe { param($context) $script:retryContexts += $context; throw 'the window could not be read' } `
+                -IsSettled { param($item, $observation) return $true }
+        }
+
+        Assert-Match -Pattern 'the window could not be read' -Actual $message
+        Assert-ArrayEqual -Expected @('window-1') -Actual $script:retryContexts
+    }
+
     It 'hands -Observe nothing when there is no window to open' {
         # The /set round passes no -BeforePublish: its snapshot is taken after the
         # publishes, so there is no context to carry.
