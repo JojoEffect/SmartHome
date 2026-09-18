@@ -55,8 +55,8 @@ pull request.
 `Get-AttributeFailure` is the first *assertion* inside `Measure-HomieConformance` that is covered
 here — the conformance machinery around it, `Get-ConformanceCaptureSeconds` and the lifecycle
 table, already was. It was nested inside that function and closed over its snapshot until issue
-#84 gave it the snapshot as a parameter; the rest of the assertions still need a device, and the
-uncovered remainder is what #84 tracks.
+#84 gave it the snapshot as a parameter. The verdicts still written inline in that function need
+a device; that uncovered remainder is what #143 tracks.
 
 Its call sites are covered in one narrower sense. `Get-AttributeFailure` takes `-Expected` and
 `-AnyValue` as two parameter sets (#94), so a call naming both is a binding error — but only when
