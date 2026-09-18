@@ -78,7 +78,7 @@ if (-not (Test-Path -LiteralPath $packagesDir)) {
 # must not be restored into the checkout the script was run from, and
 # Get-SmartHomeReferencedPackage for why the preflight reads the same list through the
 # same parser.
-$referenced = Get-SmartHomeReferencedPackage -RepoRoot $repoRoot
+$referenced = @(Get-SmartHomeReferencedPackage -RepoRoot $repoRoot)
 
 Write-Host "Restoring $($referenced.Count) package(s) referenced by this checkout..." -ForegroundColor Cyan
 
@@ -125,7 +125,7 @@ else {
 # because it is one line and the folder is otherwise invisible; removed only on -Prune,
 # because this script is called unattended by Initialize-Worktree.ps1, which asked for a
 # checkout to be filled in and not for anything to be deleted.
-$unreferenced = Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir -ReferencedPackage $referenced
+$unreferenced = @(Get-SmartHomeUnreferencedPackageDir -PackagesDir $packagesDir -ReferencedPackage $referenced)
 
 if ($unreferenced.Count -eq 0) {
     Write-Host "packages\ carries nothing this checkout no longer references." -ForegroundColor DarkGray
