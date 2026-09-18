@@ -538,7 +538,7 @@ function Get-LowEvidence {
     param([Parameter(Mandatory = $true)]$Record)
 
     # Indexed, not dotted: most rows declare no rule, and under strict mode a dotted read of
-    # a key a hashtable does not have throws rather than returning nothing.
+    # a key that the hashtable does not have throws rather than returning nothing.
     foreach ($name in $axes.Keys) {
         $rule = $axes[$name]['LowEvidenceWhen']
         if ($rule -and (& $rule $Record)) { $name }
@@ -1140,7 +1140,9 @@ if ($Handoff -gt 0) {
         Write-Host ("  #{0} - {1}" -f $record.Number, $record.Title) -ForegroundColor Cyan
         Write-Host ("    {0}" -f $record.Url) -ForegroundColor DarkGray
         $verifyText = $record.VerifyNeeds
-        if ($record.VerifyFromBody) { $verifyText += ' (read from the body, low confidence)' }
+        # LowEvidence, not VerifyFromBody, so the handoff marks exactly what the ranking marks:
+        # a body-derived Unknown is no call at all, and neither place annotates it.
+        if (@($record.LowEvidence) -contains 'VerifyNeeds') { $verifyText += ' (read from the body, low confidence)' }
         Write-Host ("    prio {0}  edit {1}  verify {2}  risk {3}  effort {4}  {5}" -f `
                 $record.Relative, $record.Where, $verifyText, $record.Risk, $record.Effort, $record.Track)
         Write-Host ("    why: {0}" -f (@($record.Why) -join ' ; ')) -ForegroundColor DarkGray
