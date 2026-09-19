@@ -51,7 +51,15 @@ namespace SmartHome.UnitTests
         public void HomieClient_Publish_On_Property_Update()
         {
             // Arrange
-            int expectedPublishCount = 17;   // +1: $extensions is published now
+            // 5 device attributes + 3 node + 5 for the property = 13, plus the $state
+            // publish the Init -> Ready transition makes = 14 for the announce, plus the
+            // one value publish Update() makes.
+            //
+            // Five device attributes, not six: $implementation is null unless the builder
+            // is given WithImplementation, and PublishHomieAttribute skips a null. Five
+            // per property, not seven: this fixture sets neither a format nor a unit, and
+            // an empty $format/$unit is no longer published (#101).
+            int expectedPublishCount = 15;
             int expectedSubscriptionCount = 0;
 
             var mqttClient = new MockMqttClient();
@@ -74,7 +82,9 @@ namespace SmartHome.UnitTests
         public void HomieClient_Property_Is_Set_On_Property_Set_Message()
         {
             // Arrange
-            int expectedPublishCount = 17;   // +1: $extensions is published now
+            // 14 for the announce, derived in HomieClient_Publish_On_Property_Update,
+            // plus the library's reflection of the /set onto the property.
+            int expectedPublishCount = 15;
             int expectedSubscriptionCount = 1;
             double initialValue = 0.0;
             double expectedValue = 25;
@@ -739,8 +749,12 @@ namespace SmartHome.UnitTests
         public void HomieClient_Connect_Disconnect()
         {
             // Arrange
-            int expectedPublishCountAfterConnect = 23;   // +1: $extensions is published now
-            int expectedPublishCountAfterDisconnect = 24;
+            // 5 device attributes + 3 node + 5 per property, two of them = 18, plus the
+            // $state publish the Init -> Ready transition makes = 19. Neither property
+            // declares a format or a unit, and an empty one is no longer published
+            // (#101); the counts are derived in HomieClient_Publish_On_Property_Update.
+            int expectedPublishCountAfterConnect = 19;
+            int expectedPublishCountAfterDisconnect = 20;   // + $state = 'disconnected'
             int expectedSubscriptionCountConnected = 2;
             int expectedSubscriptionCountDisconnected = 0;
 
@@ -772,6 +786,61 @@ namespace SmartHome.UnitTests
             // Assert
             Assert.AreEqual(expectedSubscriptionCountDisconnected, mqttClient.SubscriptionCount);
             Assert.AreEqual(expectedPublishCountAfterDisconnect, mqttClient.PublishCount);
+        }
+
+        [TestMethod]
+        public void HomieClient_Omits_An_Empty_Format_And_Unit_From_The_Announce()
+        {
+            // Arrange -- a float with neither WithFormat nor WithUnit, so $format is ""
+            // and Unit.None maps to "". Both were published anyway, as zero-length
+            // retained messages that MQTT deletes rather than stores: they could never
+            // be read back, so they bought nothing and cost two QoS-1 round trips per
+            // property on every boot and every reconnect.
+            var mqttClient = new MockMqttClient();
+            var device = BuildSinglePropertyDevice(out FloatProperty property, settable: false);
+
+            // Act
+            var homieClient = new HomieClient(device, mqttClient);
+            homieClient.Connect();
+
+            // Assert
+            Assert.AreEqual(0, mqttClient.PayloadsFor(property.FormatAttribute.GetTopic()).Length,
+                "an empty $format was published");
+            Assert.AreEqual(0, mqttClient.PayloadsFor(property.UnitAttribute.GetTopic()).Length,
+                "an empty $unit was published");
+        }
+
+        [TestMethod]
+        public void HomieClient_Announces_A_Format_And_Unit_That_Carry_A_Value()
+        {
+            // The other half of the rule above, and the one that matters: the omission is
+            // conditional on the payload being empty, never on the attribute being
+            // optional. A property that declares a real $format or $unit must still
+            // announce both -- they are what a controller reads the value against, and
+            // dropping them would be a conformance defect rather than a saving.
+            var mqttClient = new MockMqttClient();
+
+            var builder = new HomieDeviceBuilder(_testDeviceTopicId, _testDeviceName);
+            var device = builder.AddNode(_testNodeEngineTopicId, _testNodeEngineName, _testNodeEngineType)
+                        .AddFloatProperty(_testPropertyTemperatureTopicId, _testPropertyTemperatureName, 0.0)
+                            .WithFormat("-50:120")
+                            .WithUnit(Unit.DegreeCelsius)
+                        .BuildProperty(out FloatProperty property)
+                    .BuildNode()
+                .BuildDevice();
+
+            // Act
+            var homieClient = new HomieClient(device, mqttClient);
+            homieClient.Connect();
+
+            // Assert
+            var formatPayloads = mqttClient.PayloadsFor(property.FormatAttribute.GetTopic());
+            var unitPayloads = mqttClient.PayloadsFor(property.UnitAttribute.GetTopic());
+
+            Assert.AreEqual(1, formatPayloads.Length, "$format was not announced");
+            Assert.AreEqual("-50:120", formatPayloads[0]);
+            Assert.AreEqual(1, unitPayloads.Length, "$unit was not announced");
+            Assert.AreEqual(Unit.DegreeCelsius.GetString(), unitPayloads[0]);
         }
     }
 }

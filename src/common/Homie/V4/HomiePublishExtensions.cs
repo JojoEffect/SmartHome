@@ -9,7 +9,7 @@ namespace SmartHome.Homie.V4
 {
     internal static class HomiePublishExtensions
     {
-        public static void PublishHomieAttribute(this IMqttClient mqttClient, AttributeBase? attribute, PublishSettings publishSettings, ILogger logger)
+        public static void PublishHomieAttribute(this IMqttClient mqttClient, AttributeBase? attribute, PublishSettings publishSettings, ILogger logger, bool omitWhenEmpty = false)
         {
             if (attribute == null)
             {
@@ -18,6 +18,18 @@ namespace SmartHome.Homie.V4
 
             var topic = attribute.GetTopic();
             var payload = attribute.GetPayload();
+
+            // An empty retained payload is how MQTT spells "delete the retained
+            // message", so publishing one costs a QoS-1 round trip and leaves the store
+            // exactly as it was. Whether that is waste or the point is the caller's to
+            // know, which is why this is a parameter rather than a blanket rule:
+            // $extensions is mandatory, deliberately published empty, and asserted off
+            // the live stream precisely because it can never be read back from the
+            // store.
+            if (omitWhenEmpty && payload.Length == 0)
+            {
+                return;
+            }
 
             logger.LogDebug($"Publishing Homie attribute '{topic}' -> '{Encoding.UTF8.GetString(payload, 0, payload.Length)}'");
 
@@ -36,10 +48,21 @@ namespace SmartHome.Homie.V4
 
             mqttClient.PublishHomieAttribute(property.NameAttribute, homiePublishSettings.PropertyInfoPublishSettings, logger);
             mqttClient.PublishHomieAttribute(property.DataTypeAttribute, homiePublishSettings.PropertyInfoPublishSettings, logger);
-            mqttClient.PublishHomieAttribute(property.FormatAttribute, homiePublishSettings.PropertyInfoPublishSettings, logger);
+            // $format and $unit are the only property attributes Homie v4 leaves
+            // optional, and the only two this library can produce empty: an unset format
+            // is "", and Unit.None maps to "". The rest always carry a real payload --
+            // $settable and $retained publish "true" or "false" either way.
+            //
+            // Omitting an empty one changes nothing a controller can observe, because an
+            // empty retained publish never reaches the store to be read. What it removes
+            // is two QoS-1 round trips per property from every announce, and an announce
+            // runs on every boot and again on every broker reconnect. Three properties
+            // hardly notice; a per-floor window-contact controller with twenty booleans
+            // was paying forty of them each time.
+            mqttClient.PublishHomieAttribute(property.FormatAttribute, homiePublishSettings.PropertyInfoPublishSettings, logger, omitWhenEmpty: true);
             mqttClient.PublishHomieAttribute(property.SettableAttribute, homiePublishSettings.PropertyInfoPublishSettings, logger);
             mqttClient.PublishHomieAttribute(property.RetainedAttribute, homiePublishSettings.PropertyInfoPublishSettings, logger);
-            mqttClient.PublishHomieAttribute(property.UnitAttribute, homiePublishSettings.PropertyInfoPublishSettings, logger);
+            mqttClient.PublishHomieAttribute(property.UnitAttribute, homiePublishSettings.PropertyInfoPublishSettings, logger, omitWhenEmpty: true);
         }
 
         public static void PublishHomiePropertyValue(this IMqttClient mqttClient, string topic, byte[] payload, PublishSettings publishSettings, bool retained, ILogger logger)
