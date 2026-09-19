@@ -2306,6 +2306,118 @@ Describe 'Get-AttributeFailure' {
     }
 }
 
+Describe 'Get-ExtensionsFailure' {
+    # The $extensions assertion, lifted out of Measure-HomieConformance for issue #142. It
+    # read the whole long-running log, so the image on the device before the flash -- which
+    # re-announces into the suite's fresh log while the new build is still being flashed --
+    # answered for the image just flashed.
+    #
+    # The log below is the shape the #93/#94 hardware run preserved, with the device ids
+    # shortened: the previous image's announce, its will once the flash's hard reset lands,
+    # then the watermark, then the new boot. A device id of 'd' on both sides of the
+    # watermark is the case that matters -- a HomieClientCheck build left on the device by
+    # an earlier run, which is what -Tests HomieClientCheck leaves there.
+    $previousImage = @(
+        'homie/d/$homie 0 4'
+        'homie/d/$name 0 Previous'
+        'homie/d/$nodes 0 n'
+        'homie/d/$extensions 0 '
+        'homie/d/$state 0 init'
+        'homie/d/$state 0 ready'
+        'homie/d/$state 0 lost'
+    )
+    $watermark = $previousImage.Count
+
+    It 'is not satisfied by a previous image''s $extensions before the watermark -- issue #142' {
+        # The new build announces everything except $extensions. The line before the
+        # watermark is the only $extensions in the log, and it used to be enough.
+        $lines = $previousImage + @(
+            'homie/d/$homie 0 4'
+            'homie/d/$name 0 Current'
+            'homie/d/$nodes 0 n'
+            'homie/d/$state 0 init'
+            'homie/d/$state 0 ready'
+        )
+
+        Assert-ArrayEqual -Expected @('never published: homie/d/$extensions') `
+                          -Actual @(Get-ExtensionsFailure -Lines $lines -Watermark $watermark -DeviceId 'd')
+    }
+
+    It 'counts the new boot''s own $extensions, past the watermark' {
+        # Ahead of $state=init, which is where the device sends it: the device attributes
+        # go out first and init after them, so this line is never past the init the
+        # announce witness waits for.
+        $lines = $previousImage + @(
+            'homie/d/$homie 0 4'
+            'homie/d/$name 0 Current'
+            'homie/d/$nodes 0 n'
+            'homie/d/$extensions 0 '
+            'homie/d/$state 0 init'
+        )
+
+        Assert-ArrayEqual -Expected @() -Actual @(Get-ExtensionsFailure -Lines $lines -Watermark $watermark -DeviceId 'd')
+    }
+
+    It 'counts an empty payload with or without the separator after the flag' {
+        # Empty is the case the log is read for at all -- the retained store deletes a
+        # zero-length payload -- so it has to count however the line ends.
+        foreach ($line in 'homie/d/$extensions 0 ', 'homie/d/$extensions 0') {
+            Assert-ArrayEqual -Expected @() -Actual @(Get-ExtensionsFailure -Lines @($line) -Watermark 0 -DeviceId 'd') -Because "'$line'"
+        }
+    }
+
+    It 'is not satisfied by a sibling topic this one is a prefix of' {
+        # The match was a bare line prefix, which also took this -- the hazard #130 closed
+        # for Wait-Heartbeat.
+        Assert-ArrayEqual -Expected @('never published: homie/d/$extensions') `
+                          -Actual @(Get-ExtensionsFailure -Lines @('homie/d/$extensionsX 0 x') -Watermark 0 -DeviceId 'd')
+    }
+
+    It 'is not satisfied by the topic in the wrong case -- issue #93' {
+        Assert-ArrayEqual -Expected @('never published: homie/d/$extensions') `
+                          -Actual @(Get-ExtensionsFailure -Watermark 0 -DeviceId 'd' -Lines @(
+                              'homie/d/$EXTENSIONS 0 '
+                              'homie/D/$extensions 0 '
+                          ))
+    }
+
+    It 'reports never published for an empty log, or a watermark past its end' {
+        # A missing log reaches this as no lines at all, and neither case is an error: the
+        # device published nothing this function can see.
+        Assert-ArrayEqual -Expected @('never published: homie/d/$extensions') `
+                          -Actual @(Get-ExtensionsFailure -Lines @() -Watermark 0 -DeviceId 'd')
+        Assert-ArrayEqual -Expected @('never published: homie/d/$extensions') `
+                          -Actual @(Get-ExtensionsFailure -Lines $previousImage -Watermark ($watermark + 5) -DeviceId 'd')
+    }
+
+    It 'appends nothing to a caller collecting a clean result with +=' {
+        # How the one call site uses it, as for Get-AttributeFailure: a $null slipping into
+        # the list would be counted as a conformance failure with no message.
+        $collected = @()
+        $collected += Get-ExtensionsFailure -Lines @('homie/d/$extensions 0 ') -Watermark 0 -DeviceId 'd'
+
+        Assert-Equal -Expected 0 -Actual $collected.Count
+    }
+
+    It 'is handed this boot''s watermark by the shipped conformance check -- issue #142' {
+        # The half the cases above cannot reach: they prove the function honours the
+        # watermark it is given, and #142 was the call site giving it the whole log. The
+        # call only runs against a device and a broker, so it is bound statically here.
+        $isCall = {
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq 'Get-ExtensionsFailure'
+        }
+
+        $calls = @([System.Management.Automation.Language.Parser]::ParseFile($subject, [ref]$null, [ref]$null).FindAll($isCall, $true))
+        Assert-Equal -Expected 1 -Actual $calls.Count -Because 'one shipped call, in Measure-HomieConformance'
+
+        $binding = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($calls[0], $true)
+        Assert-True -Condition $binding.BoundParameters.ContainsKey('Watermark') -Because $calls[0].Extent.Text
+        Assert-Equal -Expected '$script:subscriberLogWatermark' -Actual $binding.BoundParameters['Watermark'].Value.Extent.Text
+    }
+}
+
 Describe 'Invoke-CommandRetryRounds' {
     # The retry loop behind Measure-HomieConformance's /set round trip and its
     # out-of-format round. Both of those publish into a live broker and read a real

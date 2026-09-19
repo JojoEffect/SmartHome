@@ -30,7 +30,7 @@ Useful switches:
 
 `scripts\` decides what the integration suite reports, and it is the half of the suite a desk can
 exercise: `Get-CatalogValidationError`, `ConvertFrom-HomieCaptureLine`, `ConvertTo-HomieSnapshot`,
-`Get-HomieLivePayloads`, `Get-AttributeFailure`, `Get-ConformanceCaptureSeconds`,
+`Get-HomieLivePayloads`, `Get-AttributeFailure`, `Get-ExtensionsFailure`, `Get-ConformanceCaptureSeconds`,
 `Wait-ForAnnounceWitnessed`, `Get-SubscriberLogLineCount`, `Test-DeviceConstant`,
 `Invoke-CommandRetryRounds`, plus `Common.ps1`'s path globs, dev-environment state and the
 deployment-geometry parse the deploy cross-checks its flash address against.
@@ -55,15 +55,19 @@ pull request.
 `Get-AttributeFailure` is the first *assertion* inside `Measure-HomieConformance` that is covered
 here — the conformance machinery around it, `Get-ConformanceCaptureSeconds` and the lifecycle
 table, already was. It was nested inside that function and closed over its snapshot until issue
-#84 gave it the snapshot as a parameter. The verdicts still written inline in that function need
-a device; that uncovered remainder is what #143 tracks.
+#84 gave it the snapshot as a parameter. `Get-ExtensionsFailure` is the second: the `$extensions`
+check, lifted out for #142 so that reading only this boot's part of the subscriber log can be
+pinned. The verdicts still written inline in that function need a device; that uncovered
+remainder is what #143 tracks.
 
 Its call sites are covered in one narrower sense. `Get-AttributeFailure` takes `-Expected` and
 `-AnyValue` as two parameter sets (#94), so a call naming both is a binding error — but only when
 it runs, and every call runs inside `Measure-HomieConformance`. So one case parses the shipped
 script and binds each call statically against the dot-sourced function. That is parsing the
 *callers*, not lifting the function out and running a copy, so it cannot drift the way #74
-describes.
+describes. `Get-ExtensionsFailure`'s one call is bound the same way, to assert it is handed
+`$script:subscriberLogWatermark`: the cases on the function prove it honours a watermark, and only
+that one proves the conformance check gives it the right one.
 
 One case here pins a defect rather than endorses it, so the fix has to come past a failing test:
 `Test-DeviceConstant`'s silence under a bracketed path (#80). It says so in a comment; closing

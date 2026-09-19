@@ -1877,6 +1877,66 @@ function Get-AttributeFailure {
     return $failures
 }
 
+function Get-ExtensionsFailure {
+    # The conformance check's $extensions assertion: "never published: <topic>", or nothing
+    # when this boot published it. It returns what is wrong rather than appending to a list,
+    # for the reasons Get-AttributeFailure gives.
+    #
+    # Read from the long-running homie/# log, not from a snapshot. v4 says $extensions "MUST
+    # be sent, even if it is just an empty string", but MQTT defines a zero-length retained
+    # payload as a delete of the retained message -- so an empty $extensions is published
+    # and then provably absent from the store. That is the convention and MQTT disagreeing,
+    # not the device misbehaving.
+    #
+    # Only lines past -Watermark count (issue #142). The suite starts the broker, and with it
+    # a fresh log, before the first deploy, and the image already on the device reconnects
+    # and re-announces into that log before the flash replaces it. A full announce always
+    # includes $extensions, so the whole log let a HomieClientCheck build left on the device
+    # by an earlier run -- which is what -Tests HomieClientCheck leaves there -- answer for
+    # the build just flashed. Wait-ForAnnounceWitnessed and Invoke-BrokerOutageCheck read
+    # from the same watermark for the same reason (#35, #18).
+    #
+    # Mandatory, with no default: 0 means "read the whole file", so a defaulted watermark
+    # would let a call that forgot it bring #142 back without a sound.
+    #
+    # Deliberately not anchored on the init Wait-ForAnnounceWitnessed saw, which looks
+    # tighter and is wrong: PublishHomieDeviceInfo sends the device attributes first and
+    # $state=init after them, so this boot's $extensions is already in the log when its
+    # init arrives. The watermark is taken before the new image's first publish, so both
+    # are past it.
+    #
+    # The topic is compared whole, through ConvertFrom-HomieCaptureLine, and with -ceq. The
+    # line prefix this used to match on also took homie/<id>/$extensionsX -- the hazard
+    # #130 closed for Wait-Heartbeat -- and MQTT topics are case-sensitive (#93).
+    #
+    # The retain flag is not consulted. The long-running subscriber is connected
+    # throughout, so this boot's publish reaches it live, and an empty $extensions is never
+    # in the store to be replayed.
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [AllowEmptyString()]
+        [string[]]$Lines,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Watermark,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DeviceId
+    )
+
+    $topic = "homie/$DeviceId/`$extensions"
+
+    foreach ($line in @($Lines | Select-Object -Skip $Watermark)) {
+        $parsed = ConvertFrom-HomieCaptureLine -Line $line
+        if ($null -ne $parsed -and $parsed.Topic -ceq $topic) {
+            return
+        }
+    }
+
+    return "never published: $topic"
+}
+
 function Invoke-HomieConformanceCheck {
     # The verdict function the catalog names for HomieClientCheck: everything the
     # conformance measurement needs around it, so the run loop needs to know none of it.
@@ -1994,22 +2054,14 @@ function Measure-HomieConformance {
     $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$root/`$name" -AnyValue
     $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$root/`$state" -Expected 'ready'
     $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$root/`$nodes" -Expected $nodeId
-    # $extensions is asserted from the LIVE log, not the retained store. The spec says
-    # it "MUST be sent, even if it is just an empty string", but MQTT defines a
-    # zero-length retained payload as a delete of the retained message -- so an empty
-    # $extensions is published and then provably absent from the store. That is the
-    # convention and MQTT disagreeing, not the device misbehaving.
-    #
-    # -clike, not -like, which ignores case: homie/D/$EXTENSIONS is a different topic
-    # (issue #93).
+    # $extensions is asserted from the LIVE log, not the retained store, and only from this
+    # boot's part of it -- Get-ExtensionsFailure says why on both counts.
     #
     # -LiteralPath for the reason Wait-ForSubscriberLogLine gives: the log sits under the
     # temp directory, where a '[' makes -Path a wildcard that matches nothing. That reads
     # as an empty log, and a device that did publish $extensions fails (#71/#80).
     $liveLog = @(Get-Content -LiteralPath (Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog) -ErrorAction SilentlyContinue)
-    if (-not ($liveLog | Where-Object { $_ -clike "$root/`$extensions*" })) {
-        $script:conformanceFailures += "never published: $root/`$extensions"
-    }
+    $script:conformanceFailures += Get-ExtensionsFailure -Lines $liveLog -Watermark $script:subscriberLogWatermark -DeviceId $deviceId
 
     # ── node attributes ──────────────────────────────────────────────────────
     $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/`$name" -AnyValue
@@ -2284,11 +2336,14 @@ function Measure-HomieConformance {
             # That sequence is also the behaviour this test exists to guard: it is the
             # correction itself, observed rather than inferred from where the store ended
             # up.
-            # try/finally, so the window is closed even if the publish throws. The
-            # capture file is one fixed path per port, shared by every snapshot in the
-            # run: an orphaned mosquitto_sub keeps appending homie/# traffic to it, and
-            # every later snapshot would then read a file that is no longer the record of
-            # one fresh subscriber -- silently wrong retain flags for the rest of the suite.
+            #
+            # try/finally, so the window is closed even if the publish throws. An
+            # orphaned mosquitto_sub would hold the per-port capture file open, and
+            # Start-HomieCapture throws rather than read a file it could not clear -- so
+            # the next window ends this check as an ERROR, and the next run's first
+            # window does the same, because an orphan outlives its broker and rejoins the
+            # next one on the port. Loud, then, not silently wrong retain flags; the
+            # measured account is at the same guard in Invoke-CommandRetryRounds.
             $capture = Start-HomieCapture -Port $Port -WaitForConnectSeconds 5
             try {
                 Publish-HomieCommand -Port $Port -Topic "$node/lifecycle/set" -Payload $step.Command
