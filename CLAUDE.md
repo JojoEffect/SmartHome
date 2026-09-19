@@ -438,10 +438,19 @@ boot is whatever initial value the builder was handed, not a measurement. RoomSe
 its `0.0` within one `MeasurementIntervalMs`, so there it costs nothing. For a property that
 only changes when the world does — a window contact, a float switch — that placeholder is what
 every controller reads until the next physical change, which can be months, and `false` on a
-contact reads as a closed window that may be open. `AddBooleanProperty` and its siblings already
-make `initialValue` mandatory at the call site: read the input first and pass it. Where a
-reading genuinely is not available that early, publish something the device can honestly say —
-an `unknown` member of an enum's `$format` — rather than a plausible-looking default. Issue #99.
+contact reads as a closed window that may be open.
+
+Six of the nine builders make that easy by making `initialValue` mandatory at the call site —
+`AddStringProperty`, `AddIntegerProperty`, `AddFloatProperty`, `AddBooleanProperty`,
+`AddEnumProperty`, `AddColorProperty` — so read the input first and pass it. Where a reading
+genuinely is not available that early, publish something the device can honestly say, such as an
+`unknown` member of an enum's declared options, rather than a plausible-looking default.
+
+`AddDateTimeProperty` and `AddDurationProperty` take **no** initial value and default to
+`DateTime.MinValue` and `TimeSpan.Zero`, which the announce then publishes retained; there is no
+way to seed them at build time. That cannot bite through Homie today — the v4 adapter refuses
+those two datatypes outright in its constructor — but it will through an adapter that carries
+them (#111). Issue #99.
 
 `HomieClient` owns its MQTT session and must: Homie v4 requires the connection to carry a last
 will setting `homie/[device-id]/$state` to `lost`, and a will can only be declared in CONNECT.
