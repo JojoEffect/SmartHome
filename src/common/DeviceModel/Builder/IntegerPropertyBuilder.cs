@@ -35,18 +35,25 @@ namespace SmartHome.DeviceModel.Builder
         /// declaration is a device author's bug, and refusing every payload because of it
         /// would punish the controller instead.
         ///
-        /// Nothing reports the text afterwards, though, and nothing can: the property
-        /// keeps the parsed range and not the string it came from, so a declaration that
-        /// failed to parse is indistinguishable from one that was never written -- the
-        /// property simply declares no bounds, and a consumer republishing them
-        /// republishes none.
+        /// It is not silent, though: it is logged as a warning naming the property and the
+        /// text. Here, because nothing later can -- the property keeps the parsed range
+        /// and not the string it came from, so from then on a declaration that failed to
+        /// parse is indistinguishable from one that was never written, and a consumer
+        /// republishing the bounds republishes none. Empty text means "no range" and is
+        /// not reported.
         ///
-        /// Use <see cref="WithRange"/> to state the bounds directly, which is clearer,
-        /// cannot fail silently, and is the only way to express an open end or a step.
+        /// Use <see cref="WithRange"/> to state the bounds directly. It is clearer, a bad
+        /// range there is an exception from <see cref="NumericRange"/>'s factories rather
+        /// than a warning -- which reaches nobody on a device that configured no logger --
+        /// and it is the only way to express an open end or a step.
         /// </remarks>
         public IntegerPropertyBuilder WithFormat(string format)
         {
-            NumericRange.TryParse(format, out _range);
+            if (!NumericRange.TryParse(format, out _range))
+            {
+                ReportUnparsedFormat(format, "a range");
+            }
+
             return this;
         }
 

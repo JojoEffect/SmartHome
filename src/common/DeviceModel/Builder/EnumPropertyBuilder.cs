@@ -29,9 +29,20 @@ namespace SmartHome.DeviceModel.Builder
         /// Entries are trimmed; text with nothing usable in it declares no options, and
         /// a property that declares none accepts any payload.
         /// </summary>
+        /// <remarks>
+        /// Text that declares no options is logged as a warning naming the property and
+        /// the text, for the reason <c>IntegerPropertyBuilder.WithFormat</c> gives: the
+        /// property keeps the parsed options, never the text, so nothing after this call
+        /// can tell a failed declaration from a missing one. Empty text means "no options"
+        /// and is not reported.
+        /// </remarks>
         public EnumPropertyBuilder WithFormat(string format)
         {
-            EnumOptions.TryParse(format, out _options);
+            if (!EnumOptions.TryParse(format, out _options))
+            {
+                ReportUnparsedFormat(format, "a list of options");
+            }
+
             return this;
         }
 
@@ -41,7 +52,8 @@ namespace SmartHome.DeviceModel.Builder
         /// <remarks>
         /// Unlike <see cref="WithFormat"/>, this throws when nothing usable is left: an
         /// array handed in with no entries in it is unambiguously a programming error,
-        /// where a format string that failed to parse is a device author's typo in text.
+        /// where a format string that failed to parse is a device author's typo in text,
+        /// and is logged rather than thrown.
         /// </remarks>
         public EnumPropertyBuilder WithOptions(string[] options)
         {

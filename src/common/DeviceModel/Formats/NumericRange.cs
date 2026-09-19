@@ -172,11 +172,13 @@ namespace SmartHome.DeviceModel.Formats
         /// a device author's malformed declaration is not a reason to start refusing a
         /// controller's otherwise valid payloads.
         ///
-        /// Nothing reports the text afterwards either. A consumer reads the range this
-        /// produced, never the string it came from, so text that failed to parse is
-        /// indistinguishable from bounds that were never declared -- check the return
-        /// value, or use the factories above, which say the same thing without the
-        /// silence.
+        /// This reports nothing itself: it answers false, and saying so is the caller's
+        /// job. The property builders do it -- their <c>WithFormat</c> logs a warning
+        /// naming the property and the text -- and have to, because that is the last
+        /// point the text exists: a consumer reads the range this produced, never the
+        /// string it came from, so afterwards text that failed to parse is
+        /// indistinguishable from bounds that were never declared. Any other caller has
+        /// to check the return value, or use the factories above, which throw instead.
         ///
         /// <c>":"</c> parses to false as well. A convention may well accept it as its
         /// default format, but it declares neither end, which is the same as declaring
