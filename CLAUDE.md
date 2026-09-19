@@ -431,6 +431,18 @@ Six things to know when writing an actuator (Irrigation, Oven):
   publish the real value onto the property when it lands. That is the same "reflect the
   outcome" publish, just later.
 
+And one when writing a **sensor** (RoomSensor, and any contact or level device to come):
+**seed every property with a real reading before you build the device.** `Connect()` announces,
+and the announce republishes each property's *current* value as a retained message — which at
+boot is whatever initial value the builder was handed, not a measurement. RoomSensor overwrites
+its `0.0` within one `MeasurementIntervalMs`, so there it costs nothing. For a property that
+only changes when the world does — a window contact, a float switch — that placeholder is what
+every controller reads until the next physical change, which can be months, and `false` on a
+contact reads as a closed window that may be open. `AddBooleanProperty` and its siblings already
+make `initialValue` mandatory at the call site: read the input first and pass it. Where a
+reading genuinely is not available that early, publish something the device can honestly say —
+an `unknown` member of an enum's `$format` — rather than a plausible-looking default. Issue #99.
+
 `HomieClient` owns its MQTT session and must: Homie v4 requires the connection to carry a last
 will setting `homie/[device-id]/$state` to `lost`, and a will can only be declared in CONNECT.
 An app that connects the transport first — as RoomSensor did until 2026-08-21 — produces a
