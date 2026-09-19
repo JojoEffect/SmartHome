@@ -1,5 +1,6 @@
+using Microsoft.Extensions.Logging;
+using nanoFramework.Logging;
 using System;
-using System.Diagnostics;
 using System.Net.NetworkInformation;
 using System.Threading;
 using nanoFramework.Networking;
@@ -8,10 +9,20 @@ namespace SmartHome.Networking
 {
     /// <summary>
     /// Shared WiFi connect helper for every project that needs the network: the real
-    /// device apps (RoomSensor) and the integration tests (WifiTest, MqttTest) alike.
+    /// device apps (RoomSensor) and the integration tests (WifiCheck, MqttCheck) alike.
     /// </summary>
     public static class NetworkHelper
     {
+        /// <remarks>
+        /// Resolved per call rather than cached in a static field. A static field is
+        /// initialised on first touch of this type, which can be before the app has set
+        /// <c>LogDispatcher.LoggerFactory</c> -- and it would then cache the null-factory
+        /// logger for the life of the process, silently swallowing everything afterwards.
+        /// This method runs once per boot, so the one allocation costs nothing and the
+        /// ordering trap disappears.
+        /// </remarks>
+        private static ILogger Logger => LogDispatcher.GetLogger("SmartHome.Networking.NetworkHelper");
+
         /// <summary>
         /// Connects using the WiFi profile already stored on the device (set via
         /// Visual Studio's Device Explorer -> Edit network configuration). Blocks
@@ -38,7 +49,9 @@ namespace SmartHome.Networking
         /// </remarks>
         public static void ConnectToConfiguredNetwork(int timeoutMilliseconds = 60000)
         {
-            Debug.WriteLine("Connecting to WiFi using the device's stored configuration...");
+            var logger = Logger;
+
+            logger.LogInformation("Connecting to WiFi using the device's stored configuration...");
 
             var cancellation = new CancellationTokenSource(timeoutMilliseconds);
             bool success = WifiNetworkHelper.Reconnect(requiresDateTime: false, token: cancellation.Token);
@@ -46,11 +59,11 @@ namespace SmartHome.Networking
             if (!success)
             {
                 var message = $"WiFi connect failed. Status: {WifiNetworkHelper.Status}.";
-                Debug.WriteLine(message);
+                logger.LogError(message);
 
                 if (WifiNetworkHelper.HelperException != null)
                 {
-                    Debug.WriteLine($"HelperException: {WifiNetworkHelper.HelperException}");
+                    logger.LogError($"HelperException: {WifiNetworkHelper.HelperException}");
                 }
 
                 throw new Exception(message);
@@ -67,18 +80,18 @@ namespace SmartHome.Networking
 
                 if (interfaces.Length == 0)
                 {
-                    Debug.WriteLine("Connected to WiFi network (no network interface reported an address).");
+                    logger.LogInformation("Connected to WiFi network (no network interface reported an address).");
                     return;
                 }
 
                 // Index 0 is the station interface on this board. On a board exposing
                 // several (AP plus station, or Ethernet) it is not guaranteed to be the
                 // one that just connected, so treat the value as a hint, not a fact.
-                Debug.WriteLine($"Connected to WiFi network with IP address {interfaces[0].IPv4Address}");
+                logger.LogInformation($"Connected to WiFi network with IP address {interfaces[0].IPv4Address}");
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Connected to WiFi network (could not read the IP address: {ex.Message}).");
+                logger.LogInformation($"Connected to WiFi network (could not read the IP address: {ex.Message}).");
             }
         }
     }

@@ -679,14 +679,30 @@ function Wait-Heartbeat {
     # inside $TimeoutSeconds. The counter is the trailing integer of the payload
     # ("<topic> heartbeat 12"), and it is what separates a device that reconnected
     # from one that died and came back -- see Invoke-BrokerOutageCheck.
+    #
+    # $Skip is the watermark, forwarded: lines at or before it belong to whatever was
+    # publishing on this topic before the caller's window opened, and a counter read from
+    # one of those would be measured against a different instance of the app.
     param(
         [string]$Topic,
         [int]$TimeoutSeconds,
-        [string]$Port
+        [string]$Port,
+        [int]$Skip = 0
     )
 
-    $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds `
-        -Predicate { $_ -like "$Topic*" }
+    # StartsWith("$Topic "), with the space, and not -like "$Topic*". Log lines are
+    # "<topic> <0|1> <payload>", so a bare prefix also matches any topic that merely
+    # begins with this one -- and this wait does not just report *that* something matched:
+    # the trailing integer of the line it returns becomes the counter that decides PASS
+    # against RESTARTED, so a sibling topic's number would be measured as this device's.
+    # The two waits either side refuse the same hazard, Wait-ForEcho with "$Topic *" and
+    # Wait-ForAnnounceWitnessed by comparing the whole line.
+    #
+    # A method call rather than a third -like: a topic is data here (the catalog's
+    # HeartbeatTopic), and -like would read a '[' in it as the start of a character class
+    # -- the #71 defect class, which this file has met twice in paths already.
+    $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds -Skip $Skip `
+        -Predicate { $_.StartsWith("$Topic ") }
     if (-not $hit) {
         return $null
     }
@@ -702,9 +718,9 @@ function Wait-Heartbeat {
 
 function Invoke-BrokerOutageCheck {
     # Kills the broker under a running device and asserts the device publishes
-    # again once a fresh broker is up. Start-DevEnv.ps1 truncates the subscriber
-    # log on every start, so each phase reads a log that can only contain
-    # heartbeats published after that phase's broker came up -- no stale hits.
+    # again once a fresh broker is up. Every phase reads the long-running homie/#
+    # log from a watermark down, so no phase can be satisfied by a line published
+    # before it opened.
     param(
         [hashtable]$Settings,
         [string]$Port,
@@ -717,22 +733,26 @@ function Invoke-BrokerOutageCheck {
 
     $topic = $Settings.HeartbeatTopic
 
-    # Cycle the environment before measuring anything. The just-deployed app is not
-    # the only thing that has been publishing on this topic: whatever was flashed
-    # before it kept running, and kept publishing, right through the build and flash
-    # -- so the subscriber log can hold a high counter from a previous instance.
-    # Start-DevEnv.ps1 truncates the log, which makes the baseline provably belong to
-    # the instance now on the device.
-    Write-Host "Cycling the broker so the baseline can only come from the new deploy..." -ForegroundColor DarkGray
-    try {
-        Restart-SuiteBroker -Port $Port
-    }
-    catch {
-        return @{ Outcome = 'ERROR'; Detail = "$($_.Exception.Message) (before measuring)" }
-    }
+    # The baseline has to belong to the instance now on the device. The just-deployed
+    # app is not the only thing that has been publishing on this topic: whatever was
+    # flashed before it kept running, and kept publishing, right through the build and
+    # the flash -- so the log as found can hold a high counter from a previous instance,
+    # and a counter compared against that proves nothing.
+    #
+    # That requirement is a watermark, not a restart. $script:subscriberLogWatermark is
+    # the log's line count taken in the gap between the flash's hard reset and the new
+    # image's first publish, so a line after it cannot be the replaced image's -- the
+    # same guarantee a broker cycle bought by truncating the log, without the stop, the
+    # start and the device reconnect they cause. (Issue #18. It is the same watermark
+    # Wait-ForAnnounceWitnessed reads, taken once per test in the run loop.)
+    #
+    # 0 means "read the whole file", per Get-SubscriberLogLineCount, and it is an ordinary
+    # value here rather than a defect: an empty log is what the first test of a run finds,
+    # the broker having just come up with nothing published on it yet.
+    $watermark = $script:subscriberLogWatermark
 
-    Write-Host ("Waiting up to {0}s for the first heartbeat on {1}..." -f $Settings.SettleSeconds, $topic) -ForegroundColor Cyan
-    $latest = Wait-Heartbeat -Topic $topic -TimeoutSeconds $Settings.SettleSeconds -Port $Port
+    Write-Host ("Waiting up to {0}s for the first heartbeat on {1} (past line {2})..." -f $Settings.SettleSeconds, $topic, $watermark) -ForegroundColor Cyan
+    $latest = Wait-Heartbeat -Topic $topic -TimeoutSeconds $Settings.SettleSeconds -Port $Port -Skip $watermark
     if (-not $latest) {
         return @{
             Outcome = 'NO-RESULT'
@@ -761,7 +781,13 @@ function Invoke-BrokerOutageCheck {
             return @{ Outcome = 'ERROR'; Detail = "$($_.Exception.Message) (after the ${outage}s outage)" }
         }
 
-        $latest = Wait-Heartbeat -Topic $topic -TimeoutSeconds $Settings.RecoverySeconds -Port $Port
+        # Start-DevEnv.ps1 truncates the subscriber log on every start, so from here the
+        # log begins at line 0 again and everything in it was published after this
+        # outage's broker came up. Carrying the flash-time watermark past this point
+        # would skip past exactly the lines the recovery is read from.
+        $watermark = 0
+
+        $latest = Wait-Heartbeat -Topic $topic -TimeoutSeconds $Settings.RecoverySeconds -Port $Port -Skip $watermark
         if (-not $latest) {
             return @{
                 Outcome = 'FAIL'
@@ -800,7 +826,7 @@ function Invoke-BrokerOutageCheck {
     # true, which is before the reconnect thread has finished replaying subscriptions.
     # A single QoS-0 publish into that window reaches a broker with no subscriber for
     # the topic and is dropped forever, so a healthy device would be reported FAIL.
-    if (-not (Wait-ForEcho -Topic $Settings.EchoTopic -Payload $nonce -TimeoutSeconds $Settings.CommandTimeoutSeconds -Port $Port -CommandTopic $Settings.EchoCommandTopic)) {
+    if (-not (Wait-ForEcho -Topic $Settings.EchoTopic -Payload $nonce -TimeoutSeconds $Settings.CommandTimeoutSeconds -Port $Port -CommandTopic $Settings.EchoCommandTopic -Skip $watermark)) {
         return @{
             Outcome = 'FAIL'
             Detail  = "heartbeats resumed but '$nonce' was never echoed on $($Settings.EchoTopic) -- the client reconnected without replaying its subscriptions"
@@ -826,15 +852,20 @@ function Wait-ForEcho {
     # command topic has no subscriber. A QoS-0 publish into that window is dropped by
     # the broker with no trace, and waiting alone would then report a healthy device as
     # FAIL. Re-sending costs nothing and closes the race.
+    #
+    # $Skip is the watermark, forwarded, for the same reason Wait-Heartbeat takes one:
+    # the nonce is named after a counter, and a previous instance that reached the same
+    # counter left the same echo line in the log.
     param(
         [string]$Topic,
         [string]$Payload,
         [int]$TimeoutSeconds,
         [string]$Port,
-        [string]$CommandTopic
+        [string]$CommandTopic,
+        [int]$Skip = 0
     )
 
-    $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds `
+    $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds -Skip $Skip `
         -Predicate { $_ -like "$Topic *" -and $_ -like "*$Payload" } `
         -BeforeRead {
             Publish-HomieCommand -Port $Port -Topic $CommandTopic -Payload $Payload
@@ -893,12 +924,16 @@ function Wait-ForAnnounceWitnessed {
     # or a device id that merely starts with this one, must not satisfy it. Log lines
     # are "<topic> <0|1> <payload>", per Get-SmartHomeSubscriberArguments.
     #
+    # -ceq, not -eq, which ignores case. MQTT topics are case-sensitive and v4's $state
+    # vocabulary is lowercase, so a line differing only in case is either another topic
+    # or a payload no controller accepts -- not this device announcing (issue #93).
+    #
     # 250ms rather than the helper's default 500. The log is a record, so a slower poll
     # would still find the line -- it only costs latency, and this one sits between the
     # flash and everything the test then does.
     $hit = Wait-ForSubscriberLogLine -Port $Port -TimeoutSeconds $TimeoutSeconds `
         -Skip $Watermark -PollMilliseconds 250 `
-        -Predicate { $_ -eq "$topic 0 init" -or $_ -eq "$topic 1 init" }
+        -Predicate { $_ -ceq "$topic 0 init" -or $_ -ceq "$topic 1 init" }
 
     return ($null -ne $hit)
 }
@@ -947,7 +982,9 @@ $script:currentPhase = $null
 # to whatever was running on the device beforehand -- which, when the previous suite run
 # left HomieClientCheck flashed, is the *same* device id announcing on the same broker.
 # Wait-ForAnnounceWitnessed reads from here down, so an announce it witnesses is
-# necessarily this boot's.
+# necessarily this boot's, and Invoke-BrokerOutageCheck reads its baseline heartbeat from
+# here down for the same reason -- it used to cycle the whole broker to get the log
+# truncated instead, which is issue #18.
 #
 # Taken in the run loop rather than inside a verdict function, so that it is read in the
 # gap between the flash's hard reset and the new image's first publish -- see the comment
@@ -1010,7 +1047,14 @@ function Start-HomieCapture {
         # it. Callers that only want the settled result do not need this: their 3s sleep
         # starts before the connection and is a window, not a measurement of anything
         # published inside it.
-        [int]$WaitForConnectSeconds = 0
+        [int]$WaitForConnectSeconds = 0,
+
+        # How long to keep retrying the removal below before giving up. Five seconds is
+        # what a suite run uses and the only value any caller passes; it is a parameter so
+        # that the give-up branch can be reached from a test in a fraction of a second
+        # rather than by sitting out the real budget -- the same defaulted-parameter seam
+        # Get-ConformanceCaptureSeconds took for -LifecycleStepCount.
+        [int]$ClearTimeoutSeconds = 5
     )
 
     $out = Get-SmartHomeDevEnvPath -Port $Port -Kind Snapshot
@@ -1021,7 +1065,7 @@ function Start-HomieCapture {
     # would swallow that. A surviving file is not merely untidy: the connect wait below
     # takes "the file has bytes" as proof that THIS subscriber is live, and the previous
     # capture's bytes satisfy it instantly, defeating the wait entirely.
-    $removeDeadline = (Get-Date).AddSeconds(5)
+    $removeDeadline = (Get-Date).AddSeconds($ClearTimeoutSeconds)
     while (Test-Path -Path $out) {
         Remove-Item -Path $out -Force -ErrorAction SilentlyContinue
         if (-not (Test-Path -Path $out)) {
@@ -1290,7 +1334,14 @@ function ConvertTo-HomieSnapshot {
     # meaningful: a value delivered only live must not inherit the retained-ness of the
     # value it replaced, which is exactly the bug Wait-ForRetainedValue's flag check
     # exists to catch.
-    $snapshot = @{}
+    #
+    # Keyed ordinally, not with @{}, whose comparer is OrdinalIgnoreCase. MQTT topics are
+    # case-sensitive, so homie/d/$state and homie/d/$STATE are two topics -- under the
+    # default comparer they collapsed into one entry, the later overwriting the earlier,
+    # and a lookup of either spelling found whichever had arrived last (issue #93). Every
+    # reader of a snapshot keys into it through this comparer, so this is the one place
+    # that decides it.
+    $snapshot = [hashtable]::new([StringComparer]::Ordinal)
     foreach ($line in $Lines) {
         $parsed = ConvertFrom-HomieCaptureLine -Line $line
         if ($null -eq $parsed) {
@@ -1339,8 +1390,12 @@ function Get-HomieLivePayloads {
         # chosen in Get-SmartHomeSubscriberArguments, and a copy of it here is a place
         # where a change to the format could be fixed in one reader and silently keep
         # parsing in the other.
+        #
+        # -ceq, for the reason ConvertTo-HomieSnapshot keys ordinally: a topic differing
+        # only in case is a different topic, and -eq folded its payloads into this one's
+        # sequence (issue #93).
         $parsed = ConvertFrom-HomieCaptureLine -Line $line
-        if ($null -ne $parsed -and $parsed.Topic -eq $Topic -and -not $parsed.Retained) {
+        if ($null -ne $parsed -and $parsed.Topic -ceq $Topic -and -not $parsed.Retained) {
             $payloads += $parsed.Payload
         }
     }
@@ -1422,7 +1477,10 @@ function Wait-ForRetainedValue {
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $seen = '<nothing>'
-    $snapshot = @{}
+    # Returned only by a wait that ran no round at all, and empty, so its comparer cannot
+    # change an answer. Built by ConvertTo-HomieSnapshot anyway, so that every snapshot
+    # this function hands back is keyed the same way and nobody has to re-derive that.
+    $snapshot = ConvertTo-HomieSnapshot -Lines @()
 
     while ((Get-Date) -lt $deadline) {
         if ($RepublishTopic) {
@@ -1432,13 +1490,189 @@ function Wait-ForRetainedValue {
         $snapshot = Get-HomieRetainedSnapshot -Port $Port
         if ($snapshot.Contains($Topic)) {
             $seen = $snapshot[$Topic].Payload
-            if ($seen -eq $Expected -and ((-not $RequireRetained) -or $snapshot[$Topic].Retained)) {
+            # -ceq, not -eq: a device announcing $state = READY is not one announcing
+            # 'ready', and -eq read it as one (issue #93). This needs its own operator --
+            # the snapshot's ordinal comparer decides the topic key, and this reads the
+            # payload off the entry that key found.
+            if ($seen -ceq $Expected -and ((-not $RequireRetained) -or $snapshot[$Topic].Retained)) {
                 return @{ Ok = $true; Seen = $seen; Snapshot = $snapshot }
             }
         }
     }
 
     return @{ Ok = $false; Seen = $seen; Snapshot = $snapshot }
+}
+
+function Invoke-CommandRetryRounds {
+    # The retry half of the /set round trip and the out-of-format round: publish every
+    # still-pending item, observe once, drop the items that settled, repeat -- until
+    # nothing is pending or $TimeoutSeconds have passed. Returns what is still pending
+    # and how many rounds it took.
+    #
+    # Both rounds retry for the same reason, and it is not device flakiness. A /set is
+    # non-retained, as the convention requires of a controller, so one that reaches the
+    # broker while the device is not yet subscribed is dropped outright -- there is
+    # nothing left in the store for the device to pick up when it does subscribe.
+    # Published once, that single lost message becomes the full timeout of polling for an
+    # echo that can never arrive. Measured, not hypothetical: 1 run in 8 on 2026-08-26,
+    # and it was the only run of the eight whose announce wait was satisfied by its first
+    # snapshot rather than its third -- i.e. the only one that reached the /set loop early
+    # enough to be exposed to it. The phase then spent 33.4s over 10 snapshots and
+    # reported all five properties still holding their boot values (issue #35).
+    #
+    # Retrying is the only fix available at this layer. MQTT gives a publisher no signal
+    # about who is subscribed, and $state=ready is the device's claim about itself rather
+    # than a fact about the broker's routing table -- so the host cannot wait for the
+    # condition it actually needs. On a healthy run this costs nothing: the first round
+    # settles everything and nothing is ever re-sent, and a repeated /set is idempotent,
+    # so a device that did receive the first one applies the same value again and
+    # publishes back the same reflection.
+    #
+    # What the two rounds do NOT share is when an item counts as settled, which is why
+    # that is a parameter rather than something decided here. The /set round settles a
+    # property once its expected echo is on the topic. The out-of-format round settles a
+    # case as soon as EITHER payload was seen, because a forbidden payload that did land
+    # is a real failure and retrying it away would turn a defect into a PASS. The two
+    # -IsSettled blocks are meant to read differently; that difference is the finding
+    # this helper exists to make visible rather than leave for two readers to spot.
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Items,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds,
+
+        # Publishes one item's command; called once per still-pending item per round.
+        # Anything it writes is discarded, for the reason -IsSettled sets out below.
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Publish,
+
+        # Takes what -BeforePublish returned (or $null) and returns the round's single
+        # observation -- a retained snapshot for one caller, a window's captured lines
+        # for the other. It is handed to -IsSettled unchanged, so an array is fine here.
+        #
+        # When -BeforePublish opened a window this is also what closes it, including from
+        # a finally after a publish threw -- where a throw of its own would replace that
+        # one. Stop-HomieCapture warns rather than throws for exactly that reason.
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Observe,
+
+        # ($item, $observation) -> $true when that item needs no further round. It is
+        # also where a caller records what it saw, which is why it runs per item rather
+        # than being one filter over the whole list: the blocks are evaluated here and
+        # reach their caller's hashtables up the dynamic scope chain, the same way
+        # Wait-ForSubscriberLogLine's predicates do. Deliberately not .GetNewClosure() at
+        # the call sites -- that binds a block into a new module scope with its own
+        # function table, and -Publish could then not resolve Publish-HomieCommand at all.
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$IsSettled,
+
+        # Opens the observation window before anything is published, for a caller that
+        # has to see the messages its own commands provoke; its return value is the
+        # context handed to -Observe, and must be exactly one value. Run once per round,
+        # not once per item -- one window holds every item's traffic, the same way one
+        # -Observe covers them all. The /set round passes nothing, because its snapshot
+        # is taken after the publishes and only the settled result matters there.
+        [scriptblock]$BeforePublish
+    )
+
+    $pending = @($Items)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $rounds = 0
+
+    while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        $rounds++
+
+        # Same one-value rule as -IsSettled below, and for a sharper reason: what this
+        # block returns is the handle to a window it has just opened. A block that also
+        # wrote a line to its output stream would make $context an array, -Observe's
+        # Stop-HomieCapture would fail to bind its [hashtable] parameter, and that throw
+        # would land with the window still open -- an orphaned mosquitto_sub appending to
+        # the shared capture path for the rest of the suite.
+        $context = $null
+        if ($BeforePublish) {
+            $opened = @(& $BeforePublish)
+            if ($opened.Count -ne 1) {
+                throw ("-BeforePublish must return exactly one value; it returned {0} ({1})." -f $opened.Count, ($opened -join ', '))
+            }
+            $context = $opened[0]
+        }
+
+        # From here until -Observe runs, the window is this function's to close, so the
+        # publishes go inside a try whose finally closes it if they do not all go out: the
+        # guard the lifecycle step puts around its own window, taken once here for both
+        # rounds and any later caller. A caller hands the window over as two blocks
+        # precisely because it cannot wrap them itself (issue #98).
+        #
+        # An orphaned subscriber does not so much corrupt later windows as break them.
+        # Start-HomieCapture proves the capture file removed before every window, and a
+        # live subscriber keeps it undeletable, so each later window on the port throws "a
+        # previous subscriber still holds it open". Nor does that end with the run.
+        # Measured on 2026-09-18 against Mosquitto 2.0.22, no hardware involved: a
+        # mosquitto_sub that had connected outlived its broker being stopped, and rejoined
+        # the next broker on the same port. The suite's teardown only warns about orphans,
+        # so unguarded, one throw here would fail the next run's conformance check as well.
+        #
+        # The finally closes and does nothing else. What -Observe returns there is
+        # discarded, -IsSettled never sees it, and the throw carries on out of this
+        # function: a round that did not publish everything measured nothing, and settling
+        # items against its window -- or swallowing the throw so another round could run --
+        # would turn an ERROR into a round that looks like any other.
+        #
+        # And it closes only a window this function holds:
+        #
+        #   - With no -BeforePublish, nothing is open while the publishes run. The /set
+        #     round's -Observe is a whole fresh snapshot rather than the close of one, so
+        #     taking it after a throw would spend a window on a result that is thrown away,
+        #     and could throw in its turn -- replacing the publish's error with its own.
+        #   - A throw out of -BeforePublish never reaches this try, deliberately. The block
+        #     handed nothing over, so there is nothing to give -Observe, and the one shipped
+        #     -BeforePublish, Start-HomieCapture, is written to throw only before it starts
+        #     its subscriber: its connect wait warns rather than throws, so that it never
+        #     leaves a window open without handing it back.
+        #   - The count guard above is the one gap. A window was opened there, but which of
+        #     the returned values is its handle cannot be known -- and it is a programming
+        #     error, which the first round of the first run reports.
+        $allPublished = $false
+        try {
+            foreach ($item in $pending) {
+                & $Publish $item | Out-Null
+            }
+
+            $allPublished = $true
+        }
+        finally {
+            if ($BeforePublish -and -not $allPublished) {
+                & $Observe $context | Out-Null
+            }
+        }
+
+        $observation = & $Observe $context
+        $stillPending = @()
+
+        foreach ($item in $pending) {
+            # A scriptblock returns everything written to its output stream, not just its
+            # last expression. A block that grew a call emitting a line would hand back
+            # @('chatter', $false) -- a non-empty array, and therefore true -- settling an
+            # item that was never measured. That is the false-PASS shape this file has
+            # produced twice (#34, #36), and the one the sibling polling helper had to fix
+            # in its own seam, so it is a loud programming error here rather than a run
+            # that reports success.
+            $verdict = @(& $IsSettled $item $observation)
+            if ($verdict.Count -ne 1) {
+                throw ("-IsSettled must return exactly one value; it returned {0} ({1})." -f $verdict.Count, ($verdict -join ', '))
+            }
+
+            if (-not $verdict[0]) {
+                $stillPending += $item
+            }
+        }
+
+        $pending = $stillPending
+    }
+
+    return @{ Pending = @($pending); Rounds = $rounds }
 }
 
 # ── Phase timing ──────────────────────────────────────────────────────────────
@@ -1597,10 +1831,22 @@ function Get-AttributeFailure {
         [Parameter(Mandatory = $true)]
         [string]$Topic,
 
+        # Exactly one of this and -AnyValue, and the binder enforces it: each is mandatory
+        # in a parameter set of its own, so naming both -- or neither -- is a binding error.
+        # Until issue #94 both were optional in one set. -AnyValue -Expected 'ready' bound
+        # without complaint and -AnyValue silently won, so the payload was never compared
+        # and the run reported PASS -- the shape a loosened assertion would have taken
+        # unnoticed. A call naming neither compared the payload against an empty string.
+        #
+        # [AllowEmptyString()] because Mandatory otherwise refuses '', and an empty string
+        # is a payload like any other here, not a missing argument.
+        [Parameter(Mandatory = $true, ParameterSetName = 'Exact')]
+        [AllowEmptyString()]
         [string]$Expected,
 
         # For an attribute whose value is the device's to choose ($name, $type). Presence
         # and the retain flag are still asserted; only the payload comparison is skipped.
+        [Parameter(Mandatory = $true, ParameterSetName = 'AnyValue')]
         [switch]$AnyValue
     )
 
@@ -1614,7 +1860,15 @@ function Get-AttributeFailure {
         $failures += "not retained: $Topic"
     }
 
-    if (-not $AnyValue -and $Snapshot[$Topic].Payload -ne $Expected) {
+    # Decided by the switch, not by $PSCmdlet.ParameterSetName. -AnyValue:$false binds
+    # the AnyValue set with the switch off, and a branch on the set's name would skip the
+    # comparison for it -- #94's silent skip again, by another spelling. Read this way it
+    # compares against the unbound -Expected, which is '', and reports the mismatch.
+    #
+    # -cne, not -ne, which ignores case: a $datatype of 'Integer' or a $state of 'READY'
+    # satisfied an assertion wanting the lowercase spelling v4 defines, and no controller
+    # accepts either (issue #93).
+    if (-not $AnyValue -and $Snapshot[$Topic].Payload -cne $Expected) {
         $failures += "$Topic is '$($Snapshot[$Topic].Payload)', expected '$Expected'"
     }
 
@@ -1745,8 +1999,15 @@ function Measure-HomieConformance {
     # zero-length retained payload as a delete of the retained message -- so an empty
     # $extensions is published and then provably absent from the store. That is the
     # convention and MQTT disagreeing, not the device misbehaving.
-    $liveLog = @(Get-Content -Path (Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog) -ErrorAction SilentlyContinue)
-    if (-not ($liveLog | Where-Object { $_ -like "$root/`$extensions*" })) {
+    #
+    # -clike, not -like, which ignores case: homie/D/$EXTENSIONS is a different topic
+    # (issue #93).
+    #
+    # -LiteralPath for the reason Wait-ForSubscriberLogLine gives: the log sits under the
+    # temp directory, where a '[' makes -Path a wildcard that matches nothing. That reads
+    # as an empty log, and a device that did publish $extensions fails (#71/#80).
+    $liveLog = @(Get-Content -LiteralPath (Get-SmartHomeDevEnvPath -Port $Port -Kind SubscriberLog) -ErrorAction SilentlyContinue)
+    if (-not ($liveLog | Where-Object { $_ -clike "$root/`$extensions*" })) {
         $script:conformanceFailures += "never published: $root/`$extensions"
     }
 
@@ -1776,7 +2037,7 @@ function Measure-HomieConformance {
     $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/integer-value/`$format" -Expected '0:100'
     $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/enum-value/`$format" -Expected 'low,medium,high'
     $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/color-value/`$format" -Expected 'rgb'
-    # Built by HomieClientCheck from the State enum rather than spelled out there, so
+    # Built by HomieClientCheck from HomieStates rather than spelled out there, so
     # that the vocabulary a controller is offered cannot drift from the vocabulary
     # $state is published in. This assertion is what notices if that derivation breaks.
     $script:conformanceFailures += Get-AttributeFailure -Snapshot $snapshot -Topic "$node/lifecycle/`$format" -Expected 'ready,alert,sleeping'
@@ -1818,69 +2079,50 @@ function Measure-HomieConformance {
         'float-value' = '21.50'
     }
 
-    # One snapshot per round, not one per property. Every reflection is checked
-    # against the same snapshot, so five properties cost one snapshot instead of
-    # five -- the snapshot has to be a fresh subscriber (retain flags are only set on
-    # replay), which is what makes it expensive.
-    $pending = @($commands.Keys)
+    # $lastSeen is written by the -IsSettled block below and read after the rounds are
+    # over, so it has to outlive them. The block reaches it up the dynamic scope chain.
     $lastSeen = @{}
-    $deadline = (Get-Date).AddSeconds($Settings.CommandTimeoutSeconds)
 
-    # The commands are published at the top of every round, not once before the loop.
+    # One snapshot per round, not one per property: -Observe runs once and every
+    # reflection is checked against what it returned, so five properties cost one
+    # snapshot instead of five -- the snapshot has to be a fresh subscriber (retain flags
+    # are only set on replay), which is what makes it expensive.
     #
-    # A /set is non-retained, as the convention requires of a controller, so one that
-    # reaches the broker while the device is not yet subscribed is dropped outright --
-    # there is nothing left in the store for the device to pick up when it does
-    # subscribe. Published once, that single lost message becomes the full
-    # CommandTimeoutSeconds of polling for an echo that can never arrive, and five
-    # conformance failures against a device that is working correctly.
-    #
-    # Measured, not hypothetical: 1 run in 8 on 2026-08-26, and it was the only run of
-    # the eight whose announce wait was satisfied by its first snapshot rather than its
-    # third -- i.e. the only one that reached this loop early. The /set phase then spent
-    # 33.4s over 10 snapshots and reported all five properties still holding their boot
-    # values.
-    #
-    # Retrying is the only fix available at this layer. MQTT gives a publisher no signal
-    # about who is subscribed, and $state=ready is the device's claim about itself, not
-    # about the broker's routing table -- so the host cannot wait for the condition it
-    # actually needs. On a healthy run this costs nothing: the first round succeeds and
-    # nothing is ever re-sent. Only still-pending properties are republished, and a
-    # repeated command is idempotent -- the device applies the same value again and
-    # publishes back the same reflection.
-    $rounds = 0
-    while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
-        $rounds++
-        foreach ($property in $pending) {
+    # Invoke-CommandRetryRounds owns the republishing and the reason for it (issue #35).
+    # Only still-pending properties are re-sent, so a healthy run publishes once.
+    $setRound = Invoke-CommandRetryRounds -Items @($commands.Keys) -TimeoutSeconds $Settings.CommandTimeoutSeconds `
+        -Publish {
+            param($property)
             Publish-HomieCommand -Port $Port -Topic "$node/$property/set" -Payload $commands[$property]
-        }
+        } `
+        -Observe { Get-HomieRetainedSnapshot -Port $Port } `
+        -IsSettled {
+            param($property, $snapshot)
 
-        $snapshot = Get-HomieRetainedSnapshot -Port $Port
-        $stillPending = @()
-
-        foreach ($property in $pending) {
             $expected = if ($expectedEcho.Contains($property)) { $expectedEcho[$property] } else { $commands[$property] }
             $topic = "$node/$property"
             $seen = if ($snapshot.Contains($topic)) { $snapshot[$topic].Payload } else { $null }
             $lastSeen[$property] = $seen
 
-            # Every datatype, floats included, must match exactly.
+            # Every datatype, floats included, must match exactly -- and exactly includes
+            # case. This was -eq until issue #93, so the "exact string" comparison the
+            # comment on $expectedEcho promises accepted 'TRUE' for a boolean and 'HIGH'
+            # for an enum, payloads the property's own $datatype and $format forbid.
             #
             # The retain flag is deliberately not part of this. Unlike the waits above,
             # what is being proven here is that the device applied the command -- a live
             # echo is equally good evidence of that, and requiring a replayed copy would
             # cost an extra snapshot round for nothing.
-            if ($seen -eq $expected) {
-                continue
-            }
-
-            $stillPending += $property
+            #
+            # Settled means "the echo is there". Contrast the out-of-format round below,
+            # which settles on either payload: there, seeing the forbidden one is the
+            # failure being measured and must not be retried away. Here there is nothing
+            # to preserve -- a property still holding its old value is exactly what a lost
+            # command looks like, so it is retried.
+            return ($seen -ceq $expected)
         }
 
-        $pending = $stillPending
-    }
-
-    foreach ($property in $pending) {
+    foreach ($property in $setRound.Pending) {
         $wanted = if ($expectedEcho.Contains($property)) { $expectedEcho[$property] } else { $commands[$property] }
         $script:conformanceFailures += "/set on $property did not come back on the property topic (saw '$($lastSeen[$property])', expected '$wanted')"
     }
@@ -1897,8 +2139,8 @@ function Measure-HomieConformance {
     # QoS-1 retransmission on M2Mqtt's 1s DelayOnRetry, produces the same count against a
     # device that received the command and applied it. This line is the documented tell
     # for #35, so it must not assert the cause the captures are there to establish.
-    if ($rounds -gt 1) {
-        Write-Warning ("The /set round trip needed {0} rounds: a command produced no echo within its snapshot window and was re-sent (issue #35). The snapshot captures for this phase are in {1}." -f $rounds, $LogDirectory)
+    if ($setRound.Rounds -gt 1) {
+        Write-Warning ("The /set round trip needed {0} rounds: a command produced no echo within its snapshot window and was re-sent (issue #35). The snapshot captures for this phase are in {1}." -f $setRound.Rounds, $LogDirectory)
     }
 
     # ── payloads the properties' own $datatype/$format forbid ────────────────
@@ -1942,35 +2184,38 @@ function Measure-HomieConformance {
         @{ Property = 'color-value';   Bad = 'FF8000'; Good = '255,128,0'; Echo = '255,128,0' }
     )
 
-    $pending = @($outOfFormatCases)
+    # Written by the -IsSettled block and read after the rounds are over, so it outlives
+    # them; the block reaches it up the dynamic scope chain.
     $seenPayloads = @{}
-    $deadline = (Get-Date).AddSeconds($Settings.CommandTimeoutSeconds)
 
-    while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
-        $capture = Start-HomieCapture -Port $Port -WaitForConnectSeconds 5
-
-        foreach ($case in $pending) {
+    # The window is opened by -BeforePublish rather than around the observation, because
+    # both payloads have to go past *inside* it: a window opened after the commands would
+    # miss the very ordering this step measures.
+    Invoke-CommandRetryRounds -Items $outOfFormatCases -TimeoutSeconds $Settings.CommandTimeoutSeconds `
+        -BeforePublish { Start-HomieCapture -Port $Port -WaitForConnectSeconds 5 } `
+        -Publish {
+            param($case)
             Publish-HomieCommand -Port $Port -Topic "$node/$($case.Property)/set" -Payload $case.Bad
             Publish-HomieCommand -Port $Port -Topic "$node/$($case.Property)/set" -Payload $case.Good
-        }
+        } `
+        -Observe {
+            param($capture)
+            Stop-HomieCapture -Capture $capture
+        } `
+        -IsSettled {
+            param($case, $lines)
 
-        $lines = Stop-HomieCapture -Capture $capture
-        $stillPending = @()
-
-        foreach ($case in $pending) {
             $payloads = Get-HomieLivePayloads -Lines $lines -Topic "$node/$($case.Property)"
             $seenPayloads[$case.Property] = $payloads
 
-            # Retried only while NEITHER payload was seen, i.e. while nothing has been
-            # measured. A forbidden payload that did land is a real failure and must not
-            # be retried away.
-            if ([array]::IndexOf($payloads, $case.Echo) -lt 0 -and [array]::IndexOf($payloads, $case.Bad) -lt 0) {
-                $stillPending += $case
-            }
-        }
-
-        $pending = $stillPending
-    }
+            # Settled as soon as EITHER payload was seen, i.e. as soon as anything was
+            # measured -- which is where this round's retry semantics differ from the
+            # /set round's above, and the reason the predicate is a parameter. A
+            # forbidden payload that did land is a real failure, and a round that retried
+            # it away would replace a recorded defect with a clean window and report PASS.
+            # Only "neither payload arrived" is a lost command worth re-sending.
+            return ([array]::IndexOf($payloads, $case.Echo) -ge 0 -or [array]::IndexOf($payloads, $case.Bad) -ge 0)
+        } | Out-Null
 
     foreach ($case in $outOfFormatCases) {
         $payloads = if ($seenPayloads.Contains($case.Property)) { $seenPayloads[$case.Property] } else { @() }
@@ -2112,8 +2357,12 @@ function Measure-HomieConformance {
                 # moving $state somewhere else entirely (a CanChangeState regression
                 # leaving it at 'init' or 'lost'), and that is a defect this step used to
                 # catch before it read the wire.
+                #
+                # -cne, not -ne: 'ALERT' is not the value $state already holds but a
+                # payload outside v4's vocabulary, and -ne tolerated it as the value
+                # (issue #93).
                 $statePayloads = Get-HomieLivePayloads -Lines $lines -Topic "$root/`$state"
-                $moved = @($statePayloads | Where-Object { $_ -ne $step.Expect })
+                $moved = @($statePayloads | Where-Object { $_ -cne $step.Expect })
 
                 if ([array]::IndexOf($moved, $step.Command) -ge 0) {
                     $script:conformanceFailures += "forbidden $($step.Expect) -> $($step.Command) transition was applied (`$state went to '$($step.Command)'; saw: $($statePayloads -join ', '))"
@@ -2160,12 +2409,18 @@ function Measure-HomieConformance {
             elseif ($corrected -lt 0) {
                 $script:conformanceFailures += "device left the reflected '$($step.Command)' on $nodeId/lifecycle and never published '$($step.Expect)' over it (saw: $($lifecyclePayloads -join ', '))"
             }
-            elseif ($lifecycleAfter -eq $step.Command) {
+            elseif ($lifecycleAfter -ceq $step.Command) {
                 # The device corrected, and the topic still settled back on the value it
                 # corrected AWAY from. That is the duplicate #36 item 1 describes: a DUP of
                 # the reflection re-processed by the broker after the correction. The store
                 # disagrees with the device, and the device is not what is wrong -- so it is
                 # reported and not counted.
+                #
+                # -ceq, because only an exact repeat can be that duplicate: a retransmission
+                # repeats the reflection's bytes and cannot change their case. With -eq a
+                # device that published 'SLEEPING' over its own correction was excused here
+                # as the transport's fault; now it falls through to the counted branch below
+                # (issue #93).
                 #
                 # Not swallowed, because it is a real contradiction in the retained store
                 # while it lasts: a controller connecting before the next lifecycle publish
@@ -2177,7 +2432,7 @@ function Measure-HomieConformance {
                 # evidence #35 was unable to go back and read.
                 Add-ConformanceWarning ("refused '{0}': {1}/lifecycle settled back on '{2}' beside `$state='{3}' even though the correction to '{4}' is on the wire -- a retransmitted duplicate re-processed by the broker, not a device defect (saw: {5})" -f $step.Command, $nodeId, $lifecycleAfter, $stateAfter, $step.Expect, ($lifecyclePayloads -join ', '))
             }
-            elseif ($lifecycleAfter -ne $step.Expect) {
+            elseif ($lifecycleAfter -cne $step.Expect) {
                 # Settled on something that is neither the corrected value nor the value it
                 # corrected away from. A retransmission can only ever repeat a payload the
                 # device already published, and everything it published before this window

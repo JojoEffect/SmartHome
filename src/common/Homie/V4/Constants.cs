@@ -21,9 +21,11 @@ namespace SmartHome.Homie.V4
         public const string RetainedAttributeTopicId = "$retained";
         public const string UnitAttributeTopicId = "$unit";
 
-        // The topic-id rule lives in NamedHomieEntityBase.ValidateTopicId, which is what
-        // actually runs. A regex sketch used to sit here and disagreed with it -- it
-        // allowed '_', required at least two characters, and forbade a trailing '_' --
-        // leaving two statements of the rule and no way to tell which was intended.
+        // The id rule lives in the model, in NamedEntityBase.ValidateId, which is what
+        // actually runs -- an id is refused where it was written rather than on this
+        // wire, and the model's rule is already at least as strict as v4's. A regex
+        // sketch used to sit here and disagreed with the code -- it allowed '_',
+        // required at least two characters, and forbade a trailing '_' -- leaving two
+        // statements of the rule and no way to tell which was intended.
     }
 }

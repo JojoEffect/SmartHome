@@ -19,64 +19,23 @@
   </PropertyGroup>
   <Import Project="$(NanoFrameworkProjectSystemPath)NFProjectSystem.props" Condition="Exists('$(NanoFrameworkProjectSystemPath)NFProjectSystem.props')" />
   <ItemGroup>
-    <Compile Include="V4\Extensions\DataTypeExtensions.cs" />
-    <Compile Include="V4\Extensions\DeviceExtensions.cs" />
-    <Compile Include="V4\Extensions\StateExtensions.cs" />
-    <Compile Include="V4\EventArgs\DeviceStateChangeEventArgs.cs" />
-    <Compile Include="V4\EventArgs\HomieCommandEventArgs.cs" />
-    <Compile Include="V4\Extensions\UnitExtensions.cs" />
-    <Compile Include="V4\HomieClient.cs" />
-    <Compile Include="V4\IHomieClient.cs" />
-    <Compile Include="V4\Settings\HomieClientSettings.cs" />
-    <Compile Include="V4\Builder\HomieBooleanPropertyBuilder.cs" />
-    <Compile Include="V4\Builder\HomieDeviceBuilder.cs" />
-    <Compile Include="V4\Builder\HomieEnumPropertyBuilder.cs" />
-    <Compile Include="V4\Builder\HomieFloatPropertyBuilder.cs" />
-    <Compile Include="V4\Builder\HomieIntegerPropertyBuilder.cs" />
-    <Compile Include="V4\Builder\HomieNodeBuilder.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
-    <Compile Include="V4\Attributes\AttributeBase.cs" />
-    <Compile Include="V4\Attributes\BoolAttributeBase.cs" />
-    <Compile Include="V4\Attributes\DataTypeAttribute.cs" />
-    <Compile Include="V4\Attributes\ExtensionsAttribute.cs" />
-    <Compile Include="V4\Attributes\FormatAttribute.cs" />
-    <Compile Include="V4\Attributes\ImplementationAttribute.cs" />
-    <Compile Include="V4\Attributes\PropertiesAttribute.cs" />
-    <Compile Include="V4\Attributes\RetainedAttribute.cs" />
-    <Compile Include="V4\Attributes\SettableAttribute.cs" />
-    <Compile Include="V4\Builder\HomieColorPropertyBuilder.cs" />
-    <Compile Include="V4\Builder\HomiePropertyBuilderBase.cs" />
-    <Compile Include="V4\Builder\HomieStringPropertyBuilder.cs" />
-    <Compile Include="V4\Enums\State.cs" />
-    <Compile Include="V4\Attributes\StateAttribute.cs" />
-    <Compile Include="V4\Attributes\StringArrayAttributeBase.cs" />
-    <Compile Include="V4\Attributes\NameAttribute.cs" />
-    <Compile Include="V4\Attributes\StringAttributeBase.cs" />
-    <Compile Include="V4\Attributes\TypeAttribute.cs" />
-    <Compile Include="V4\Attributes\UnitAttribute.cs" />
     <Compile Include="V4\Constants.cs" />
-    <Compile Include="V4\Attributes\NodesAttribute.cs" />
-    <Compile Include="V4\Enums\DataType.cs" />
-    <Compile Include="V4\Device.cs" />
-    <Compile Include="V4\Attributes\HomieAttribute.cs" />
-    <Compile Include="V4\EventArgs\PropertyUpdateEventArgs.cs" />
-    <Compile Include="V4\HomieEntityBase.cs" />
+    <Compile Include="V4\HomieClient.cs" />
     <Compile Include="V4\HomiePublishExtensions.cs" />
-    <Compile Include="V4\IHomieEntity.cs" />
-    <Compile Include="V4\NamedHomieEntityBase.cs" />
-    <Compile Include="V4\Node.cs" />
-    <Compile Include="V4\Properties\BooleanProperty.cs" />
-    <Compile Include="V4\Properties\ColorProperty.cs" />
-    <Compile Include="V4\Properties\EnumProperty.cs" />
-    <Compile Include="V4\Properties\FloatProperty.cs" />
-    <Compile Include="V4\Properties\IntegerProperty.cs" />
-    <Compile Include="V4\Properties\PropertyBase.cs" />
-    <Compile Include="V4\Enums\Unit.cs" />
-    <Compile Include="V4\Properties\StringProperty.cs" />
+    <Compile Include="V4\HomieStates.cs" />
+    <Compile Include="V4\HomieTopics.cs" />
+    <Compile Include="V4\IHomieClient.cs" />
+    <Compile Include="V4\Description\HomieAttributeMessage.cs" />
+    <Compile Include="V4\Description\HomieDescription.cs" />
+    <Compile Include="V4\Description\HomieNodeDescription.cs" />
+    <Compile Include="V4\Description\HomiePropertyDescription.cs" />
+    <Compile Include="V4\Extensions\DeviceExtensions.cs" />
+    <Compile Include="V4\Settings\HomieClientSettings.cs" />
+    <Compile Include="V4\Settings\HomieDeviceSettings.cs" />
     <Compile Include="V4\Settings\HomieLastWillSettings.cs" />
     <Compile Include="V4\Settings\HomiePublishSettings.cs" />
     <Compile Include="V4\Settings\PublishSettings.cs" />
-    <Compile Include="V4\TopicIds.cs" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="mscorlib">
@@ -119,6 +78,8 @@
   <ItemGroup>
     <ProjectReference Include="..\Text\Text.nfproj" />
     <ProjectReference Include="..\Mqtt\Mqtt.nfproj" />
+    <ProjectReference Include="..\DeviceModel\DeviceModel.nfproj" />
+    <ProjectReference Include="..\Protocol\Protocol.nfproj" />
   </ItemGroup>
   <Import Project="$(NanoFrameworkProjectSystemPath)NFProjectSystem.CSharp.targets" Condition="Exists('$(NanoFrameworkProjectSystemPath)NFProjectSystem.CSharp.targets')" />
   <ProjectExtensions>

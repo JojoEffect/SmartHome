@@ -1,3 +1,5 @@
+using nanoFramework.Logging;
+using nanoFramework.Logging.Debug;
 using System;
 using System.Diagnostics;
 using System.Threading;
@@ -15,6 +17,12 @@ namespace SmartHome.IntegrationTests.WifiCheck
     {
         public static void Main()
         {
+            // NetworkHelper logs through ILogger, and the default factory is null, whose
+            // logger drops everything. Without this the capture would carry the [ITEST]
+            // verdict and none of the reasoning behind it -- which on the one test whose
+            // whole subject is "did WiFi connect" is most of the value.
+            LogDispatcher.LoggerFactory = new DebugLoggerFactory();
+
             try
             {
                 NetworkHelper.ConnectToConfiguredNetwork();

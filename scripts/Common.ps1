@@ -170,11 +170,22 @@ function Get-SmartHomePackagesConfig {
     # contain '\.claude\worktrees\', and a bare substring test would exclude every file
     # they are supposed to see.
     #
-    # Always an array, so a caller can read .Count even when nothing matched. The
-    # leading comma in the return is what makes that true and is not a typo: a plain
-    # `return @(...)` is unrolled on the way out, so no match reaches the caller as
-    # $null (and one match as a bare FileInfo), and $null.Count throws under
-    # Set-StrictMode. Wrapping the array in a one-element array survives the unroll.
+    # Streams, the way Get-ChildItem does: one FileInfo at a time, and nothing at all when
+    # nothing matched. So it pipes straight into a filter, and a caller that keeps the
+    # result collects it with @(...), exactly as it would a cmdlet's. Assigned bare, no
+    # match arrives as $null and one as a bare FileInfo, and .Count on either throws under
+    # Set-StrictMode -Version Latest: a forgotten @() fails loudly, on exactly the results
+    # it would otherwise get wrong.
+    #
+    # Until issue #88 this returned ,@(...). The leading comma kept a bare assignment's
+    # .Count readable by emitting the whole array as ONE object, and that one object is
+    # what every other spelling then received. Piped into `Where-Object { $_.Id -eq 'x' }`,
+    # $_ was the array, $_.Id member-enumerated every record, and -eq filtered that list
+    # rather than comparing: truthy whenever any record matched, so everything passed and
+    # it read as a filter that worked -- in PR #87, a two-versions guard that counted 1 and
+    # resolved an adapter it was there to refuse. Wrapped in @(...), the idiom meant to
+    # make a result safe to count, it counted that one object: 1, whatever came back. Both
+    # silent. The two helpers below stream for the same reason.
     #
     # A caller that would rather skip a subtree the enumerator cannot read than abort
     # on it passes -ErrorAction SilentlyContinue, which this advanced function
@@ -196,11 +207,11 @@ function Get-SmartHomePackagesConfig {
     # a sibling '.claude\worktrees-something' is a different folder and stays in.
     $worktreesDir = (Join-Path $RepoRoot '.claude\worktrees') + [System.IO.Path]::DirectorySeparatorChar
 
-    return ,@(Get-ChildItem -LiteralPath $RepoRoot -Filter 'packages.config' -Recurse -File |
+    Get-ChildItem -LiteralPath $RepoRoot -Filter 'packages.config' -Recurse -File |
         Where-Object {
             $_.FullName -notmatch '\\(bin|obj)\\' -and
             -not $_.FullName.StartsWith($worktreesDir, [StringComparison]::OrdinalIgnoreCase)
-        })
+        }
 }
 
 function Get-SmartHomeReferencedPackage {
@@ -240,15 +251,14 @@ function Get-SmartHomeReferencedPackage {
     # over the main checkout costs ~2.4s (it covers packages\ and every linked worktree's
     # source tree). Omit it and this globs for itself, which is what the restore does.
     #
-    # Always an array, for the reason spelled out on Get-SmartHomePackagesConfig, and
-    # -ErrorAction reaches that function's enumeration through the scope chain.
+    # Omitting it is what asks for the glob -- asked of $PSBoundParameters, not of the
+    # value. Whatever is handed over is the list, $null included: that is what an empty
+    # glob holds once assigned without @(), and reading it as "go and look" would turn
+    # "there were none" into a second walk nobody asked for.
     #
-    # Assign the result before piping it. The leading comma that makes .Count readable on
-    # an empty result also survives into a pipeline: `Get-SmartHomeReferencedPackage ... |
-    # Where-Object { $_.Id -eq 'x' }` hands the scriptblock the whole array as ONE item,
-    # where $_.Id is member enumeration over every record -- truthy whenever any of them
-    # matches, so the filter passes everything through and reads as if it had worked. Both
-    # callers assign first; the test file has a case for the empty-result half of this.
+    # Streams its records, for the reason spelled out on Get-SmartHomePackagesConfig: pipe
+    # it straight into a filter, or collect it with @(...) to keep it. -ErrorAction
+    # reaches that function's enumeration through the scope chain.
     param(
         [Parameter(Mandatory = $true)]
         [string]$RepoRoot,
@@ -257,8 +267,8 @@ function Get-SmartHomeReferencedPackage {
         $Config
     )
 
-    if ($null -eq $Config) {
-        $Config = Get-SmartHomePackagesConfig -RepoRoot $RepoRoot
+    if (-not $PSBoundParameters.ContainsKey('Config')) {
+        $Config = @(Get-SmartHomePackagesConfig -RepoRoot $RepoRoot)
     }
 
     $packagesDir = Join-Path $RepoRoot 'packages'
@@ -290,7 +300,9 @@ function Get-SmartHomeReferencedPackage {
         }
     }
 
-    return ,@($records)
+    # The records, not the list: PowerShell enumerates a returned collection, so this
+    # streams them one at a time.
+    return $records
 }
 
 function Get-SmartHomeUnreferencedPackageDir {
@@ -317,6 +329,10 @@ function Get-SmartHomeUnreferencedPackageDir {
     # complement would call such a folder stale and -Prune would delete a restored
     # package. (The all-lowercase spelling, nanoframework.m2mqtt, is the *cache* layout
     # under ~\.nuget\packages\<id>\ -- not something seen in packages\.)
+    #
+    # Streams its folders, for the reason spelled out on Get-SmartHomePackagesConfig --
+    # which is also why an absent packages\ is a bare return: it emits the same nothing an
+    # empty one does.
     param(
         [Parameter(Mandatory = $true)]
         [string]$PackagesDir,
@@ -327,14 +343,14 @@ function Get-SmartHomeUnreferencedPackageDir {
     )
 
     if (-not (Test-Path -LiteralPath $PackagesDir)) {
-        return ,@()
+        return
     }
 
     $referencedNames = @{}
     foreach ($package in $ReferencedPackage) { $referencedNames[$package.Name] = $true }
 
-    return ,@(Get-ChildItem -LiteralPath $PackagesDir -Directory |
-        Where-Object { -not $referencedNames.ContainsKey($_.Name) })
+    Get-ChildItem -LiteralPath $PackagesDir -Directory |
+        Where-Object { -not $referencedNames.ContainsKey($_.Name) }
 }
 
 function Get-NanoFrameworkTestAdapterDir {
@@ -359,7 +375,9 @@ function Get-NanoFrameworkTestAdapterDir {
     # itself, and a *preflight* calling it cannot suppress an enumeration error inside
     # that glob without also suppressing errors it wants. Test-Setup.ps1 passes the list
     # it already read under -ErrorAction SilentlyContinue, so an unreadable subtree costs
-    # that run one row rather than the whole table.
+    # that run one row rather than the whole table. Omitted, not empty, is what asks for
+    # the glob, as with -Config there: a handed-over $null is a list with nothing in it,
+    # not a request for the very glob this parameter exists to avoid.
     param(
         [Parameter(Mandatory = $true)]
         [string]$RepoRoot,
@@ -368,13 +386,16 @@ function Get-NanoFrameworkTestAdapterDir {
         $ReferencedPackage
     )
 
-    if ($null -eq $ReferencedPackage) {
-        $ReferencedPackage = Get-SmartHomeReferencedPackage -RepoRoot $RepoRoot
+    if (-not $PSBoundParameters.ContainsKey('ReferencedPackage')) {
+        $ReferencedPackage = @(Get-SmartHomeReferencedPackage -RepoRoot $RepoRoot)
     }
 
-    # Filtered from a variable, never piped straight out of the function -- see the note
-    # on Get-SmartHomeReferencedPackage for what piping it does to a Where-Object.
-    $testFramework = @($ReferencedPackage | Where-Object { $_.Id -eq 'nanoFramework.TestFramework' })
+    # A foreach statement rather than Where-Object, because the list may be that handed-over
+    # $null: foreach reads it as nothing, where piping it hands Where-Object one $null item
+    # whose .Id throws under Set-StrictMode.
+    $testFramework = @(foreach ($package in $ReferencedPackage) {
+        if ($package.Id -eq 'nanoFramework.TestFramework') { $package }
+    })
 
     if ($testFramework.Count -eq 0) {
         Write-Warning "No packages.config in $RepoRoot references nanoFramework.TestFramework, so there is no adapter version to resolve."

@@ -1,7 +1,10 @@
+using SmartHome.DeviceConfiguration;
+using SmartHome.DeviceModel;
+using SmartHome.DeviceModel.Builder;
+using SmartHome.DeviceModel.Enums;
+using SmartHome.DeviceModel.Properties;
 using SmartHome.Homie.V4;
-using SmartHome.Homie.V4.Enums;
-using SmartHome.Homie.V4.Builder;
-using SmartHome.Homie.V4.Properties;
+using SmartHome.Protocol;
 using Microsoft.Extensions.Logging;
 using nanoFramework.Logging;
 using nanoFramework.Logging.Debug;
@@ -19,17 +22,22 @@ namespace SmartHome.Devices.RoomSensor
 {
     public class Program
     {
-        private const int I2cBusId = 1;
-        private const int I2cDataPin = 21;
-        private const int I2cClockPin = 22;
-        private const int MeasurementIntervalMs = 5000;
-
+        // Where this device's installation data is compiled in and where it is not: the
+        // broker address below is a fallback, used only when config\room-sensor.json
+        // could not be read. The live value comes from that file.
+        //
         // Named rather than inline at the call site, so Run-IntegrationTests.ps1's
         // stale-constant pre-flight can find it: that check greps for exactly this
-        // shape, and an inline literal was invisible to it. This address drifts from
-        // SMARTHOME_MQTT_BROKER in local.env.ps1 and is the usual reason a healthy
-        // device "can't reach the broker".
-        private const string BrokerHost = "192.168.1.238";
+        // shape, and an inline literal was invisible to it. That check now guards the
+        // fallback rather than the address the device actually uses -- the versioned
+        // configuration file needs the same check, which is issue #133.
+        private const string FallbackBrokerHost = "192.168.1.238";
+
+        // What is wrong, as an id: the sensor. Alerts are keyed, so raising and clearing
+        // both name the condition, and a second condition on this device gets its own id
+        // rather than overwriting this one. (The configuration failure is the second one,
+        // and its id is the shared ConfigurationResult.AlertId.)
+        private const string SensorAlertId = "sensor";
 
         private static FloatProperty _temperatureProperty;
         private static FloatProperty _humidityProperty;
@@ -45,15 +53,46 @@ namespace SmartHome.Devices.RoomSensor
 
                 _logger = LogDispatcher.LoggerFactory.CreateLogger("MainLogger");
 
+                // Before the network, because nothing about reading a local file needs
+                // one and a device whose configuration is missing should find that out in
+                // milliseconds rather than after WiFi's 60-second connect timeout. It has
+                // to be before the protocol client is constructed in any case: the nodes
+                // it announces are decided here.
+                var configuration = new ConfigurationStore().Load(typeof(RoomSensorConfiguration));
+                var settings = (RoomSensorConfiguration)configuration.Value;
+
                 NetworkHelper.ConnectToConfiguredNetwork();
 
-                var device = SetupHomieDevice();
-                var mqttClient = SetupMqttClient();
-                IHomieClient homieClient = new HomieClient(device, mqttClient);
+                var device = SetupDevice(settings);
+                var mqttClient = SetupMqttClient(settings);
 
-                ConnectWithRetry(homieClient);
+                // The one line that couples this app to a convention. Everything above
+                // describes the device and everything below talks to IDeviceProtocol, so
+                // speaking a different convention is a different adapter constructed
+                // here and nothing else -- this app's own log lines and exceptions say
+                // "the device", because they are about whatever was constructed here.
+                IDeviceProtocol protocol = new HomieClient(device, mqttClient);
 
-                using var sensor = SetupSensor();
+                // Before the connect, so the announcement itself already carries the
+                // degraded state. Raising it afterwards would publish a healthy state
+                // first and correct it a moment later, which every controller would see.
+                configuration.ReportTo(protocol);
+
+                ConnectWithRetry(protocol);
+
+                if (settings == null)
+                {
+                    // Connected, announced, alerting, and holding there. There is nothing
+                    // honest left to do: the I2C pins are in the file that could not be
+                    // read, so the sensor cannot be opened, and guessing at them is
+                    // exactly the wrong-but-plausible behaviour this device is built to
+                    // refuse. Someone deploys the configuration and resets the device.
+                    _logger.LogError("No usable configuration; staying connected and alerting, with no sensor node announced.");
+                    Thread.Sleep(Timeout.Infinite);
+                    return;
+                }
+
+                using var sensor = SetupSensor(settings.Sensor);
 
                 while (true)
                 {
@@ -64,42 +103,70 @@ namespace SmartHome.Devices.RoomSensor
                     // will fired on a device that was fine.
                     //
                     // Only unexpected faults land here. An invalid-but-readable sensor
-                    // result is not one: PublishReading drives alert/ready for that, and
-                    // a dropped link is the reconnect layer's job.
+                    // result is not one: PublishReading raises and clears the alert for
+                    // that, and a dropped link is the reconnect layer's job.
                     try
                     {
-                        PublishReading(sensor, homieClient);
+                        PublishReading(sensor, device, protocol);
                     }
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Failed to publish a reading; continuing with the next measurement.");
                     }
 
-                    Thread.Sleep(MeasurementIntervalMs);
+                    Thread.Sleep(settings.Sensor.MeasurementIntervalMs);
                 }
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Exception in main.");
                 throw;
-            }        
+            }
         }
 
-        public static Device SetupHomieDevice()
+        /// <summary>
+        /// What the device is, in terms every adapter reads, with the sensor node only
+        /// when there is a configuration that says how it is wired.
+        /// </summary>
+        /// <remarks>
+        /// Nothing here says how any of it goes out. The quantity kinds are part of that
+        /// description and not decoration: a unit does not say what a number means, since
+        /// % is humidity here and a battery charge elsewhere. The v4 adapter has nowhere
+        /// to carry the distinction and ignores it, which is why declaring it costs
+        /// nothing and is worth doing -- a convention with a semantic category of its own
+        /// reads it off the model, rather than this app growing a second, adapter-shaped
+        /// description.
+        ///
+        /// A device with no nodes at all is the deliberate shape of the degraded case,
+        /// not an oversight. Announcing the node anyway would advertise three properties
+        /// that will never carry a reading, and announcing it with made-up pins would be
+        /// worse still. What a controller sees instead is a device that is present,
+        /// alerting, and claiming nothing.
+        /// </remarks>
+        public static Device SetupDevice(RoomSensorConfiguration configuration)
         {
-            var builder = new HomieDeviceBuilder(Constants.DeviceTopicId, Constants.DeviceName);
+            if (configuration == null)
+            {
+                return new DeviceBuilder(Constants.FallbackDeviceTopicId, Constants.FallbackDeviceName).BuildDevice();
+            }
+
+            var builder = new DeviceBuilder(configuration.DeviceId, configuration.DeviceName);
             var device = builder
                     .AddNode(Constants.NodeSensorTopicId, Constants.NodeSensorName, Constants.NodeSensorType)
                         .AddFloatProperty(Constants.PropertyTemperatureTopicId, Constants.PropertyTemperatureName, 0.0)
-                            .WithUnit(Unit.DegreeCelsius)
+                            .WithUnit(Units.DegreeCelsius)
+                            .WithQuantityKind(QuantityKind.Temperature)
                         .BuildProperty(out _temperatureProperty)
                         .AddFloatProperty(Constants.PropertyHumidityTopicId, Constants.PropertyHumidityName, 0.0)
-                            .WithUnit(Unit.Percent)
+                            .WithUnit(Units.Percent)
+                            .WithQuantityKind(QuantityKind.Humidity)
                         .BuildProperty(out _humidityProperty)
-                        // Pascals, not hectopascals: Pa is the unit Homie's recommended list
-                        // carries, and $unit should say what the value actually is.
+                        // Pascals, not hectopascals: Pa is the unit the recommended list
+                        // these constants come from carries, and a unit should say what
+                        // the value actually is.
                         .AddFloatProperty(Constants.PropertyPressureTopicId, Constants.PropertyPressureName, 0.0)
-                            .WithUnit(Unit.Pascal)
+                            .WithUnit(Units.Pascal)
+                            .WithQuantityKind(QuantityKind.Pressure)
                         .BuildProperty(out _pressureProperty)
                     .BuildNode()
                 .BuildDevice();
@@ -107,16 +174,22 @@ namespace SmartHome.Devices.RoomSensor
             return device;
         }
 
-        public static IReconnectingMqttClient SetupMqttClient() => new ReconnectingMqttClient(BrokerHost);
+        /// <remarks>
+        /// The fallback address is used only when there is no configuration to read one
+        /// from. It exists so the device can still reach a broker to say so: an alert
+        /// nobody can see is the same as no alert.
+        /// </remarks>
+        public static IReconnectingMqttClient SetupMqttClient(RoomSensorConfiguration configuration)
+            => new ReconnectingMqttClient(configuration == null ? FallbackBrokerHost : configuration.BrokerHost);
 
-        private static Bme280 SetupSensor()
+        private static Bme280 SetupSensor(SensorConfiguration sensor)
         {
             // Same wiring as Bmp280Check, which is the isolated proof that this sensor
             // reads correctly over I2C on this board.
-            Configuration.SetPinFunction(I2cDataPin, DeviceFunction.I2C1_DATA);
-            Configuration.SetPinFunction(I2cClockPin, DeviceFunction.I2C1_CLOCK);
+            Configuration.SetPinFunction(sensor.DataPin, DeviceFunction.I2C1_DATA);
+            Configuration.SetPinFunction(sensor.ClockPin, DeviceFunction.I2C1_CLOCK);
 
-            var settings = new I2cConnectionSettings(I2cBusId, Bme280.SecondaryI2cAddress);
+            var settings = new I2cConnectionSettings(sensor.I2cBusId, Bme280.SecondaryI2cAddress);
             var device = I2cDevice.Create(settings);
 
             return new Bme280(device)
@@ -128,29 +201,41 @@ namespace SmartHome.Devices.RoomSensor
             };
         }
 
-        private static void PublishReading(Bme280 sensor, IHomieClient homieClient)
+        private static void PublishReading(Bme280 sensor, Device device, IDeviceProtocol protocol)
         {
             var reading = sensor.Read();
 
             if (!reading.TemperatureIsValid || !reading.PressureIsValid || !reading.HumidityIsValid)
             {
-                // A sensor that stops answering is exactly what Homie's 'alert' state is
-                // for: "send this message when something is wrong". Publishing the last
-                // good value forever would be worse than saying nothing.
-                _logger.LogError($"Invalid BMP280 reading (temperature: {reading.TemperatureIsValid}, pressure: {reading.PressureIsValid}, humidity: {reading.HumidityIsValid}).");
+                // A sensor that stops answering is exactly what an alert is for: saying
+                // that something is wrong rather than publishing the last good value
+                // forever, which would be worse than saying nothing. The Homie v4 adapter
+                // turns any raised alert into $state = alert; an adapter for a convention
+                // with room for the detail publishes the id and the message too.
+                //
+                // The same text to the log and to the alert, deliberately: an alert whose
+                // message differs from the line beside it in the device log is two
+                // accounts of one fault. Re-raising it every five seconds costs nothing --
+                // the model drops a raise that repeats the message it already holds, and
+                // a message that does change (a second channel failing) still leaves the
+                // wire quiet, because the v4 token was already 'alert'.
+                var diagnostic = $"Invalid BMP280 reading (temperature: {reading.TemperatureIsValid}, pressure: {reading.PressureIsValid}, humidity: {reading.HumidityIsValid}).";
 
-                if (homieClient.State != State.Alert)
-                {
-                    homieClient.Alert();
-                }
+                _logger.LogError(diagnostic);
+                protocol.RaiseAlert(SensorAlertId, diagnostic);
 
                 return;
             }
 
-            if (homieClient.State == State.Alert)
+            // HasAlerts rather than the lifecycle state: an alerting device is still Ready
+            // as far as the model is concerned -- it is running and it is publishing --
+            // and only clearing the alert takes the wire's degraded state back. A device
+            // that reached this loop has no configuration alert raised, so the sensor's is
+            // the only one there can be.
+            if (device.HasAlerts)
             {
                 _logger.LogInformation("BMP280 reading valid again.");
-                homieClient.Ready();
+                protocol.ClearAlert(SensorAlertId);
             }
 
             _temperatureProperty.Update(reading.Temperature.DegreesCelsius);
@@ -158,22 +243,23 @@ namespace SmartHome.Devices.RoomSensor
             _pressureProperty.Update(reading.Pressure.Pascals);
         }
 
-        // The Homie client owns the MQTT session on purpose: it is the only thing that
-        // can declare the Homie last will (homie/<device-id>/$state = lost), and a will
-        // can only be set in CONNECT. Connecting the transport here first would produce
-        // a session without it -- which is what this app did until 2026-08-21, leaving
-        // the device stuck at 'ready' forever whenever it dropped off abruptly.
+        // The protocol adapter owns the MQTT session on purpose: it is the only thing
+        // that can declare the last will (for Homie v4, homie/<device-id>/$state = lost),
+        // and a will can only be set in CONNECT. Connecting the transport here first
+        // would produce a session without it -- which is what this app did until
+        // 2026-08-21, leaving the device stuck at 'ready' forever whenever it dropped off
+        // abruptly.
         //
-        // The retry itself lives on IHomieClient now: every Homie device needs it, and
-        // three apps had grown their own copy of the same loop.
-        private static void ConnectWithRetry(IHomieClient homieClient)
+        // The retry itself lives on IDeviceProtocol now: every device that connects needs
+        // it, and three apps had grown their own copy of the same loop.
+        private static void ConnectWithRetry(IDeviceProtocol protocol)
         {
-            if (!homieClient.ConnectWithRetry())
+            if (!protocol.ConnectWithRetry())
             {
-                throw new Exception("Could not connect the Homie device.");
+                throw new Exception("Could not connect the device.");
             }
 
-            _logger.LogInformation("Homie device connected.");
+            _logger.LogInformation("Device connected.");
         }
     }
 }

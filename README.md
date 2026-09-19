@@ -40,7 +40,7 @@ SmartHome is a .NET **nanoFramework** solution for ESP32-based home automation d
 - `src\devices\` — real device applications (RoomSensor, IrrigationControl, OvenControl)
 - `src\integrationTests\` — on-device end-to-end checks, one external dependency each
 - `src\tests\` — the unit test suite (`SmartHome.UnitTests`)
-- `src\common\` — shared libraries (`SmartHome.Homie`, `SmartHome.Networking`, `SmartHome.Text`)
+- `src\common\` — shared libraries (see the repository-layout table in [`CLAUDE.md`](CLAUDE.md))
 - `tools\` — host-side tooling (`DeviceDebugMonitor`)
 
 See [`CLAUDE.md`](CLAUDE.md) for the full repo-specific workflow, the companion nanoFramework repositories, and Skills Discovery / MCP integration guidance.

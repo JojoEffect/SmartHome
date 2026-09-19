@@ -244,7 +244,7 @@ $missingPackages = New-Object System.Collections.Generic.List[string]
 #
 # -ErrorAction SilentlyContinue because a preflight reports rather than aborts: a
 # subtree the enumerator cannot read costs this one row, not the whole run.
-$configs = Get-SmartHomePackagesConfig -RepoRoot $repoRoot -ErrorAction SilentlyContinue
+$configs = @(Get-SmartHomePackagesConfig -RepoRoot $repoRoot -ErrorAction SilentlyContinue)
 
 # The parse itself moved into Get-SmartHomeReferencedPackage, which the restore now reads
 # too: the two used to walk these files separately and differ in the XML access, and that
@@ -255,7 +255,7 @@ $configs = Get-SmartHomePackagesConfig -RepoRoot $repoRoot -ErrorAction Silently
 # -Config hands over the glob this script already paid for, rather than making the helper
 # repeat it: one recursive pass over the main checkout is ~2.4s, and this preflight would
 # otherwise make three (here, and again inside the adapter resolver below).
-$referenced = Get-SmartHomeReferencedPackage -RepoRoot $repoRoot -Config $configs -ErrorAction SilentlyContinue
+$referenced = @(Get-SmartHomeReferencedPackage -RepoRoot $repoRoot -Config $configs -ErrorAction SilentlyContinue)
 
 foreach ($package in $referenced) {
     if (-not (Test-Path -LiteralPath $package.Path)) {

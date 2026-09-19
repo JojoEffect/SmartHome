@@ -53,8 +53,9 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Start-DevEnv.ps1 [-NoSync] [-Detached]` | Syncs the sibling repos (unless `-NoSync`), then starts local Mosquitto (explicit `0.0.0.0` listener — a bare `-p` binds localhost-only on Mosquitto 2.x and silently can't be reached from a real device) and subscribes to `homie/#`. `-Detached` backgrounds both and returns | No | `smarthome-dev-env` |
 | `scripts\Stop-DevEnv.ps1 [-KeepLog] [-IncludeOrphans]` | Stops whatever `Start-DevEnv.ps1` recorded for the configured port, verifying pid+name+start-time first so a recycled pid is never killed. No-op + exit 0 if nothing is running, so it's safe to call unconditionally. `-IncludeOrphans` also clears brokers/subscribers this repo started that no state file covers | No | `smarthome-dev-env` |
 | `scripts\Deploy-ToDevice.ps1 [-Project <path>] [-Configuration Debug\|Release]` | Always `/t:Rebuild`s (a plain incremental build silently drops the deployment `.bin`), has the device erase whatever sits past the new image's end, then flashes via `nanoff` (see Clearing the deployment area below) | **Yes** | `smarthome-deploy` |
+| `scripts\Deploy-DeviceConfig.ps1 [-Manifest <path>] [-ResolveOnly]` | Writes a device's configuration file to its internal storage via `nanoff --filedeployment`. Files only — no firmware, no deployment partition, and the app on the device is untouched. Resolves the versioned manifest against this checkout and `SMARTHOME_COM_PORT` first, and reads nanoff's *output* rather than only its exit code. **Needs nanoff 2.5.163 or newer, which is not the version that can flash this board — see the nanoff version note under On-device configuration, and issue #135.** `-ResolveOnly` validates everything and touches nothing | Writes files only | `smarthome-deploy-config` |
 | `scripts\Run-Tests.ps1` | Builds `SmartHome.UnitTests` and runs it via `vstest.console` + the nanoFramework test adapter | **Yes** | `smarthome-test` |
-| `scripts\Run-ScriptTests.ps1 [-File <names>] [-Name <wildcard>] [-Detailed]` | The host-side script tests: `scripts\tests\*.Tests.ps1`, run by this repo's own `TestRunner.ps1`. ~170 cases in under 20s, needing nothing installed — no device, no broker, no `local.env`, no `packages\`, no Pester. A run that executed zero tests fails | No | `smarthome-script-tests` |
+| `scripts\Run-ScriptTests.ps1 [-File <names>] [-Name <wildcard>] [-Detailed]` | The host-side script tests: `scripts\tests\*.Tests.ps1`, run by this repo's own `TestRunner.ps1`. ~250 cases in about 50s, needing nothing installed — no device, no broker, no `local.env`, no `packages\`, no Pester. A run that executed zero tests fails | No | `smarthome-script-tests` |
 | `scripts\Run-IntegrationTests.ps1 [-Tests <names>] [-NoBroker]` | The whole `src\integrationTests` suite in one call: broker up, deploy + capture + verdict per test, broker down, summary + exit code | **Yes** | `smarthome-integration-tests` |
 | `scripts\Sync-NanoFrameworkRepos.ps1 [-Force]` | Clones/updates the sibling nanoFramework repos beside `SmartHome` | No | `smarthome-sync-nanoframework` |
 | `scripts\Restore-Packages.ps1 [-Prune]` | Restores classic `packages.config` NuGet packages from the local NuGet cache — `msbuild /t:Restore` is a no-op for this repo's project style. Only *this* checkout's configs: worktrees live inside the main checkout, and `Get-SmartHomePackagesConfig` in `Common.ps1` is the one glob that says so, shared with `Test-Setup.ps1`. Also reports how many `packages\` folders nothing references any more; `-Prune` removes them, `-Prune -WhatIf` lists them | No | `smarthome-restore-packages` |
@@ -63,7 +64,7 @@ have a script yet, that's a gap worth closing rather than working around.
 | `scripts\Get-BacklogPriorities.ps1 [-Hardware ...] [-TimeBudget ...] [-Theme ...] [-Overrides <path>] [-Handoff <n>] [-RankingOnly] [-Top <n>] [-Json]` | Classifies every open issue on eight axes the labels don't cover — verification trust, evidence debt, where the edit lands, what verifying it needs, capability vs velocity, risk, effort, what it unblocks — then clusters and ranks them. Run plain first; the interview in the skill turns the answers into the weighting flags for a second run. Classification is a keyword heuristic that reports its own confidence and blind spots, and `-Overrides` is how a read of the actual bodies corrects it | No | `smarthome-prioritize` |
 | `scripts\Test-Setup.ps1` | Reports everything the other scripts assume exists on this machine — both `local.env` files and their values, restored `packages\`, the test adapter, `gh` auth, MSBuild/vstest, Mosquitto, the COM port, the companion repos — all at once, rather than one abort at a time. Read-only; opens no port and touches no device | No | `smarthome-check-setup` |
 | `scripts\Watch-DeviceSerial.ps1 [-DurationSeconds <n>] [-NoReset]` | Raw serial capture of the device's native boot log only — nanoCLR silences this at `app_main()` and switches to binary WireProtocol, so this can't see managed output | Resets only | `smarthome-watch-serial` |
-| `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot] [-NoBuild] [-BuildOnly] [-Until <regex>] [-DumpConfig]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
+| `scripts\Watch-DeviceDebugOutput.ps1 [-DurationSeconds <n>] [-NoReboot] [-NoBuild] [-BuildOnly] [-Until <text>] [-DumpConfig]` | Real managed-code debug output (`Debug.WriteLine`, exceptions) via `tools\DeviceDebugMonitor` — no VS needed, same library VS's debugger extension uses | Resets only | `smarthome-watch-debug-output` |
 | `scripts\Set-AssemblyVersion.ps1 -Version <v> [-Check]` | Stamps a version into every `AssemblyInfo.cs` under `src` — a plain recursive glob, not a fixed list and not restricted to `Properties\`, so adding a device needs no edit here and a stray one anywhere under `src` will also be picked up (and fails the run if it carries no version attribute). `.nfproj` has no generated assembly info, so this is the only thing that makes a release build carry its version. Normally invoked by the release workflow, not by hand | No | `smarthome-release` |
 | `scripts\Common.ps1` | Shared helpers (env loading, MSBuild/vstest/adapter discovery, repo-sync, dev-env state) — dot-source, don't duplicate its logic | No | — |
 
@@ -179,7 +180,10 @@ stops the run at its first line, ahead of any build, flash or broker start.
   *and* by every deploy (which now has the device clear its deployment area first). A
   machine that installed `nanoff` as a global tool has only the runtime, so this does not
   come for free with the line below it
-- `nanoff` CLI: `dotnet tool install -g nanoff`
+- `nanoff` CLI: `dotnet tool install -g nanoff`. **The version matters, and no single one
+  currently does both device workflows on this machine** — `2.5.131` flashes but cannot deploy
+  files, `2.5.163` deploys files but cannot flash. See the nanoff version note under On-device
+  configuration and issue #135 before blaming a script or the board
 - [Mosquitto](https://mosquitto.org/download/)
 - Git on PATH
 - [GitHub CLI](https://cli.github.com/) (`gh`), **authenticated** — `gh auth login`, then
@@ -275,12 +279,27 @@ when nothing ran, but don't re-break the name.
 ```text
 src/
   common/                 Shared libraries, used by device apps and tests alike
-    Homie/                SmartHome.Homie      — Homie v4 client (SmartHome.Homie.V4 inside)
+    DeviceModel/          SmartHome.DeviceModel — Device/Node/Property, DeviceBuilder, values,
+                            lifecycle, alerts. Protocol-neutral: no MQTT reference, no topics,
+                            no protocol constants (see below). SmartHome.Homie is its first
+                            consumer
+    Protocol/             SmartHome.Protocol   — IDeviceProtocol, the seam an adapter implements.
+                            HomieClient is its first implementation
+    Homie/                SmartHome.Homie      — the Homie v4 adapter over those two
+                            (SmartHome.Homie.V4 inside): topics, attribute rendering, the
+                            $state vocabulary, the last will. Exposes no model types
     Mqtt/                 SmartHome.Mqtt       — ReconnectingMqttClient: auto-reconnect and
                             subscription replay over nanoFramework.M2Mqtt. Protocol-agnostic;
                             knows nothing about Homie
     Networking/           SmartHome.Networking — NetworkHelper, the only WiFi connect path
     Text/                 SmartHome.Text       — StringUtils
+    DeviceConfiguration/  SmartHome.DeviceConfiguration — installation data read from a file on
+                            the device's internal storage, and the alert every device raises
+                            identically when it cannot be. Protocol-neutral (see below).
+                            Named DeviceConfiguration, not Configuration: a `SmartHome.
+                            Configuration` namespace would shadow
+                            nanoFramework.Hardware.Esp32.Configuration in every device app that
+                            sets a pin function — the same collision as the `Unit` one below
   devices/                Real device apps — the things that actually get shipped
     RoomSensor/           SmartHome.Devices.RoomSensor — temperature/humidity/pressure, BMP280
     IrrigationControl/    SmartHome.Devices.IrrigationControl
@@ -297,6 +316,10 @@ src/
                             the conformance test's device, deliberately not a real one
   tests/
     Unit/                 SmartHome.UnitTests — nanoFramework.TestFramework, runs on hardware
+config/                   Per-installation data, versioned: <device>.json is what a device reads
+                          at boot, <device>.deploy.json says where it lands on the device.
+                          Deployed with scripts\Deploy-DeviceConfig.ps1 -- see config\README.md
+                          and On-device configuration below
 tools/
   DeviceDebugMonitor/     Host-side .NET console app (NOT nanoFramework) -- CLI device debugger,
                           see scripts\Watch-DeviceDebugOutput.ps1
@@ -313,14 +336,16 @@ Two naming traps this layout exists to avoid, both hit for real:
   `Device` namespace collided with the `SmartHome.Homie.V4.Device` class, and
   `SmartHome.Tests.Unit` collided with the `Unit` enum — which is why the unit tests are
   `SmartHome.UnitTests`, not `SmartHome.Tests.Unit`. Check for a same-named type before adding
-  a namespace segment.
+  a namespace segment. (That Homie `Device` class is gone since #110; the type a `Device`
+  segment would shadow now is `SmartHome.DeviceModel.Device`, which every adapter and app uses.)
 - `AssemblyName` no longer equals the project file name, so anything hunting build output must
   read `<AssemblyName>` from the project. `Get-NfProjectAssemblyName` in `Common.ps1` does
   that; `Deploy-ToDevice.ps1` and `Run-Tests.ps1` use it. Don't reintroduce
   `GetFileNameWithoutExtension($projectPath)` for that purpose.
 
 `RoomSensor/Program.cs` is the main device logic; `HomieClient` (in `SmartHome.Homie`) is the
-shared Homie client, layered on `ReconnectingMqttClient` (in `SmartHome.Mqtt`).
+shared Homie v4 adapter over the neutral device model, layered on `ReconnectingMqttClient` (in
+`SmartHome.Mqtt`).
 
 `ReconnectingMqttClient`'s auto-reconnect handling was long marked WIP, "blocked on an ESP32
 nanoFramework target bug" — as of 2026-08-20 that is out of date: `MqttReconnectCheck` proves on
@@ -336,28 +361,51 @@ on first connect the connection-change handlers are registered after `ConnectInt
 initial CONNACK has already passed. Verified on hardware by destroying the broker under a running
 RoomSensor: the fresh broker sees the full announcement again, not just bare sensor values.
 
-Device apps talk to `IHomieClient` (in `SmartHome.Homie`), not to the MQTT client: `Connect()`,
-`Disconnect()`, `Alert()`, `Sleep()`, `Ready()`, plus `DeviceId`/`State`/`IsConnected` and an
-`OnCommand` event. It is deliberately **not** derived from `IReconnectingMqttClient` — a Homie
-device owns a connection rather than being one, and exposing `Publish`/`Subscribe` there would
-let an app publish an attribute non-retained or `$state` out of order. The `Device` model (built
-with `HomieDeviceBuilder`) says what the device *is*; `IHomieClient` is what you *do* with it.
+Device apps talk to `IDeviceProtocol` (in `SmartHome.Protocol`), not to the MQTT client:
+`Connect()`, `ConnectWithRetry()`, `Disconnect()`, `Ready()`, `Sleep()`,
+`RaiseAlert(id, message)`, `ClearAlert(id)`, plus `DeviceId`/`State`/`IsConnected` and an
+`OnCommand` event. It is deliberately **not** derived from `IReconnectingMqttClient` — a device
+owns a connection rather than being one, and exposing `Publish`/`Subscribe` there would let an
+app publish an attribute non-retained or a lifecycle state out of order. The `Device` model
+(built with `DeviceBuilder` in `SmartHome.DeviceModel`) says what the device *is*; the protocol
+is what you *do* with it.
 
-Five things to know when writing an actuator (Irrigation, Oven):
+As of 2026-09-15 `IHomieClient` (in `SmartHome.Homie`) is a thin extension of that seam:
+`IHomieClient : IDeviceProtocol` plus one read-only `HomieState`, the `$state` token the device's
+lifecycle *and* alert set currently map to (`HomieStates.From`). It adds no methods and no model
+types. An app that has to know the wire token takes `IHomieClient` — `HomieClientCheck` does,
+because it corrects its own `lifecycle` property with it; everything else takes `IDeviceProtocol`
+and never names Homie at all. A client is built from a neutral `Device` and an
+`IReconnectingMqttClient` (`new HomieClient(device, mqttClient)`), so which convention a device
+speaks is decided by which implementation gets constructed, and nothing above that line changes
+with it.
+
+Six things to know when writing an actuator (Irrigation, Oven):
 
 - Don't re-check the payload against `$datatype` or `$format` -- the property already did.
-  Since 2026-08-29 `PropertyBase.Set` validates a `/set` before anything is applied: an enum
-  payload must be one of the `$format` values, an integer or float inside a declared
-  `min:max` range, a boolean exactly `true` or `false`, a colour a real `<r>,<g>,<b>` triple.
+  Since 2026-08-29 `PropertyBase.Set` (in `SmartHome.DeviceModel` since #110) validates a `/set`
+  before anything is applied: an enum payload must be one of the declared options, an integer or
+  float inside a declared range, a boolean exactly `true` or `false`, a colour a real
+  `<r>,<g>,<b>` triple — the same declarations the adapter renders into `$format`.
   A rejected payload is logged and dropped -- the value does not move, nothing is published,
   nothing lands in the retained store -- and `HomieClient` does **not** raise `OnCommand` for
   it, so a handler only ever sees payloads its property can hold. That is narrower than it
   sounds and does not replace the rule below: the library refuses what the *declaration*
   forbids, and only the app can refuse what its *state* forbids (a legal enum value that is
   an illegal transition, a valid setpoint a relay then fails to reach). Issue #39.
-- Act on `IHomieClient.OnCommand`, not on `property.OnUpdate`. The property event fires both
+- Act on `IDeviceProtocol.OnCommand`, not on `property.OnUpdate`. The property event fires both
   when a controller sets a value and when the device updates its own, and cannot tell them
-  apart; `OnCommand` fires only for a controller's `/set`.
+  apart; `OnCommand` fires only for a controller's `/set`. It hands the handler a
+  `DeviceCommandEventArgs` carrying the `Property` itself (`args.Property.Id`, not a topic) and
+  the raw `Payload` the controller sent — a protocol-neutral pair, so a handler written against
+  it survives the adapter being swapped.
+- Drive the lifecycle through the protocol, never through the model. `Device.TryChangeState` is
+  public and calling it directly walks around the adapter: the model's transition table knows
+  only the states, not v4's rule that `alert` may go back to `ready` or disconnect and nowhere
+  else, so a direct `TryChangeState(Sleeping)` while the device is alerting puts `sleeping` on
+  the wire and fails the conformance run. `Ready()`, `Sleep()`, `Disconnect()`, `RaiseAlert` and
+  `ClearAlert` are the whole vocabulary, and each of them is the point where the adapter gets to
+  refuse.
 - Settable properties are subscribed on `homie/[device]/[node]/[property]/set`, as the spec
   requires. Until 2026-08-21 the code subscribed to the property *value* topic instead, so
   commands were never received and the device re-consumed its own retained publishes.
@@ -400,10 +448,12 @@ will setting `homie/[device-id]/$state` to `lost`, and a will can only be declar
 An app that connects the transport first — as RoomSensor did until 2026-08-21 — produces a
 session with no will at all, and `HomieClient` used to accept it ("MQTT client is already
 connected. Continue..."), silently discarding the will, the keepalive and the credentials. So:
-build the client, then call `HomieClient.Connect()`, which returns `bool` for retry loops. The
-MQTT client id defaults to the device's topic id, not a random Guid, so a reconnect takes over
-the dead session instead of leaving its `lost` will to fire after the new session already
-announced `ready`.
+build the `Device`, hand it and an `IReconnectingMqttClient` to `HomieClient`, then call
+`Connect()`, which returns `bool` for retry loops. The MQTT client id defaults to the device's
+id, not a random Guid, so a reconnect takes over the dead session instead of leaving its `lost`
+will to fire after the new session already announced `ready`. The will, the client id and the
+`lost` token are all the adapter's — `lost` is the one `$state` no device ever publishes, which
+is also why nothing in the model may transition *to* `DeviceState.Lost`.
 
 Anything that needs a broker connection that survives the broker going away uses
 `ReconnectingMqttClient` from `src/common/Mqtt`. It was called `HomieMqttClient` and lived in the
@@ -420,6 +470,237 @@ Anything that needs WiFi calls `NetworkHelper.ConnectToConfiguredNetwork()` from
 `WifiConnectionStatus.UnspecifiedFailure` (error 5). RoomSensor carried that loop until
 2026-08-20 and would not join the network on a clean boot; `WifiNetworkHelper.Reconnect()` waits
 for the interface instead of racing it.
+
+### On-device configuration
+
+Anything that describes **where a device is installed** rather than what it does is read from a
+file on the device at boot, not compiled in: `SmartHome.DeviceConfiguration`'s `ConfigurationStore`
+reads `I:\configuration.json`, `ConfigurationParser` turns it into that device's own configuration
+class, and `ConfigurationResult` is either the object or the reason there isn't one. Issue #103 is
+the design; RoomSensor is the first consumer, as of 2026-09-16. RainwaterCistern's calibration
+(#37) and the window map are the migrations after it.
+
+Four things about it that are decisions rather than details:
+
+- **The failure behaviour is the contract, and it lives in the shared library so it cannot
+  drift.** A configuration that is missing, unreadable or malformed leaves the device
+  *connecting anyway* and raising one alert — id `configuration`, the reason as the message — and
+  announcing **none** of the nodes that would have come from data it does not have. A device that
+  falls back to a compiled-in map instead is the wrong-but-plausible failure this whole mechanism
+  exists to prevent. `ConfigurationResult.ReportTo(protocol)` is called **before** `Connect()`:
+  an alert raised beforehand is already part of what the announcement says, so a misconfigured
+  device never advertises a healthy state, not even for one publish.
+- **What stays compiled in is only what the alert needs to be reachable.** A device with no id
+  cannot announce, and a device that cannot announce cannot say what is wrong with it — so
+  RoomSensor keeps a fallback id, name and broker address, used *only* when the file could not be
+  read, and the live values come from the file. That is also why the fallback id is the device's
+  real one rather than something recognisably a fallback: a distinct id would leave the real
+  device's retained tree in the broker looking healthy while a phantom alerted elsewhere.
+- **Zero is not a value.** nanoFramework.Json leaves an absent member at its type's default, so a
+  misspelt key yields pin 0 and interval 0 rather than an error. Two things catch that: the
+  parser sets `ThrowExceptionWhenPropertyNotFound`, and each device's `Validate()` rejects zero
+  for every numeric field. Both, because a configuration this repository cannot see is worse than
+  one it rejects twice. The key names are the class's property names spelled exactly — the parser
+  is case-sensitive, so the file and the class read as the same thing.
+- **The file is versioned here and deployed with `nanoff --filedeployment`**, which needs no
+  rebuild and no firmware update. `config/<device>.json` is the payload and
+  `config/<device>.deploy.json` is nanoff's own manifest, minus two things the script fills in:
+  `SourceFilePath` is relative to the repository root (nanoff would resolve it against whatever
+  shell started it) and there is no `SerialPort` (that is `SMARTHOME_COM_PORT`, and a committed
+  COM port is a per-machine value in a version-controlled file). A device-only file was considered
+  and rejected: it would have no history, no review, and no way back after a mass erase.
+
+#### nanoff version: the two workflows want different ones — issue #135
+
+**Read this before touching the device.** Measured on 2026-09-17 on the ESP32 on COM3
+(`ESP32_REV3`, nanoCLR `1.17.0.339`), same board and same session, only the tool version
+differing:
+
+| nanoff | `Deploy-ToDevice.ps1` (flash) | `Deploy-DeviceConfig.ps1` (files) |
+|---|---|---|
+| `2.5.131` | works | **fails** — `PlatformError` on every destination |
+| `2.5.163` | **fails** — cannot sync the ESP32 bootloader | works |
+
+So no single installed version does both jobs here today, which is #135. Whichever is installed,
+one of the two scripts will fail, and neither failure names the version as the cause. Flash with
+2.5.131, deploy files with 2.5.163, and expect to switch with
+`dotnet tool uninstall -g nanoff` followed by `dotnet tool install -g nanoff --version <v>`
+(`dotnet tool update` refuses to go backwards).
+
+The file-deployment half is a **wire-protocol mismatch, not a device fault**, and the diagnosis is
+worth keeping because the symptom is mute. `nf-interpreter` #3502 (2026-07-27) removed the
+`NameLength` field from `Monitor_StorageOperation_Command`; `nf-debugger` #396 removed it on the
+host the same day. A nanoff older than that still sends the 16-byte header, so the firmware reads
+`DataLength` out of the old `NameLength`, `Offset` out of the old `DataLength`, and the file name
+four bytes early — i.e. an empty string. `SplitFilePath("")` then matches no volume and
+`HAL_StorageOperation` returns `PlatformError`, which is why *every* destination failed
+identically, including a `D:\…` that does not exist. Nothing in nanoff's output says any of this;
+`Get-FileDeploymentFailure` now names it in the message instead.
+
+Two things this ruled out, so nobody re-investigates them: the firmware's `I:` volume is fine (a
+device that has a configuration file reads it, verified), and `CLR_RT_FileStream` is not stubbed
+(`API_System.IO.FileSystem` selects the real `FileStream.cpp` in
+`CMake/Modules/FindNF_CoreCLR.cmake`, and the device's native assembly list carries
+`System.IO.FileSystem v1.1.0.4`, which only that build produces).
+
+The sibling checkouts are the reason this was findable at all, and they were six weeks stale when
+it mattered — `nf-interpreter` and `nf-debugger` both had the answer only on `origin/main`. Sync
+before concluding anything about firmware behaviour, as the top of this file says.
+
+Three measured facts behind all of this, checked against the sibling checkouts and the device
+rather than assumed:
+
+- **`I:` is the littlefs partition the firmware already carries.** `INTERNAL_DRIVE0_LETTER` is
+  `"I:"` (`nf-interpreter`'s `src/HAL/Include/nanoHAL_System_IO_FileSystem.h`) and the ESP32 mounts
+  littlefs at `/I` over the `config` partition (`targets/ESP32/_common/targetHAL_ConfigStorageLittlefs.c`),
+  which the 4MB table already declares at `0x3C0000`. Nothing has to be re-flashed to create it.
+  `nanoff --nanodevice --devicedetails` on 2026-09-16 confirmed the flashed image carries
+  `System.IO.FileSystem v1.1.0.4` natively, which is exactly the native version the managed
+  package 1.1.94 asks for. ESP32 NVS is *not* an option and was checked: the managed surface of
+  `nanoFramework.Hardware.Esp32` exposes no NVS type.
+- **`nanoff --filedeployment` exits 0 when an individual file fails to upload.**
+  `FileDeploymentManager.DeployAsync` in `nanoFirmwareFlasher` prints `Error deploying content
+  file ...`, continues the loop, and returns `ExitCodes.OK` regardless; its README says as much.
+  So `Deploy-DeviceConfig.ps1` reads the output as well as the exit code, and refuses a run that
+  confirmed fewer files than the manifest named. Never trust that exit code on its own. That check
+  is the only reason the stale-nanoff mismatch above was found rather than shipped as a
+  deployment that reported success and wrote nothing.
+- **Never pass `--serialport` alongside `--filedeployment`.** The port goes *inside* the JSON,
+  which is why the resolved copy carries a `SerialPort`. On the installed nanoff 2.5.131, naming a
+  serial port on the command line makes it classify the run as an ESP32 *firmware* operation,
+  connect through the esptool bootloader, print the chip details and the entire help text, and
+  then fail the deployment — while still exiting 0. `nanoFirmwareFlasher`'s `Program.cs` has since
+  grown a guard for exactly this (its esp32 branch now also requires `FileDeployment` and
+  `NetworkDeployment` to be empty), and its README documents the port-in-the-JSON form as the way
+  to deploy files on their own.
+
+### The protocol-neutral model, and the adapter seam
+
+`SmartHome.DeviceModel` and `SmartHome.Protocol` are the first slice of issue #108, which
+replaces "the device description *is* Homie v4" with "the description is neutral and exactly one
+injected adapter decides what it goes out as". As of 2026-09-15 they have a consumer: #110
+rewrote `SmartHome.Homie` as the v4 adapter over them, so `HomieClient` implements
+`IDeviceProtocol`, and `HomieClientCheck` and RoomSensor build neutral `Device`s with
+`DeviceBuilder` and never mention a Homie model type. Home Assistant follows in #111; #112 is
+what makes the adapter an injected *choice* rather than the one type an app names in a `new`.
+
+The contract that rewrite was held to is **byte-identical on the wire** — same topics, payloads,
+retained flags, QoS, order, last will, client id — measured on 2026-09-16 by capturing
+`HomieClientCheck` and RoomSensor on hardware from the unchanged tree, capturing them again
+afterwards and diffing the two, because a refactor of this size is only distinguishable from a
+regression by evidence. Neither capture moved and the conformance suite passed on both. The one
+deliberate difference is that a multi-node device now announces its node blocks in declaration
+order rather than hash order, which is what `$nodes` always claimed; both devices in this tree
+have one node, so it does not arise here. Those captures are also transcribed into
+`HomieGoldenWireTests`, which is what CI can check on every change; the hardware run remains the
+only thing that catches a device app's own description drifting.
+
+What the model owns: the device/node/property tree with ids and friendly names, the datatype,
+the *structured* format, the unit, the `QuantityKind`, settable and retained, the value and its
+canonical encoding, `OnCommand` vs `OnUpdate`, the lifecycle, alerts, and the optional
+`$target`. What an adapter owns: every topic and root, how the description is serialised and
+where, the last will, re-announce triggers, protocol version constants, and all of Home
+Assistant's component choice, device class and availability.
+
+Four things about it are easy to get wrong, and each is deliberate:
+
+- **`GetTopic()` did not come across.** That single omission is what makes the rest possible:
+  the old `HomieEntityBase` built `homie/<device>/<node>/<property>` from the parent chain, so
+  Homie's topic grammar was in every entity in the tree. Adapters walk `EntityBase.Parent` and
+  name things their own way — the v4 one does it in one place, `HomieTopics`, which is the whole
+  of what that base class used to spread across the tree. The same reasoning removes the datatype
+  and lifecycle *tokens* — `"integer"`, `"init"` — which are a convention's vocabulary, not the
+  model's; v4's live in `HomieStates` and in the adapter's datatype rendering.
+  `DeviceStateExtensions.GetName()` returns capitalised names for logs precisely so that
+  publishing one would fail conformance loudly.
+- **Formats are types, not a string.** `NumericRange`, `EnumOptions`, `BooleanLabels`,
+  `ColorFormats`, each with the one parser for its text form. A raw `string Format` re-read by
+  every consumer is what let #106's discovery mapper disagree with the property's own validation
+  in three ways, advertising payloads the property refused. Don't add a `string Format` back.
+- **There is no `Alert` state.** The lifecycle is five states of the model's own —
+  `Connecting`, `Ready`, `Sleeping`, `Disconnecting`, `Lost` — and alerts are a separate keyed
+  set, `Device.RaiseAlert(id, message)` / `ClearAlert(id)`. A lifecycle state can only say
+  *that* something is wrong, where an alert carries an id and a message. An adapter whose
+  convention has only the coarser spelling folds the set back into a state, and that mapping is
+  one-way and lossy — which is why it lives in the adapter. The v4 one is `HomieStates.From`:
+  any alert raised while the model says `Ready` publishes `$state = alert`, clearing the last
+  one publishes `ready` again, and a second alert or a changed message publishes nothing,
+  because the wire has no way to say which. The ids and messages are logged instead of
+  published — v4 has nowhere to put them, and #108 records that as expected rather than a
+  defect. Alerts raised while the device is `Sleeping` (or still connecting, or disconnecting)
+  change nothing on the wire at all, and the adapter refuses `Sleep()` outright while the token
+  is `alert`, since v4's `alert` may only return to `ready` or disconnect. That refusal is the
+  adapter's own: `Device.CanChangeState` allows `Ready` -> `Sleeping` whatever alerts are
+  raised, which is exactly why an app must go through `IDeviceProtocol` and never call
+  `TryChangeState` itself.
+- **`double?` is not available.** `NumericRange` spells its optional bounds as
+  `HasMinimum`/`Minimum` pairs because nanoFramework's mscorlib carries no `System.Nullable`,
+  so a nullable value type does not compile at all on this runtime. Checked against the
+  `CoreLibrary` checkout, not assumed.
+
+The model holding more than a convention can say is the point of it, so the adapter is where the
+two meet — and the v4 one refuses rather than improvises. `HomieClient`'s constructor walks the
+tree once and throws `ArgumentException`, naming the offending property by its topic and the
+reason, for a `DateTime`, `Duration` or `Json` property (v4 has six datatypes, not nine;
+inventing a token would advertise a payload no controller can parse), for a numeric range that
+is open-ended or carries a `Step` (a v4 `$format` is `min:max` and nothing else, so publishing
+one would declare a constraint the property does not enforce), and for a range bound the
+property's own encoding cannot render exactly — a non-integral bound on an integer property, or
+a float bound needing more precision than that property's `Decimals`. The constructor is the
+first adapter-owned moment and the only one where the failure is still a developer's rather than
+a controller's; the tree cannot change afterwards, so everything fixed at build — every topic,
+every attribute payload, the command-topic table — is computed there too.
+
+`$format` is rendered from the parsed model value now, not echoed back from the string the
+builder was handed: `NumericRange` -> `min:max` with each bound rendered the way a controller
+will read it back — an integral bound as a plain integer, which is what keeps `WithFormat("0:100")`
+going out as `0:100` whatever the datatype, and anything else through `FloatProperty.FormatValue`,
+the same fixed-decimal encoding the value itself goes out as. Never `NumericRange.ToString()`,
+whose `"G"` formatting prints 21.5 as `21.499999999999999`. `EnumOptions` -> its comma-joined
+options, `ColorFormats` -> `Preferred` alone since v4 declares exactly one encoding,
+`BooleanLabels` dropped entirely. Byte-for-byte the same for every declaration in this tree. What did change is a
+*malformed* one: the model parses it to nothing, the property therefore declares no format, the
+adapter never sees the text, and `$format` goes out empty rather than carrying something a
+controller would misread. Nothing reports the malformed text today — not the model, which parsed
+it away, and not the adapter, which cannot see it.
+
+**Nothing in the protocol-neutral layer names a convention, and nothing should** — not in code,
+not in comments, not in a test's name. That layer is `SmartHome.DeviceModel`,
+`SmartHome.Protocol`, their unit tests (`DeviceModel*Tests.cs`), and the generic infrastructure
+underneath and beside them — `SmartHome.Mqtt`, `SmartHome.Networking`, `SmartHome.Text`,
+`SmartHome.DeviceConfiguration` (and `DeviceConfigurationTests.cs`, which says "a device" and
+"an alert" and never names a `$state`). A test that moves
+down into the model from an adapter's suite gets renamed and re-commented on the way, for the
+same reason: a neutral assertion carrying a convention's vocabulary is how the vocabulary creeps
+back. The paragraphs
+above are this repo's roadmap and may name whatever they like; that code may not, because naming
+a convention there is what turns a neutral mechanism back into that convention with the labels
+filed off — and the point of the exercise is to outlive the three adapters currently planned.
+Its comments say "an adapter whose convention cannot express this" rather than "a v4 adapter",
+and "a session carrying a last will" rather than "a `HomieClient` session".
+
+The line is about the *mechanism*, not the vocabulary: naming a concrete convention as one
+example among several is fine, and so is citing one as provenance. What is not fine is a comment
+that only makes sense if you already know which convention is meant, or that instructs one
+particular adapter. A mapping note of that second kind belongs in that adapter's issue, and the
+ones that were in the code have been moved: **Homie v4 → #110, Home Assistant → #111, Homie v5 →
+#108** until a v5 issue exists. Read those before writing an adapter; they carry the per-datatype
+and per-format detail the model deliberately no longer states. The v4 set has since been acted
+on — it is `SmartHome.Homie`, and the code is now the better reference of the two.
+
+The one citation left in the tree is `Units.cs`, which names the list its constants were taken
+from. That is provenance for the pinned codepoints, not a dependency.
+
+The adapters themselves are the other side of this line and are *expected* to name their
+convention everywhere: `SmartHome.Homie`, `HomieClientCheck`, and the conformance verdict in
+`Run-IntegrationTests.ps1` all should.
+
+`SmartHome.Protocol` is one interface, `IDeviceProtocol`, plus the command event it raises. It is
+deliberately not derived from `IReconnectingMqttClient`, and its own remarks are where that
+reasoning now lives (`IHomieClient` extends it and does not restate it): a device owns a
+connection rather than being one, and exposing `Publish`/`Subscribe` would let an app publish an
+attribute non-retained or a state out of order. An implementation takes an
+`IReconnectingMqttClient` by constructor injection and owns the session, last will included.
 
 ### Four kinds of test, deliberately kept apart
 
@@ -503,6 +784,14 @@ these, and `Run-IntegrationTests.ps1` parses them. A device app never exits with
 these markers *are* the exit code. Emit one as soon as the outcome is known, before any idle
 loop.
 
+**They go out through `Debug.WriteLine`, and that is not an oversight to tidy up.** Everything
+else in this repo logs through `ILogger`, so the markers look like the one place that was
+forgotten; they are the exception on purpose. A marker is a test *result*, not a log line, and
+routing it through the logging stack would make the verdict depend on the app having configured
+a factory — the default is null, whose logger silently drops everything, and every test would
+report `No [ITEST] marker`. A configured factory is no better: it prefixes level and category,
+and the runner's regex anchors on `[ITEST]` at the start. Leave them on `Debug.WriteLine`.
+
 **The name in the marker is nobody's to spell.** Both ends derive it from the project's
 `<AssemblyName>`: the device reads its own running assembly (`typeof(Program)` handed to
 `IntegrationTest.Pass/Fail`, which is why they take a `Type` and not a string), and the runner
@@ -569,7 +858,16 @@ Fall back to web search only after those.
 
 This repo references package baselines such as `nanoFramework.CoreLibrary` `1.17.11`,
 `nanoFramework.Hardware.Esp32` `1.6.42`, `nanoFramework.Logging` `1.1.161`,
-`nanoFramework.M2Mqtt` `5.1.221`.
+`nanoFramework.M2Mqtt` `5.1.221`, `nanoFramework.Json` `2.2.213`,
+`nanoFramework.System.IO.FileSystem` `1.1.94`.
+
+The last two arrived with #103 and neither was on this machine: `Restore-Packages.ps1` restores
+from the local NuGet cache and does not hit the network, so they had to be fetched into
+`%USERPROFILE%\.nuget\packages` once before a restore could see them. The same will be true of the
+next machine and of a fresh CI runner (which restores from nuget.org and is unaffected).
+`System.IO.FileSystem`'s managed 1.1.94 asks for native `1.1.0.4`, which is what the flashed
+firmware carries — check that pairing with `nanoff --nanodevice --devicedetails` before bumping
+it, since a managed/native mismatch is refused at load time by the CLR rather than at build time.
 
 Companion repos default to the branch configured in `scripts\nanoFramework.local.env.ps1`
 (`main`) — except `CoreLibrary`, `nanoFramework.Hardware.Esp32`, `nanoFramework.Logging`,
@@ -601,19 +899,35 @@ Likely first candidates here: RoomSensor current readings, Irrigation/Oven comma
 
 ## Current RoomSensor facts
 
-| Fact | Value |
-|---|---|
-| Device Homie ID | `room-sensor-office` |
-| MQTT broker in code | `192.168.1.238` in `Program.cs` (verified against the source, 2026-08-20) |
-| Sensor node | `sensor` |
-| Sensor type | `BMP280` |
-| Properties | `temperature`, `humidity`, `pressure` |
-| Update interval | `5000 ms` |
+Since 2026-09-16 the first four rows are **configuration, not code**: they live in
+`config\room-sensor.json` and are meant to reach the device through `Deploy-DeviceConfig.ps1`
+(see On-device configuration above). `Program.cs` still carries the id, the name and the broker
+as a *fallback*, used only when that file could not be read, so the alert has an address to go
+out from.
+
+Verified end to end on hardware on 2026-09-17: the device read
+`I:\configuration.json`, announced `$nodes` as `sensor`, went `init` -> `ready` without an alert,
+and published real readings at the configured interval. Getting the file there needs a nanoff new
+enough to speak the current wire protocol — see the version note above and #135.
+
+| Fact | Value | Where |
+|---|---|---|
+| Device Homie ID | `room-sensor-office` | `config\room-sensor.json`; fallback in `Constants.cs` |
+| MQTT broker | `192.168.1.238` | `config\room-sensor.json`; fallback in `Program.cs` |
+| I2C wiring | bus `1`, data `21`, clock `22` | `config\room-sensor.json` — no fallback |
+| Update interval | `5000 ms` | `config\room-sensor.json` — no fallback |
+| Sensor node | `sensor` | `Constants.cs` — what the firmware is, not where it is |
+| Sensor type | `BMP280` | `Constants.cs` |
+| Properties | `temperature`, `humidity`, `pressure` | `Constants.cs` |
+| Alert id for an invalid reading | `sensor` (raised/cleared through `IDeviceProtocol`; the v4 adapter turns it into `$state=alert`) | `Program.cs` |
+| Alert id for an unreadable configuration | `configuration` | `ConfigurationResult.AlertId`, shared by every device |
 
 Note that `MqttCheck` hardcodes its own broker (`192.168.1.238`) separately — these two constants
 drift apart easily, and a stale one is the usual reason a healthy device "can't reach the
 broker". `Run-IntegrationTests.ps1` warns when `MqttCheck`'s constant isn't an address of the
-host machine.
+host machine. It also still checks RoomSensor's, which is now the fallback rather than the live
+value; the versioned `config\room-sensor.json` needs the same check, and that is #133 (worth
+folding into #100, which is the same guard's other problem).
 
 ## Open work
 
@@ -647,6 +961,12 @@ as a fallback, because every body in this repo mentions the device; a body-deriv
 reported at confidence `Low`, marked `?` in the ranking table, and is the one to check before
 trusting a rank. An `-Overrides` file that sets `Where` alone now warns, because before the
 split that key was how a row got moved and it no longer is.
+
+`Trust` is marked the same way, for the same reason: it is the heaviest term, one matched phrase
+can set it, and a `Trust` at confidence `Medium` shows as `T?`. Both marks are listed together
+under `Needs a human call`, and both are declared in one place, the axis table in the script,
+which also drives every axis's scores, `Confidence` and `Signals` — so an axis cannot be scored
+without being reported, and a new mark is one entry there (#82).
 
 ### File what you find
 
