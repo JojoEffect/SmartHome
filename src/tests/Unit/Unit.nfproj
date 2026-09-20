@@ -41,6 +41,7 @@
     <Compile Include="DeviceModelGuardTests.cs" />
     <Compile Include="DeviceModelTests.cs" />
     <Compile Include="DeviceModelValueTests.cs" />
+    <Compile Include="HomeAssistantDiscoveryTests.cs" />
     <Compile Include="HomieAdapterTests.cs" />
     <Compile Include="HomieClientTests.cs" />
     <Compile Include="HomieGoldenWireTests.cs" />
@@ -67,6 +68,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\common\DeviceConfiguration\DeviceConfiguration.nfproj" />
     <ProjectReference Include="..\..\common\DeviceModel\DeviceModel.nfproj" />
+    <ProjectReference Include="..\..\common\HomeAssistant\HomeAssistant.nfproj" />
     <ProjectReference Include="..\..\common\Homie\Homie.nfproj" />
     <ProjectReference Include="..\..\common\Mqtt\Mqtt.nfproj" />
     <ProjectReference Include="..\..\common\Protocol\Protocol.nfproj" />
