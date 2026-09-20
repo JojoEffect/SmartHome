@@ -108,10 +108,12 @@ namespace SmartHome.HomeAssistant
         /// </remarks>
         public static bool Accepts(string deviceClass, string unit)
         {
+            var normalised = Normalise(unit);
             var units = UnitsFor(deviceClass);
+
             for (int i = 0; i < units.Length; i++)
             {
-                if (units[i] == unit)
+                if (units[i] == normalised)
                 {
                     return true;
                 }
@@ -119,6 +121,43 @@ namespace SmartHome.HomeAssistant
 
             return false;
         }
+
+        /// <summary>
+        /// The spelling Home Assistant will compare a unit under, which is not always the
+        /// one it was written in.
+        /// </summary>
+        /// <remarks>
+        /// Home Assistant rewrites a handful of units before it validates them
+        /// (<c>AMBIGUOUS_UNITS</c>, applied by both the sensor and the number platform),
+        /// and the pair that matters here is the two micro signs: the MICRO SIGN U+00B5
+        /// that a keyboard produces, and the GREEK SMALL LETTER MU U+03BC that its unit
+        /// table is written in. Comparing without this would refuse a unit Home Assistant
+        /// accepts -- and refuse it at build time, where the device simply does not come
+        /// up, which is a worse failure than the one the check exists to prevent.
+        ///
+        /// Only the entries whose result is in one of the sets above are here. Home
+        /// Assistant's table is longer -- micrograms, microsiemens, reactive power -- but
+        /// those spell units no device class this adapter produces accepts, so rewriting
+        /// them would change nothing except how far this list has to be kept in step.
+        ///
+        /// Note what is deliberately NOT here: <c>µA</c> is not in Home Assistant's table
+        /// either, so a current in the micro sign is refused by both. That asymmetry is
+        /// Home Assistant's, and mirroring it is the point -- this method exists to
+        /// compare the way Home Assistant compares, not to be more generous than it.
+        ///
+        /// The unit still goes on the wire exactly as the property declares it. Home
+        /// Assistant applies the same rewrite when it receives the config, so publishing
+        /// its spelling instead would only be this adapter editing a device's own
+        /// statement about itself.
+        /// </remarks>
+        public static string Normalise(string unit) => unit switch
+        {
+            // U+00B5 V -> U+03BC V
+            "µV" => "μV",
+            // U+00B5 s -> U+03BC s
+            "µs" => "μs",
+            _ => unit,
+        };
 
         /// <summary>
         /// The units Home Assistant accepts for a device class, in its own spelling.
