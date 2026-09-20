@@ -617,6 +617,55 @@ namespace SmartHome.UnitTests
         }
 
         [TestMethod]
+        public void A_Unit_Home_Assistant_Rewrites_Before_Validating_Is_Accepted()
+        {
+            // Two characters look identical and are not: the MICRO SIGN U+00B5 that a
+            // keyboard produces, and the GREEK SMALL LETTER MU U+03BC that Home
+            // Assistant's unit table is written in. Home Assistant rewrites the first to
+            // the second before it validates, so comparing without that would refuse a
+            // unit it accepts -- at build time, where the device does not come up at all.
+            var device = new DeviceBuilder(_deviceId, _deviceName)
+                .AddNode(_nodeId, _nodeName, _nodeType)
+                    .AddFloatProperty("supply", "Supply", 0.0)
+                        .WithUnit("µV")
+                        .WithQuantityKind(QuantityKind.Voltage)
+                    .BuildProperty()
+                .BuildNode()
+                .BuildDevice();
+
+            var payload = Find(
+                DiscoveryMapper.Map(device, new HomeAssistantSettings()),
+                "homeassistant/sensor/super-car_engine_supply/config").Payload;
+
+            AssertContains(payload, "\"dev_cla\":\"voltage\"");
+            // The property's own spelling goes out, not the rewritten one: Home Assistant
+            // applies the same rewrite on receipt, so publishing its version would be
+            // this adapter editing the device's statement about itself.
+            AssertContains(payload, "\"unit_of_meas\":\"µV\"");
+        }
+
+        [TestMethod]
+        public void A_Unit_Home_Assistant_Does_Not_Rewrite_Is_Still_Refused()
+        {
+            // The asymmetry is Home Assistant's, and mirroring it is the point. Its table
+            // rewrites the micro sign in a volt and in a second, and not in an ampere --
+            // so 'µA' in the micro sign is refused there too, and refusing it here means
+            // the device author hears about it instead of the entity silently never
+            // appearing.
+            var device = new DeviceBuilder(_deviceId, _deviceName)
+                .AddNode(_nodeId, _nodeName, _nodeType)
+                    .AddFloatProperty("draw", "Draw", 0.0)
+                        .WithUnit("µA")
+                        .WithQuantityKind(QuantityKind.Current)
+                    .BuildProperty()
+                .BuildNode()
+                .BuildDevice();
+
+            Assert.ThrowsException(typeof(ArgumentException),
+                () => DiscoveryMapper.Map(device, new HomeAssistantSettings()));
+        }
+
+        [TestMethod]
         public void Refuses_A_Settable_Number_That_Does_Not_Declare_What_It_Accepts()
         {
             // Home Assistant's number entity always has a minimum and a maximum -- its own
