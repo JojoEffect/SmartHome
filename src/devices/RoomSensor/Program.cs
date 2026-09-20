@@ -27,10 +27,11 @@ namespace SmartHome.Devices.RoomSensor
         // could not be read. The live value comes from that file.
         //
         // Named rather than inline at the call site, so Run-IntegrationTests.ps1's
-        // stale-constant pre-flight can find it: that check greps for exactly this
-        // shape, and an inline literal was invisible to it. That check now guards the
-        // fallback rather than the address the device actually uses -- the versioned
-        // configuration file needs the same check, which is issue #133.
+        // stale-broker pre-flight can find it: that check looks for FallbackBrokerHost by
+        // exactly this name and compares it as the fallback, beside the live value it
+        // reads out of the configuration file. An inline literal or a rename is invisible
+        // to it -- the pre-flight then lists this device as having nothing to compare,
+        // and scripts\tests fails, since it pins that this constant is found.
         private const string FallbackBrokerHost = "192.168.1.238";
 
         // What is wrong, as an id: the sensor. Alerts are keyed, so raising and clearing

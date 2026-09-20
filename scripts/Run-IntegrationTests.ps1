@@ -573,7 +573,9 @@ function Test-DeviceConstant {
     # Takes an explicit path rather than deriving one under src\integrationTests. That
     # derivation silently excluded the one app that actually ships: RoomSensor lives in
     # src\devices, so Test-Path returned false and the check returned without a word --
-    # leaving the shipped device as the only one with no stale-broker warning.
+    # leaving the shipped device as the only one with no stale-broker warning. The device
+    # apps no longer come through here at all: Test-DeviceBrokerAddress finds them, and
+    # reads each broker address where the device actually keeps it.
     param(
         [string]$Label,
         [string]$ProgramPath,
@@ -601,6 +603,213 @@ function Get-IntegrationTestProgramPath {
     param([string]$TestName)
 
     return (Join-Path $repoRoot "src\integrationTests\$TestName\Program.cs")
+}
+
+function Get-DeviceConfigurationFile {
+    # Every device configuration versioned under config\ -- the <device>.json a device
+    # reads at boot -- and not the <device>.deploy.json beside each one. Those are nanoff's
+    # file-deployment manifests (Files, SourceFilePath, DestinationFilePath): they say
+    # where a configuration goes rather than being one, and reading them as one would
+    # report every manifest as a device that has lost its broker address.
+    #
+    # Streams FileInfo, like Get-SmartHomePackagesConfig and for the same reason (issue
+    # #88): a caller that keeps the result collects it with @(...).
+    #
+    # -LiteralPath throughout: $RepoRoot is a concrete directory, and on -Path a '[' in it
+    # would match nothing -- a check that silently finds nothing (issue #71).
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $directory = Join-Path $RepoRoot 'config'
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        return
+    }
+
+    Get-ChildItem -LiteralPath $directory -Filter '*.json' -File |
+        Where-Object { $_.Name -notlike '*.deploy.json' } |
+        Sort-Object -Property Name
+}
+
+function Get-DeviceProgramFile {
+    # Every device app's Program.cs, found rather than named. The pre-flight used to name
+    # RoomSensor's by literal path, so the integration tests -- resolved through the
+    # catalog -- scaled with the repository while the device apps did not, and the next
+    # device to gain a broker would have gone unchecked (issue #100). A stub with nothing
+    # to compare costs one name in the pre-flight's inventory.
+    #
+    # Streams FileInfo, for the reasons Get-DeviceConfigurationFile gives.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $directory = Join-Path $RepoRoot 'src\devices'
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        return
+    }
+
+    Get-ChildItem -LiteralPath $directory -Recurse -Filter 'Program.cs' -File |
+        Sort-Object -Property FullName
+}
+
+function Get-DeviceConfigurationValue {
+    # One top-level value out of a device configuration, read the way the device reads
+    # it: the key matched case-sensitively, because ConfigurationParser sets
+    # PropertyNameCaseInsensitive = false. ConvertFrom-Json's objects do not care -- they
+    # answer .BrokerHost for a "brokerHost" key -- so a plain property read here would
+    # accept a spelling the device refuses, and call a configuration it alerts on healthy.
+    #
+    # Throws when the file cannot give a value, and the message is the reason, phrased to
+    # follow the file's name: "is empty", "has no BrokerHost". The caller turns it into a
+    # warning; nothing here may end a pre-flight.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Key
+    )
+
+    try {
+        $text = Get-Content -LiteralPath $Path -Raw
+    }
+    catch {
+        throw "could not be read ($($_.Exception.Message))"
+    }
+
+    # Before ConvertFrom-Json, which takes $null -- what -Raw returns for an empty file --
+    # as a parameter-binding error, and whitespace as no object at all.
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        throw 'is empty'
+    }
+
+    try {
+        $parsed = $text | ConvertFrom-Json
+    }
+    catch {
+        throw "is not valid JSON ($($_.Exception.Message))"
+    }
+
+    # The full type name, not [pscustomobject]: that accelerator is PSObject, which
+    # nearly anything passes for.
+    if ($parsed -isnot [System.Management.Automation.PSCustomObject]) {
+        throw 'is not a JSON object'
+    }
+
+    $property = @($parsed.PSObject.Properties | Where-Object { $_.Name -ceq $Key })
+    if ($property.Count -eq 0) {
+        throw "has no $Key (keys are matched case-sensitively, as the device matches them)"
+    }
+
+    return [string]$property[0].Value
+}
+
+function Test-DeviceBrokerAddress {
+    # The pre-flight's stale-broker check for the device apps (issues #100 and #133). A
+    # stale address is the usual reason a healthy device cannot reach the broker, and
+    # nothing at run time names the address it dialled -- so the comparison happens here,
+    # at a desk, against SMARTHOME_MQTT_BROKER. Three places a device keeps one:
+    #
+    #   config\<device>.json  BrokerHost          the live value for a device that reads
+    #                                              a configuration (#103)
+    #   Program.cs            BrokerHost          compiled in, for one that does not --
+    #                                              equally live
+    #   Program.cs            FallbackBrokerHost  dialled only when the configuration
+    #                                              cannot be read, to raise that alert
+    #
+    # The constants are matched as whole names (\b). Unanchored, 'BrokerHost\s*=' matched
+    # the tail of 'FallbackBrokerHost =', which is how this check came to compare
+    # RoomSensor's fallback and report it as the address in use, while the file that
+    # decides went unread (#133).
+    #
+    # The fallback is still compared, and is named as the fallback. It is reached only on
+    # a device that cannot read its configuration, but that device's only output is the
+    # alert saying so -- and a stale fallback sends it to a broker nobody is watching, so
+    # the device goes dark instead of alerting, which is the one thing it is there to
+    # prevent.
+    #
+    # What was compared, and what had nothing to compare, is printed on every run. Before,
+    # "no constant" and "the constant agrees" were the same silence, so a renamed constant
+    # read exactly like a healthy one. A device program with nothing to compare is only
+    # listed, not warned about: two of the three device apps are still stubs with no MQTT
+    # at all (#11, #12), and a warning that fires on every run is one nobody reads. A
+    # configuration with no BrokerHost does warn -- every configuration here belongs to a
+    # device that dials a broker, and it would refuse the file.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Expected
+    )
+
+    $compared = @()
+    $nothingToCompare = @()
+
+    foreach ($file in @(Get-DeviceConfigurationFile -RepoRoot $RepoRoot)) {
+        $label = "config\$($file.Name)"
+
+        try {
+            $actual = Get-DeviceConfigurationValue -Path $file.FullName -Key 'BrokerHost'
+        }
+        catch {
+            Write-Warning ("{0} {1}, so no broker address was compared for it." -f $label, $_.Exception.Message)
+            $nothingToCompare += $label
+            continue
+        }
+
+        $compared += "$label BrokerHost"
+        if ($actual -ne $Expected) {
+            Write-Warning ("{0}: BrokerHost is '{1}' but SMARTHOME_MQTT_BROKER is '{2}'. It is the address the device dials once the file is deployed; if it fails to connect, one of the two is stale." -f $label, $actual, $Expected)
+        }
+    }
+
+    $constants = @(
+        @{ Name = 'BrokerHost';         Consequence = 'If it fails to connect, one of the two is stale.' }
+        @{ Name = 'FallbackBrokerHost'; Consequence = 'It is dialled only when the device cannot read its configuration, to raise that alert -- a stale one sends the alert to a broker nobody is watching.' }
+    )
+
+    foreach ($file in @(Get-DeviceProgramFile -RepoRoot $RepoRoot)) {
+        $device = $file.Directory.Name
+
+        try {
+            $source = [string](Get-Content -LiteralPath $file.FullName -Raw)
+        }
+        catch {
+            Write-Warning ("{0}: Program.cs could not be read ({1}), so no broker address was compared for it." -f $device, $_.Exception.Message)
+            $nothingToCompare += $device
+            continue
+        }
+
+        $found = $false
+        foreach ($constant in $constants) {
+            $match = [regex]::Match($source, ('\b{0}\s*=\s*"([^"]+)"' -f $constant.Name))
+            if (-not $match.Success) {
+                continue
+            }
+
+            $found = $true
+            $compared += "$device $($constant.Name)"
+
+            $actual = $match.Groups[1].Value
+            if ($actual -ne $Expected) {
+                Write-Warning ("{0}: {1} is '{2}' in Program.cs but SMARTHOME_MQTT_BROKER is '{3}'. {4}" -f $device, $constant.Name, $actual, $Expected, $constant.Consequence)
+            }
+        }
+
+        if (-not $found) {
+            $nothingToCompare += $device
+        }
+    }
+
+    $comparedText = if ($compared.Count -gt 0) { $compared -join ', ' } else { 'none' }
+    Write-Host ("Device broker addresses compared with SMARTHOME_MQTT_BROKER ({0}): {1}" -f $Expected, $comparedText) -ForegroundColor DarkGray
+
+    if ($nothingToCompare.Count -gt 0) {
+        Write-Host ("No broker address found to compare in: {0}" -f ($nothingToCompare -join ', ')) -ForegroundColor DarkGray
+    }
 }
 
 function Wait-ForSubscriberLogLine {
@@ -2558,14 +2767,12 @@ $stopEnvScript  = Join-Path $PSScriptRoot 'Stop-DevEnv.ps1'
 # ── Pre-flight ────────────────────────────────────────────────────────────────
 $expectedBroker = Get-OptionalEnvValue -Name 'SMARTHOME_MQTT_BROKER' -DefaultValue 'localhost'
 
-# RoomSensor is checked too, and first. It is the app that ships, it carries the same
-# hardcoded broker address, and the suite leaves it on the device -- so a stale constant
-# there outlives the run that would have warned about it.
-Test-DeviceConstant -Label 'RoomSensor' `
-                    -ProgramPath (Join-Path $repoRoot 'src\devices\RoomSensor\Program.cs') `
-                    -Pattern 'BrokerHost\s*=\s*"([^"]+)"' `
-                    -Expected $expectedBroker `
-                    -What 'BrokerHost'
+# The device apps first. They are what ships, and this suite never flashes them, so this
+# is the one place their broker addresses are compared at all -- a stale one otherwise
+# surfaces later, as a redeployed device that cannot reach the broker. Every one is found
+# rather than named, and each address is read where the device keeps it: see
+# Test-DeviceBrokerAddress.
+Test-DeviceBrokerAddress -RepoRoot $repoRoot -Expected $expectedBroker
 
 # What each device-decided test's marker will call itself, resolved here rather than at
 # capture time: reading it off the project is a desk operation, and a project that

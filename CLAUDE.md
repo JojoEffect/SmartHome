@@ -931,12 +931,21 @@ enough to speak the current wire protocol — see the version note above and #13
 | Alert id for an invalid reading | `sensor` (raised/cleared through `IDeviceProtocol`; the v4 adapter turns it into `$state=alert`) | `Program.cs` |
 | Alert id for an unreadable configuration | `configuration` | `ConfigurationResult.AlertId`, shared by every device |
 
-Note that `MqttCheck` hardcodes its own broker (`192.168.1.238`) separately — these two constants
-drift apart easily, and a stale one is the usual reason a healthy device "can't reach the
-broker". `Run-IntegrationTests.ps1` warns when `MqttCheck`'s constant isn't an address of the
-host machine. It also still checks RoomSensor's, which is now the fallback rather than the live
-value; the versioned `config\room-sensor.json` needs the same check, and that is #133 (worth
-folding into #100, which is the same guard's other problem).
+Note that the integration tests (`MqttCheck`, `MqttReconnectCheck`, `HomieClientCheck`) hardcode
+their own broker (`192.168.1.238`) separately — these copies drift apart easily, and a stale one
+is the usual reason a healthy device "can't reach the broker". `Run-IntegrationTests.ps1`'s
+pre-flight compares each of them with `SMARTHOME_MQTT_BROKER` and warns when they differ.
+
+The device apps get the same comparison from `Test-DeviceBrokerAddress`, which finds them rather
+than naming them — every `Program.cs` under `src\devices` (#100) — and reads each address where
+the device actually keeps it (#133): `BrokerHost` in each `config\<device>.json` is the live value
+(case-sensitive, as on the device; the `.deploy.json` manifests beside them are not
+configurations and are skipped), a `BrokerHost` constant compiled into a device that reads no
+configuration is live too, and RoomSensor's `FallbackBrokerHost` is compared *as the fallback*.
+That last one still matters: it is what carries the `configuration` alert, so a stale one turns a
+misconfigured device into a silent one. What was compared, and which device apps had nothing to compare, is printed on
+every run — a stub is listed rather than warned about, and a renamed constant shows up there by
+name instead of reading like one that agrees.
 
 ## Open work
 

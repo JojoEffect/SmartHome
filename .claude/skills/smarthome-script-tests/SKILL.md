@@ -32,8 +32,9 @@ Useful switches:
 exercise: `Get-CatalogValidationError`, `ConvertFrom-HomieCaptureLine`, `ConvertTo-HomieSnapshot`,
 `Get-HomieLivePayloads`, `Get-AttributeFailure`, `Get-ConformanceCaptureSeconds`,
 `Wait-ForAnnounceWitnessed`, `Get-SubscriberLogLineCount`, `Test-DeviceConstant`,
-`Invoke-CommandRetryRounds`, plus `Common.ps1`'s path globs, dev-environment state and the
-deployment-geometry parse the deploy cross-checks its flash address against.
+`Test-DeviceBrokerAddress`, `Invoke-CommandRetryRounds`, plus `Common.ps1`'s path globs,
+dev-environment state and the deployment-geometry parse the deploy cross-checks its flash
+address against.
 
 Three of the verdict functions are covered here too, which is newer than the boundary this file
 used to describe:
