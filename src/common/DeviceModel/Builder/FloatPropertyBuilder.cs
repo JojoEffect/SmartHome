@@ -43,10 +43,12 @@ namespace SmartHome.DeviceModel.Builder
         /// republishing the bounds republishes none. Empty text means "no range" and is
         /// not reported.
         ///
-        /// Use <see cref="WithRange"/> to state the bounds directly. It is clearer, a bad
-        /// range there is an exception from <see cref="NumericRange"/>'s factories rather
-        /// than a warning -- which reaches nobody on a device that configured no logger --
-        /// and it is the only way to express an open end or a step.
+        /// Use <see cref="WithRange"/> to state the bounds directly. It is clearer, and a
+        /// bad range there is an exception from <see cref="NumericRange"/>'s factories
+        /// rather than a warning -- which reaches nobody on a device that configured no
+        /// logger. It is not more expressive, though: the text form carries an open end
+        /// and a step as well, so the difference is how a mistake surfaces, not what can
+        /// be declared.
         /// </remarks>
         public FloatPropertyBuilder WithFormat(string format)
         {
