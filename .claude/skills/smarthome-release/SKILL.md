@@ -35,7 +35,7 @@ anything in the release path.
 ## Why there is a stamping step at all
 
 `.nfproj` is a classic MSBuild project with no generated assembly info: it takes its
-version from a checked-in `Properties/AssemblyInfo.cs`, and all 16 are hardcoded to
+version from a checked-in `Properties/AssemblyInfo.cs`, and all 18 are hardcoded to
 `1.0.0.0`. MinVer works by setting the MSBuild `$(Version)` property, which SDK-style
 projects turn into assembly attributes and classic ones ignore entirely — so MinVer alone
 would name the release correctly and leave every binary claiming 1.0.0.0.
