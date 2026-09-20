@@ -30,6 +30,8 @@ namespace SmartHome.HomeAssistant
         {
             DeviceId = device.Id;
             AvailabilityTopic = HomeAssistantTopics.Availability(device);
+            AlertStateTopic = HomeAssistantTopics.Problem(device);
+            AlertAttributesTopic = HomeAssistantTopics.Alerts(device);
             Configs = DiscoveryMapper.Map(device, settings);
 
             var described = new ArrayList();
@@ -70,7 +72,16 @@ namespace SmartHome.HomeAssistant
         /// </summary>
         internal string AvailabilityTopic { get; }
 
-        /// <summary>One retained discovery configuration per property, in declaration order.</summary>
+        /// <summary>Where the diagnostic entity reads whether anything is wrong.</summary>
+        internal string AlertStateTopic { get; }
+
+        /// <summary>Where that entity reads the raised alerts' ids and messages.</summary>
+        internal string AlertAttributesTopic { get; }
+
+        /// <summary>
+        /// One retained discovery configuration per property, in declaration order, plus
+        /// the device's own diagnostic entity last.
+        /// </summary>
         internal DiscoveryEntity[] Configs { get; }
 
         /// <summary>Every property, with the topic its value goes to.</summary>
