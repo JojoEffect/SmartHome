@@ -414,6 +414,39 @@ namespace SmartHome.UnitTests
         }
 
         [TestMethod]
+        public void An_Alert_Raised_During_An_Outage_Waits_For_The_Re_Announce()
+        {
+            // With no session there is nowhere to publish, so an alert change during an
+            // outage would only produce a failed publish and an error line -- and a device
+            // raising one from inside its measurement loop produces a change every few
+            // seconds. The alert handler comes off with the property handlers for that
+            // reason, and nothing is lost: the re-announce publishes the set as it stands
+            // when the session returns.
+            var mqttClient = new MockMqttClient();
+            var client = new HomeAssistantClient(BuildDevice(out _), mqttClient);
+
+            client.Connect();
+            mqttClient.RaiseConnectionClosed();
+
+            var publishesDuringOutage = mqttClient.Publishes.Length;
+            client.RaiseAlert("sensor", "BMP280 reading invalid.");
+
+            Assert.AreEqual(publishesDuringOutage, mqttClient.Publishes.Length, "nothing was attempted while there was nowhere to publish");
+
+            mqttClient.RaiseConnectionOpened();
+
+            Assert.AreEqual("ON", Last(mqttClient, _problemTopic), "the re-announce carried it");
+            Assert.AreEqual(
+                "{\"alerts\":\"sensor\",\"sensor\":\"BMP280 reading invalid.\"}",
+                Last(mqttClient, _alertsTopic));
+
+            // And the handler is live again, so the next change is published rather than
+            // waiting for another announce.
+            client.ClearAlert("sensor");
+            Assert.AreEqual("OFF", Last(mqttClient, _problemTopic));
+        }
+
+        [TestMethod]
         public void An_Alert_Raised_Before_Connect_Is_Part_Of_The_Announcement()
         {
             // How a device that could not read its configuration says so. The shared

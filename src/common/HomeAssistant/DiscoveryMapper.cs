@@ -76,9 +76,18 @@ namespace SmartHome.HomeAssistant
         private const string BooleanFalse = "false";
 
         /// <summary>
-        /// The name of the diagnostic entity a device's alerts are rendered as, in its
-        /// entity id and as its displayed name.
+        /// What the diagnostic entity a device's alerts are rendered as is called in its
+        /// entity id: <c>&lt;device&gt;_problem</c>.
         /// </summary>
+        /// <remarks>
+        /// The id only. Its displayed name is written where it is used and is capitalised
+        /// ("Problem"), because the two are held to different rules: an entity id shares
+        /// its alphabet with the model's ids, which are lowercase, while a displayed name
+        /// is human-facing text that Home Assistant prefixes with the device's own name.
+        /// Deriving one from the other would tie a rename in one to a rename in the
+        /// other, and changing an entity id is a migration -- a retained configuration
+        /// under the old id outlives the device that published it.
+        /// </remarks>
         public const string ProblemEntityName = "problem";
 
         /// <summary>
@@ -162,6 +171,9 @@ namespace SmartHome.HomeAssistant
             var objectId = HomeAssistantTopics.DeviceObjectId(device, ProblemEntityName);
 
             var json = new JsonWriter()
+                // Capitalised, and deliberately not ProblemEntityName: see that
+                // constant's remarks for why the id and the displayed name are written
+                // separately.
                 .String("name", "Problem")
                 .String("uniq_id", objectId)
                 .String("stat_t", HomeAssistantTopics.Problem(device))
