@@ -291,9 +291,10 @@ src/
     HomeAssistant/        SmartHome.HomeAssistant — the Home Assistant MQTT Discovery adapter
                             over the same two (#111). Its own root (smarthome/), its own
                             availability topic and last will, and no reference to
-                            SmartHome.Homie. DiscoveryMapper is the whole mapping and is a
-                            pure function, so CI asserts it; the client that publishes it
-                            lands in the next slice
+                            SmartHome.Homie. HomeAssistantClient owns the session and
+                            implements IDeviceProtocol; DiscoveryMapper is the whole
+                            mapping and is a pure function, so CI asserts it. Alerts still
+                            go nowhere on this wire — that is the next slice
     Mqtt/                 SmartHome.Mqtt       — ReconnectingMqttClient: auto-reconnect and
                             subscription replay over nanoFramework.M2Mqtt. Protocol-agnostic;
                             knows nothing about Homie
