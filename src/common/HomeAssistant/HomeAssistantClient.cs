@@ -46,13 +46,24 @@ namespace SmartHome.HomeAssistant
         private readonly ILogger _logger;
         private readonly IDictionary _settablePropertiesTable;
 
-        // Derived once from the description, which cannot change after construction.
-        private readonly string[] _settableCommandTopics;
-        private readonly MqttQoSLevel[] _settableQosLevels;
+        // Derived once from the description, which cannot change after construction: every
+        // settable property's command topic, plus Home Assistant's own birth topic. One
+        // array rather than two subscriptions, so a device with nothing settable still
+        // hears Home Assistant come back.
+        private readonly string[] _subscribedTopics;
+        private readonly MqttQoSLevel[] _subscribedQosLevels;
 
-        // Guards the one path that publishes availability. Everything it protects is a
-        // field read and an enqueue, and nothing waits while holding it.
+        // Guards the one path that publishes availability, and the one that publishes the
+        // alert set. Everything they protect is a field read and an enqueue, and nothing
+        // waits while holding either.
         private readonly object _availabilityLock = new();
+        private readonly object _alertLock = new();
+
+        // The last alert payloads actually put on the wire, which is what keeps a device
+        // that re-raises the same alert from republishing it. Null means "nothing on this
+        // session yet".
+        private string? _lastPublishedAlertState;
+        private string? _lastPublishedAlertAttributes;
 
         // The last availability payload actually put on the wire, which is what makes the
         // publish idempotent. Null means "nothing on this session yet", which is also
@@ -102,16 +113,20 @@ namespace SmartHome.HomeAssistant
 
             _settablePropertiesTable = InitialiseSettablePropertiesTable(_description);
 
-            _settableCommandTopics = new string[_settablePropertiesTable.Count];
-            _settablePropertiesTable.Keys.CopyTo(_settableCommandTopics, 0);
+            _subscribedTopics = new string[_settablePropertiesTable.Count + 1];
+            _settablePropertiesTable.Keys.CopyTo(_subscribedTopics, 0);
 
-            _settableQosLevels = new MqttQoSLevel[_settableCommandTopics.Length];
-            for (int i = 0; i < _settableQosLevels.Length; i++)
+            // Last, so the command topics keep the table's own key order -- which is what
+            // ends up in the SUBSCRIBE packet.
+            _subscribedTopics[_subscribedTopics.Length - 1] = HomeAssistantTopics.DiscoveryStatusTopic;
+
+            _subscribedQosLevels = new MqttQoSLevel[_subscribedTopics.Length];
+            for (int i = 0; i < _subscribedQosLevels.Length; i++)
             {
                 // At least once, matching what the discovery configuration tells Home
                 // Assistant to publish commands at. A command dropped by the broker
                 // leaves no trace at either end.
-                _settableQosLevels[i] = MqttQoSLevel.AtLeastOnce;
+                _subscribedQosLevels[i] = MqttQoSLevel.AtLeastOnce;
             }
         }
 
@@ -168,6 +183,8 @@ namespace SmartHome.HomeAssistant
                 // success would fire each one twice.
                 _device.OnDeviceStateChange -= HandleDeviceStateChange;
                 _device.OnDeviceStateChange += HandleDeviceStateChange;
+                _device.OnAlertChange -= HandleAlertChange;
+                _device.OnAlertChange += HandleAlertChange;
 
                 // A new session is about to be opened; nothing is announced on it yet.
                 _announcedThisSession = false;
@@ -198,7 +215,7 @@ namespace SmartHome.HomeAssistant
                 RegisterConnectionChangeHandlers();
 
                 RegisterPropertyUpdateHandlers();
-                SubscribeCommandTopics();
+                SubscribeTopics();
 
                 // Subscriptions before the announcement, so a controller reacting to a
                 // freshly discovered entity cannot find the device deaf to its commands.
@@ -292,10 +309,64 @@ namespace SmartHome.HomeAssistant
         }
 
         /// <inheritdoc />
+        /// <remarks>
+        /// Raised alerts become one diagnostic entity: it is on while any is raised, and
+        /// every id and message travels as its attributes. The device stays *available*
+        /// throughout -- it is reachable and still publishing, and its other properties
+        /// may be perfectly good.
+        /// </remarks>
         public void RaiseAlert(string id, string message) => _device.RaiseAlert(id, message);
 
         /// <inheritdoc />
         public void ClearAlert(string id) => _device.ClearAlert(id);
+
+        /// <summary>
+        /// Withdraws every entity this device announced: an empty retained payload on
+        /// each discovery topic.
+        /// </summary>
+        /// <remarks>
+        /// The only way a discovered entity goes away. A discovery configuration outlives
+        /// the device that published it -- it outlives a reflash, a rename and a broker
+        /// restart -- so a property that is renamed or removed leaves a working-looking
+        /// entity behind, wired to a topic nothing publishes to any more.
+        ///
+        /// An empty payload is also how MQTT deletes a retained message, so this clears
+        /// the broker's store as well as the entity: the two are the same act.
+        ///
+        /// **Order matters when ids change.** This withdraws the entities the device
+        /// announces *now*, so it has to run before the change that renames them; run
+        /// afterwards, it withdraws the new ids and leaves the old entities standing with
+        /// nothing to remove them.
+        ///
+        /// The values, the availability and the alert topics are deliberately left alone.
+        /// They are this device's own state under its own root, which stays true whether
+        /// or not Home Assistant is listening, and clearing them would make a withdrawal
+        /// indistinguishable from a device that went away.
+        /// </remarks>
+        /// <returns>False when a publish failed, so a caller can retry.</returns>
+        public bool Remove()
+        {
+            var removed = true;
+
+            _logger.LogInformation($"Removing {_description.Configs.Length} Home Assistant entities for device '{_description.DeviceId}'.");
+
+            for (int i = 0; i < _description.Configs.Length; i++)
+            {
+                var config = _description.Configs[i];
+
+                try
+                {
+                    Publish(config.Topic, new byte[0], retained: true);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"Failed to withdraw the discovery configuration '{config.Topic}'.");
+                    removed = false;
+                }
+            }
+
+            return removed;
+        }
 
         private void ConnectInternal()
         {
@@ -329,12 +400,13 @@ namespace SmartHome.HomeAssistant
             // it unconditionally since the transition can be refused.
             if (_mqttClient.IsConnected)
             {
-                UnsubscribeCommandTopics();
+                UnsubscribeTopics();
             }
 
             UnregisterPropertyUpdateHandlers();
             _mqttClient.Disconnect();
             _device.OnDeviceStateChange -= HandleDeviceStateChange;
+            _device.OnAlertChange -= HandleAlertChange;
         }
 
         private void HandleDeviceStateChange(DeviceStateChangeEventArgs args)
@@ -486,8 +558,79 @@ namespace SmartHome.HomeAssistant
                 }
             }
 
+            // Forced, because this runs when the store on the other end may hold nothing
+            // of ours. It is also what puts an alert raised *before* Connect() into the
+            // announcement -- which is how a device that could not read its configuration
+            // says so, and it has to be part of the announcement rather than an update
+            // after it, or the device is briefly advertised as healthy.
+            PublishAlerts(force: true);
+
             return published;
         }
+
+        /// <summary>
+        /// Publishes whether anything is wrong, and what.
+        /// </summary>
+        /// <remarks>
+        /// Two topics, because Home Assistant reads a state and its attributes
+        /// separately: a binary sensor's state must be exactly its on or off payload, so
+        /// the ids and the messages cannot travel with it.
+        ///
+        /// Each is published only when it changed, which is what keeps a device that
+        /// re-raises the same alert inside its measurement loop from republishing it
+        /// every few seconds. The two move independently: a second alert raised while one
+        /// is already up changes the attributes and not the state.
+        ///
+        /// Swallows and reports, like the availability publish, because this is reached
+        /// from M2Mqtt's dispatch thread on the re-announce paths, where an escaping
+        /// exception is treated as a dead connection.
+        /// </remarks>
+        private void PublishAlerts(bool force)
+        {
+            lock (_alertLock)
+            {
+                PublishAlertTopic(
+                    _description.AlertStateTopic,
+                    AlertPayloads.State(_device.HasAlerts),
+                    ref _lastPublishedAlertState,
+                    force);
+
+                PublishAlertTopic(
+                    _description.AlertAttributesTopic,
+                    AlertPayloads.Attributes(_device.Alerts),
+                    ref _lastPublishedAlertAttributes,
+                    force);
+            }
+        }
+
+        private void PublishAlertTopic(string topic, string payload, ref string? lastPublished, bool force)
+        {
+            if (!force && lastPublished == payload)
+            {
+                return;
+            }
+
+            lastPublished = payload;
+
+            try
+            {
+                Publish(topic, Encoding.UTF8.GetBytes(payload), retained: true);
+            }
+            catch (Exception ex)
+            {
+                // Cleared, so the next change tries again rather than believing this one
+                // is already on the wire.
+                lastPublished = null;
+                _logger.LogError(ex, $"Failed to publish '{topic}'.");
+            }
+        }
+
+        /// <remarks>
+        /// The model raises this only when the raised set actually changed -- re-raising
+        /// an alert with the message it already carries is a no-op there -- so this can
+        /// publish straight from it.
+        /// </remarks>
+        private void HandleAlertChange(AlertChangeEventArgs args) => PublishAlerts(force: false);
 
         // The single announce path, for both first connect and reconnect. Idempotent per
         // session: whichever of the two gets there first does the work, and the other is
@@ -516,31 +659,29 @@ namespace SmartHome.HomeAssistant
             return false;
         }
 
-        private void SubscribeCommandTopics()
+        /// <remarks>
+        /// The command topics and Home Assistant's birth topic in one SUBSCRIBE. The
+        /// birth topic is why this is never skipped: a device with nothing settable still
+        /// has to hear Home Assistant come back, or it stays discovered only for as long
+        /// as that installation keeps its retained configurations.
+        ///
+        /// Through <c>IReconnectingMqttClient</c>, so both are cached and replayed after
+        /// a reconnect without anything here re-subscribing.
+        /// </remarks>
+        private void SubscribeTopics()
         {
-            _logger.LogDebug("Subscribing to command topics...");
+            _logger.LogDebug("Subscribing to command topics and the Home Assistant status topic...");
 
-            if (_settableCommandTopics.Length == 0)
-            {
-                _logger.LogDebug("No settable properties found. Skipping MQTT subscribe.");
-                return;
-            }
-
-            _mqttClient.Subscribe(_settableCommandTopics, _settableQosLevels);
+            _mqttClient.Subscribe(_subscribedTopics, _subscribedQosLevels);
             _mqttClient.MqttMsgPublishReceived -= HandleIncomingMessage;
             _mqttClient.MqttMsgPublishReceived += HandleIncomingMessage;
         }
 
-        private void UnsubscribeCommandTopics()
+        private void UnsubscribeTopics()
         {
-            _logger.LogDebug("Unsubscribing from command topics...");
+            _logger.LogDebug("Unsubscribing from command topics and the Home Assistant status topic...");
 
-            if (_settableCommandTopics.Length == 0)
-            {
-                return;
-            }
-
-            _mqttClient.Unsubscribe(_settableCommandTopics);
+            _mqttClient.Unsubscribe(_subscribedTopics);
             _mqttClient.MqttMsgPublishReceived -= HandleIncomingMessage;
         }
 
@@ -548,6 +689,12 @@ namespace SmartHome.HomeAssistant
         {
             string topic = e.Topic;
             byte[] message = e.Message;
+
+            if (topic == HomeAssistantTopics.DiscoveryStatusTopic)
+            {
+                HandleDiscoveryStatus(message);
+                return;
+            }
 
             if (!_settablePropertiesTable.Contains(topic))
             {
@@ -601,6 +748,44 @@ namespace SmartHome.HomeAssistant
             {
                 _logger.LogError(ex, $"An OnCommand handler threw for '{topic}'.");
             }
+        }
+
+        /// <summary>
+        /// Home Assistant said it came up: announce everything again.
+        /// </summary>
+        /// <remarks>
+        /// Retained configurations do not cover this on their own. They are replayed, but
+        /// only once Home Assistant's MQTT integration has subscribed, and an
+        /// installation that was reconfigured may not replay them at all -- which is why
+        /// Home Assistant publishes a birth message precisely so devices can announce
+        /// themselves again.
+        ///
+        /// Not routed through <c>Announce()</c>, deliberately: this session has already
+        /// been announced, so that call would correctly do nothing. What has been lost is
+        /// at the other end, not in the broker, so the publishes are repeated without
+        /// taking the device back through its lifecycle -- a device does not re-enter
+        /// 'connecting' because a consumer restarted.
+        ///
+        /// Runs on M2Mqtt's dispatch thread. PublishAnnouncement guards every publish,
+        /// which is what keeps an exception from being read there as a dead connection.
+        /// </remarks>
+        private void HandleDiscoveryStatus(byte[] message)
+        {
+            var payload = message == null
+                ? string.Empty
+                : Encoding.UTF8.GetString(message, 0, message.Length).Trim();
+
+            if (payload != HomeAssistantTopics.DiscoveryStatusOnline)
+            {
+                // The other payload is 'offline', Home Assistant's own will. It says the
+                // consumer went away, not that this device did, and re-announcing into a
+                // broker nobody is reading is just traffic.
+                return;
+            }
+
+            _logger.LogInformation("Home Assistant came online; announcing again.");
+
+            PublishAnnouncement();
         }
 
         private void HandleConnectionOpen(object sender, ConnectionOpenedEventArgs e)

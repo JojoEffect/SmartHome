@@ -41,9 +41,48 @@ namespace SmartHome.HomeAssistant
         /// <remarks>
         /// Three levels (<c>smarthome/&lt;device&gt;/status</c>) where a property's value
         /// topic has four, so it cannot collide with one even on a device whose node is
-        /// called <c>status</c>.
+        /// called <c>status</c>. The same holds for the two alert topics below.
         /// </remarks>
         public const string StatusTopicId = "status";
+
+        /// <summary>
+        /// The device-level topic carrying <c>ON</c> while any alert is raised.
+        /// </summary>
+        public const string ProblemTopicId = "problem";
+
+        /// <summary>
+        /// The device-level topic carrying the raised alerts as a JSON object, which
+        /// Home Assistant attaches to the problem entity as its attributes.
+        /// </summary>
+        public const string AlertsTopicId = "alerts";
+
+        /// <summary>
+        /// The binary payloads, which are Home Assistant's own defaults for
+        /// <c>payload_on</c> and <c>payload_off</c> on a binary sensor.
+        /// </summary>
+        /// <remarks>
+        /// Upper case, unlike a boolean property's <c>true</c>/<c>false</c>: these are
+        /// this adapter's own payloads on a topic no property owns, so there is nothing
+        /// to agree with but Home Assistant's defaults.
+        /// </remarks>
+        public const string On = "ON";
+
+        /// <inheritdoc cref="On"/>
+        public const string Off = "OFF";
+
+        /// <summary>
+        /// Where Home Assistant publishes its own birth (<c>online</c>) and will
+        /// (<c>offline</c>).
+        /// </summary>
+        /// <remarks>
+        /// Not derived from the discovery prefix. Home Assistant's birth topic is
+        /// configured separately from it and defaults to this literal, so an installation
+        /// that moved the discovery prefix has almost certainly not moved this.
+        /// </remarks>
+        public const string DiscoveryStatusTopic = "homeassistant/status";
+
+        /// <summary>The payload Home Assistant's birth message carries.</summary>
+        public const string DiscoveryStatusOnline = "online";
 
         /// <summary>
         /// The availability payloads, which are Home Assistant's own defaults for
@@ -126,6 +165,25 @@ namespace SmartHome.HomeAssistant
             => $"{Of(device)}{Separator}{StatusTopicId}";
 
         /// <summary>
+        /// Where the device says whether anything is wrong:
+        /// <c>smarthome/&lt;device&gt;/problem</c>.
+        /// </summary>
+        public static string Problem(Device device)
+            => $"{Of(device)}{Separator}{ProblemTopicId}";
+
+        /// <summary>
+        /// Where the raised alerts go, as a JSON object:
+        /// <c>smarthome/&lt;device&gt;/alerts</c>.
+        /// </summary>
+        /// <remarks>
+        /// A separate topic from the one above because Home Assistant reads a state and
+        /// its attributes from separate topics: a binary sensor's state must be exactly
+        /// its on or off payload, so the ids and messages cannot travel with it.
+        /// </remarks>
+        public static string Alerts(Device device)
+            => $"{Of(device)}{Separator}{AlertsTopicId}";
+
+        /// <summary>
         /// The entity id of a property: <c>&lt;device&gt;_&lt;node&gt;_&lt;property&gt;</c>.
         /// </summary>
         /// <remarks>
@@ -138,6 +196,19 @@ namespace SmartHome.HomeAssistant
             => entity.Parent == null
                 ? entity.Id
                 : $"{ObjectId(entity.Parent)}{IdSeparator}{entity.Id}";
+
+        /// <summary>
+        /// The entity id of something the device has that no property does:
+        /// <c>&lt;device&gt;_&lt;name&gt;</c>.
+        /// </summary>
+        /// <remarks>
+        /// Cannot collide with a property's id whatever <paramref name="name"/> is: a
+        /// property's spans three levels and so carries exactly two separators, and this
+        /// one carries a single separator. A device with a node called <c>problem</c> is
+        /// therefore no problem.
+        /// </remarks>
+        public static string DeviceObjectId(Device device, string name)
+            => $"{device.Id}{IdSeparator}{name}";
 
         /// <summary>
         /// <c>&lt;prefix&gt;/&lt;component&gt;/&lt;object-id&gt;/config</c>: the

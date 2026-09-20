@@ -47,16 +47,79 @@ namespace SmartHome.UnitTests
         }
 
         [TestMethod]
-        public void Maps_Every_Property_To_One_Entity()
+        public void Maps_Every_Property_To_One_Entity_And_The_Device_To_One_More()
         {
             var device = BuildDevice();
 
             var entities = DiscoveryMapper.Map(device, new HomeAssistantSettings());
 
             // Counted off the device rather than written as a literal. The claim is "one
-            // entity per property", and a hard-coded number states it only for as long as
-            // nobody adds a property to the fixture.
-            Assert.AreEqual(PropertyCount(device), entities.Length, "one discovery message per property");
+            // entity per property, plus the device's own diagnostic one", and a
+            // hard-coded number states it only for as long as nobody adds a property to
+            // the fixture.
+            Assert.AreEqual(PropertyCount(device) + 1, entities.Length, "one discovery message per property, and one for the alerts");
+        }
+
+        [TestMethod]
+        public void The_Device_Itself_Gets_A_Diagnostic_Entity_For_Its_Alerts()
+        {
+            // Home Assistant has no vocabulary for a keyed alert set. A binary sensor with
+            // the 'problem' device class carries the half it can say -- whether anything
+            // is wrong -- and the ids and messages travel as its attributes, from a
+            // separate topic because a binary sensor's state must be exactly its on or off
+            // payload.
+            var entities = DiscoveryMapper.Map(BuildDevice(), new HomeAssistantSettings());
+
+            var payload = Find(entities, "homeassistant/binary_sensor/super-car_problem/config").Payload;
+
+            AssertContains(payload, "\"uniq_id\":\"super-car_problem\"");
+            AssertContains(payload, "\"stat_t\":\"smarthome/super-car/problem\"");
+            AssertContains(payload, "\"dev_cla\":\"problem\"");
+            AssertContains(payload, "\"ent_cat\":\"diagnostic\"");
+            AssertContains(payload, "\"json_attr_t\":\"smarthome/super-car/alerts\"");
+            AssertContains(payload, "\"avty_t\":\"smarthome/super-car/status\"");
+            AssertMissing(payload, "cmd_t");
+            AssertMissing(payload, "exp_aft");
+        }
+
+        [TestMethod]
+        public void A_Device_With_No_Properties_Still_Announces_Its_Diagnostic_Entity()
+        {
+            // The case this entity exists for, and it is not hypothetical: a device that
+            // cannot read its configuration announces NO nodes and raises one alert
+            // saying why. Without an entity that needs no property, such a device would
+            // publish no configuration at all, appear in Home Assistant not at all, and
+            // its failure would be invisible in exactly the installation that has to see
+            // it.
+            var device = new DeviceBuilder(_deviceId, _deviceName).BuildDevice();
+
+            var entities = DiscoveryMapper.Map(device, new HomeAssistantSettings());
+
+            Assert.AreEqual(1, entities.Length, "the diagnostic entity, and nothing else");
+            Assert.AreEqual("homeassistant/binary_sensor/super-car_problem/config", entities[0].Topic);
+        }
+
+        [TestMethod]
+        public void The_Diagnostic_Entity_Cannot_Collide_With_A_Property_Entity()
+        {
+            // A property's entity id spans three levels and so carries two separators;
+            // the device's own carries one. So a device with a node called 'problem' is
+            // no problem, which is worth a test because the separator is the only thing
+            // standing between the two.
+            var device = new DeviceBuilder(_deviceId, _deviceName)
+                .AddNode("problem", "Problem", "diagnostics")
+                    .AddBooleanProperty("raised", "Raised", false)
+                    .BuildProperty()
+                .BuildNode()
+                .BuildDevice();
+
+            var entities = DiscoveryMapper.Map(device, new HomeAssistantSettings());
+
+            Assert.AreEqual(2, entities.Length);
+            Assert.AreNotEqual(entities[0].Topic, entities[1].Topic);
+            AssertContains(
+                Find(entities, "homeassistant/binary_sensor/super-car_problem_raised/config").Payload,
+                "\"uniq_id\":\"super-car_problem_raised\"");
         }
 
         [TestMethod]
@@ -448,7 +511,7 @@ namespace SmartHome.UnitTests
 
             var entities = DiscoveryMapper.Map(device, new HomeAssistantSettings());
 
-            Assert.AreEqual(2, entities.Length, "one entity per property");
+            Assert.AreEqual(3, entities.Length, "one entity per property, plus the device's diagnostic one");
             Assert.AreNotEqual(entities[0].Topic, entities[1].Topic, "two distinct discovery topics");
             AssertContains(entities[0].Payload, "\"uniq_id\":\"super-car_tank-level_litres\"");
             AssertContains(entities[1].Payload, "\"uniq_id\":\"super-car_tank_level-litres\"");
@@ -645,7 +708,7 @@ namespace SmartHome.UnitTests
                 .BuildNode()
                 .BuildDevice();
 
-            Assert.AreEqual(1, DiscoveryMapper.Map(readOnly, settings).Length);
+            Assert.AreEqual(2, DiscoveryMapper.Map(readOnly, settings).Length, "the sensor, and the diagnostic entity");
         }
 
         [TestMethod]

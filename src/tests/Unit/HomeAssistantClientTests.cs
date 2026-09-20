@@ -40,6 +40,16 @@ namespace SmartHome.UnitTests
         private const string _availabilityTopic = "smarthome/super-car/status";
         private const string _configTopic = "homeassistant/sensor/super-car_engine_temperature/config";
         private const string _numberConfigTopic = "homeassistant/number/super-car_engine_temperature/config";
+        private const string _problemConfigTopic = "homeassistant/binary_sensor/super-car_problem/config";
+        private const string _problemTopic = "smarthome/super-car/problem";
+        private const string _alertsTopic = "smarthome/super-car/alerts";
+        private const string _stringStateTopic = "smarthome/super-car/engine/event";
+
+        // What a single-property device's announcement costs: its own config, the
+        // diagnostic entity's config, one value, the two alert topics, and availability.
+        // Written once because several tests assert that an announcement happened exactly
+        // once, and a literal in each of them says that only until the shape changes.
+        private const int AnnouncePublishCount = 6;
 
         [Setup]
         public void Setup()
@@ -115,7 +125,7 @@ namespace SmartHome.UnitTests
         }
 
         [TestMethod]
-        public void An_Announce_Publishes_Configs_Then_Values_Then_Online()
+        public void An_Announce_Publishes_Configs_Then_Values_Then_Alerts_Then_Online()
         {
             // The order is a courtesy rather than a requirement -- everything here is
             // retained, so Home Assistant is served whenever it subscribes -- but it is
@@ -127,18 +137,30 @@ namespace SmartHome.UnitTests
             client.Connect();
 
             var publishes = mqttClient.Publishes;
-            Assert.AreEqual(3, publishes.Length, "one config, one value, one availability");
+            Assert.AreEqual(AnnouncePublishCount, publishes.Length, "two configs, one value, two alert topics, one availability");
 
             Assert.AreEqual(_configTopic, publishes[0].Topic);
             Assert.IsTrue(publishes[0].Retain, "a discovery config is retained or nobody who boots later sees it");
 
-            Assert.AreEqual(_stateTopic, publishes[1].Topic);
-            Assert.AreEqual("0.00", publishes[1].Payload);
+            Assert.AreEqual(_problemConfigTopic, publishes[1].Topic);
             Assert.IsTrue(publishes[1].Retain);
 
-            Assert.AreEqual(_availabilityTopic, publishes[2].Topic);
-            Assert.AreEqual("online", publishes[2].Payload);
+            Assert.AreEqual(_stateTopic, publishes[2].Topic);
+            Assert.AreEqual("0.00", publishes[2].Payload);
             Assert.IsTrue(publishes[2].Retain);
+
+            // Nothing is wrong, and the device says so rather than leaving the diagnostic
+            // entity unknown until the first thing goes wrong.
+            Assert.AreEqual(_problemTopic, publishes[3].Topic);
+            Assert.AreEqual("OFF", publishes[3].Payload);
+            Assert.IsTrue(publishes[3].Retain);
+
+            Assert.AreEqual(_alertsTopic, publishes[4].Topic);
+            Assert.AreEqual("{}", publishes[4].Payload, "no alerts, and therefore no attributes");
+
+            Assert.AreEqual(_availabilityTopic, publishes[5].Topic);
+            Assert.AreEqual("online", publishes[5].Payload);
+            Assert.IsTrue(publishes[5].Retain);
             Assert.AreEqual("online", client.Availability);
         }
 
@@ -184,7 +206,10 @@ namespace SmartHome.UnitTests
             var publishes = mqttClient.Publishes;
 
             Assert.IsTrue(publishes[0].Retain, "the config is retained whatever the property says");
-            Assert.IsFalse(publishes[1].Retain, "the announce carries the property's own flag");
+            // Index two: the property's config, then the device's diagnostic one, then
+            // the value.
+            Assert.AreEqual(_stringStateTopic, publishes[2].Topic);
+            Assert.IsFalse(publishes[2].Retain, "the announce carries the property's own flag");
             Assert.IsFalse(publishes[publishes.Length - 1].Retain, "and so does the update");
         }
 
@@ -199,8 +224,11 @@ namespace SmartHome.UnitTests
 
             client.Connect();
 
-            Assert.AreEqual(1, mqttClient.SubscriptionCount);
+            // The command topic first, Home Assistant's birth topic after it: one
+            // SUBSCRIBE carries both.
+            Assert.AreEqual(2, mqttClient.SubscriptionCount);
             Assert.AreEqual(_commandTopic, mqttClient.SubscribedTopics[0]);
+            Assert.AreEqual("homeassistant/status", mqttClient.SubscribedTopics[1]);
             // At most once would let the broker drop a controller's command silently,
             // which is the one thing neither end can notice.
             Assert.AreEqual((int)MqttQoSLevel.AtLeastOnce, (int)mqttClient.SubscribedQosLevels[0]);
@@ -316,26 +344,93 @@ namespace SmartHome.UnitTests
         }
 
         [TestMethod]
-        public void An_Alert_Does_Not_Make_The_Device_Unavailable()
+        public void An_Alert_Turns_The_Diagnostic_Entity_On_And_Carries_Its_Message()
         {
-            // A device that has raised an alert is still reachable and still publishing,
-            // and its other properties may be perfectly good. Availability says whether
-            // the device is there, not whether it is happy. What the alert set becomes on
-            // this wire is a diagnostic entity, which is the next slice.
+            // The whole of what this convention can say about health: one entity that is
+            // on while anything is wrong, and the ids and messages as its attributes --
+            // which is more than a convention with a single lifecycle token can carry,
+            // and is why the model keeps alerts keyed.
             var mqttClient = new MockMqttClient();
             var client = new HomeAssistantClient(BuildDevice(out _), mqttClient);
 
             client.Connect();
-            var publishesAfterConnect = mqttClient.Publishes.Length;
 
             client.RaiseAlert("sensor", "BMP280 reading invalid.");
 
+            Assert.AreEqual("ON", Last(mqttClient, _problemTopic));
+            Assert.AreEqual(
+                "{\"alerts\":\"sensor\",\"sensor\":\"BMP280 reading invalid.\"}",
+                Last(mqttClient, _alertsTopic));
+
+            // A device that has raised an alert is still reachable and still publishing,
+            // and its other properties may be perfectly good: availability says whether
+            // the device is there, not whether it is happy.
             Assert.AreEqual("online", client.Availability);
             Assert.AreEqual((int)DeviceState.Ready, (int)client.State);
-            Assert.AreEqual(publishesAfterConnect, mqttClient.Publishes.Length);
 
             client.ClearAlert("sensor");
+
+            Assert.AreEqual("OFF", Last(mqttClient, _problemTopic));
+            Assert.AreEqual("{}", Last(mqttClient, _alertsTopic));
             Assert.AreEqual("online", client.Availability);
+        }
+
+        [TestMethod]
+        public void A_Second_Alert_Changes_The_Attributes_And_Not_The_State()
+        {
+            // The two topics move independently, which is the point of publishing each
+            // only when it changed: a device that raises a second alert has nothing new
+            // to say about *whether* something is wrong, and republishing 'ON' over 'ON'
+            // would be noise in every retained store.
+            var mqttClient = new MockMqttClient();
+            var client = new HomeAssistantClient(BuildDevice(out _), mqttClient);
+
+            client.Connect();
+            client.RaiseAlert("sensor", "BMP280 reading invalid.");
+
+            var stateBefore = CountFor(mqttClient, _problemTopic);
+            var attributesBefore = CountFor(mqttClient, _alertsTopic);
+
+            client.RaiseAlert("configuration", "The configuration file is missing.");
+
+            Assert.AreEqual(stateBefore, CountFor(mqttClient, _problemTopic), "the state did not move");
+            Assert.AreEqual(attributesBefore + 1, CountFor(mqttClient, _alertsTopic), "the attributes did");
+
+            // Sorted by id, so the same set of alerts always renders the same payload --
+            // the model's set is a hashtable, whose enumeration order is neither stable
+            // nor the author's.
+            Assert.AreEqual(
+                "{\"alerts\":\"configuration, sensor\"" +
+                ",\"configuration\":\"The configuration file is missing.\"" +
+                ",\"sensor\":\"BMP280 reading invalid.\"}",
+                Last(mqttClient, _alertsTopic));
+
+            // Re-raising one with the message it already carries changes nothing at all:
+            // the model does not raise the event, so nothing is republished. A device
+            // raising an alert from inside its measurement loop depends on that.
+            var attributesAfter = CountFor(mqttClient, _alertsTopic);
+            client.RaiseAlert("sensor", "BMP280 reading invalid.");
+            Assert.AreEqual(attributesAfter, CountFor(mqttClient, _alertsTopic));
+        }
+
+        [TestMethod]
+        public void An_Alert_Raised_Before_Connect_Is_Part_Of_The_Announcement()
+        {
+            // How a device that could not read its configuration says so. The shared
+            // failure behaviour raises the alert BEFORE connecting, precisely so that the
+            // announcement already carries it -- a misconfigured device must not advertise
+            // a healthy state, not even for one publish.
+            var mqttClient = new MockMqttClient();
+            var client = new HomeAssistantClient(BuildDevice(out _), mqttClient);
+
+            client.RaiseAlert("configuration", "The configuration file is missing.");
+            client.Connect();
+
+            Assert.AreEqual("ON", Last(mqttClient, _problemTopic));
+            Assert.AreEqual(1, CountFor(mqttClient, _problemTopic), "said once, in the announcement");
+            Assert.AreEqual(
+                "{\"alerts\":\"configuration\",\"configuration\":\"The configuration file is missing.\"}",
+                Last(mqttClient, _alertsTopic));
         }
 
         [TestMethod]
@@ -377,9 +472,16 @@ namespace SmartHome.UnitTests
             var publishes = mqttClient.Publishes;
             Assert.AreEqual(publishesAfterConnect * 2, publishes.Length, "the whole announcement went out again");
             Assert.AreEqual(_configTopic, publishes[publishesAfterConnect].Topic);
-            Assert.AreEqual(_stateTopic, publishes[publishesAfterConnect + 1].Topic);
-            Assert.AreEqual(_availabilityTopic, publishes[publishesAfterConnect + 2].Topic);
-            Assert.AreEqual("online", publishes[publishesAfterConnect + 2].Payload);
+            Assert.AreEqual(_problemConfigTopic, publishes[publishesAfterConnect + 1].Topic);
+            Assert.AreEqual(_stateTopic, publishes[publishesAfterConnect + 2].Topic);
+            Assert.AreEqual(_problemTopic, publishes[publishesAfterConnect + 3].Topic);
+            Assert.AreEqual(_alertsTopic, publishes[publishesAfterConnect + 4].Topic);
+
+            // Availability last, and published again even though it has not changed: the
+            // broker this is announcing into may have restarted with an empty store, so
+            // "we already said online" is a statement about a session that is gone.
+            Assert.AreEqual(_availabilityTopic, publishes[publishesAfterConnect + 5].Topic);
+            Assert.AreEqual("online", publishes[publishesAfterConnect + 5].Payload);
         }
 
         [TestMethod]
@@ -440,7 +542,7 @@ namespace SmartHome.UnitTests
             Assert.IsTrue(client.ConnectWithRetry(maxAttempts: 2, retryDelayMs: 1));
 
             Assert.AreEqual(2, mqttClient.ConnectCallCount, "one failed attempt, one that took");
-            Assert.AreEqual(3, mqttClient.Publishes.Length, "one config, one value, one availability -- once");
+            Assert.AreEqual(AnnouncePublishCount, mqttClient.Publishes.Length, "the announcement went out once");
         }
 
         [TestMethod]
@@ -480,6 +582,127 @@ namespace SmartHome.UnitTests
             Assert.IsTrue(publishes[0].Payload.IndexOf($"\"cmd_t\":\"{_commandTopic}\"") >= 0, $"the command topic is in '{publishes[0].Payload}'");
             Assert.AreEqual(_commandTopic, mqttClient.SubscribedTopics[0]);
         }
+
+        [TestMethod]
+        public void Home_Assistant_Coming_Online_Announces_Everything_Again()
+        {
+            // Retained configurations do not cover a Home Assistant restart on their own:
+            // they are replayed only once its MQTT integration has subscribed, and an
+            // installation that was reconfigured may not replay them at all -- which is
+            // why Home Assistant publishes a birth message precisely so devices can
+            // announce themselves again.
+            var mqttClient = new MockMqttClient();
+            var client = new HomeAssistantClient(BuildDevice(out _), mqttClient);
+
+            client.Connect();
+            var publishesAfterConnect = mqttClient.Publishes.Length;
+
+            RaiseDiscoveryStatus(mqttClient, "online");
+
+            var publishes = mqttClient.Publishes;
+
+            Assert.AreEqual(publishesAfterConnect + 5, publishes.Length, "the configs, the values and the alert topics went out again");
+            Assert.AreEqual(_configTopic, publishes[publishesAfterConnect].Topic);
+            Assert.AreEqual(_problemConfigTopic, publishes[publishesAfterConnect + 1].Topic);
+            Assert.AreEqual(_stateTopic, publishes[publishesAfterConnect + 2].Topic);
+            Assert.AreEqual(_problemTopic, publishes[publishesAfterConnect + 3].Topic);
+            Assert.AreEqual(_alertsTopic, publishes[publishesAfterConnect + 4].Topic);
+
+            // Availability is not republished: it is retained and unchanged, so the broker
+            // hands Home Assistant the 'online' that is already there. The device did not
+            // go anywhere, and a consumer restarting is not a lifecycle event for it.
+            Assert.AreEqual(1, CountFor(mqttClient, _availabilityTopic));
+            Assert.AreEqual((int)DeviceState.Ready, (int)client.State);
+        }
+
+        [TestMethod]
+        public void Home_Assistant_Going_Offline_Changes_Nothing()
+        {
+            // 'offline' is Home Assistant's own will. It says the consumer went away, not
+            // that this device did, and re-announcing into a broker nobody is reading is
+            // just traffic.
+            var mqttClient = new MockMqttClient();
+            var client = new HomeAssistantClient(BuildDevice(out _), mqttClient);
+
+            client.Connect();
+            var publishesAfterConnect = mqttClient.Publishes.Length;
+
+            RaiseDiscoveryStatus(mqttClient, "offline");
+
+            Assert.AreEqual(publishesAfterConnect, mqttClient.Publishes.Length);
+            Assert.AreEqual("online", client.Availability, "and the device is still available");
+        }
+
+        [TestMethod]
+        public void The_Status_Topic_Is_Subscribed_Even_With_Nothing_Settable()
+        {
+            // One SUBSCRIBE carrying the command topics and Home Assistant's birth topic.
+            // A device with nothing settable still has to hear Home Assistant come back,
+            // or it stays discovered only for as long as that installation keeps its
+            // retained configurations.
+            var mqttClient = new MockMqttClient();
+            var client = new HomeAssistantClient(BuildDevice(out _), mqttClient);
+
+            client.Connect();
+
+            Assert.AreEqual(1, mqttClient.SubscriptionCount, "no settable property, and still one topic");
+            Assert.AreEqual("homeassistant/status", mqttClient.SubscribedTopics[0]);
+            Assert.AreEqual((int)MqttQoSLevel.AtLeastOnce, (int)mqttClient.SubscribedQosLevels[0]);
+        }
+
+        [TestMethod]
+        public void Remove_Withdraws_Every_Config_With_An_Empty_Payload()
+        {
+            // The only way a discovered entity goes away. A discovery configuration
+            // outlives the device that published it -- a reflash, a rename, a broker
+            // restart -- so a property that is renamed leaves a working-looking entity
+            // behind, wired to a topic nothing publishes to any more. An empty retained
+            // payload is how MQTT deletes a retained message and how Home Assistant
+            // deletes the entity: the two are the same act.
+            var mqttClient = new MockMqttClient();
+            var client = new HomeAssistantClient(BuildDevice(out _), mqttClient);
+
+            client.Connect();
+            var publishesAfterConnect = mqttClient.Publishes.Length;
+
+            Assert.IsTrue(client.Remove());
+
+            var publishes = mqttClient.Publishes;
+            Assert.AreEqual(publishesAfterConnect + 2, publishes.Length, "one withdrawal per config, the diagnostic entity included");
+
+            Assert.AreEqual(_configTopic, publishes[publishesAfterConnect].Topic);
+            Assert.AreEqual(string.Empty, publishes[publishesAfterConnect].Payload);
+            Assert.IsTrue(publishes[publishesAfterConnect].Retain, "retained, or the store keeps the configuration it is meant to delete");
+
+            Assert.AreEqual(_problemConfigTopic, publishes[publishesAfterConnect + 1].Topic);
+            Assert.AreEqual(string.Empty, publishes[publishesAfterConnect + 1].Payload);
+
+            // The device's own state is left alone: it stays true whether or not Home
+            // Assistant is listening, and clearing it would make a withdrawal
+            // indistinguishable from a device that went away.
+            Assert.AreEqual("online", Last(mqttClient, _availabilityTopic));
+        }
+
+        private static void RaiseDiscoveryStatus(MockMqttClient mqttClient, string payload) =>
+            mqttClient.RaisePublishReceived(new MqttMsgPublishEventArgs(
+                "homeassistant/status",
+                Encoding.UTF8.GetBytes(payload),
+                false,
+                MqttQoSLevel.AtLeastOnce,
+                false));
+
+        /// <summary>The last payload published to a topic.</summary>
+        private static string Last(MockMqttClient mqttClient, string topic)
+        {
+            var payloads = mqttClient.PayloadsFor(topic);
+
+            Assert.IsTrue(payloads.Length > 0, $"nothing was published to '{topic}'");
+
+            return payloads[payloads.Length - 1];
+        }
+
+        /// <summary>How many times a topic was published to.</summary>
+        private static int CountFor(MockMqttClient mqttClient, string topic) => mqttClient.PayloadsFor(topic).Length;
 
         private static void SendCommand(MockMqttClient mqttClient, PropertyBase property, string payload)
         {
