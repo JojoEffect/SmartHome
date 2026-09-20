@@ -1378,12 +1378,19 @@ function Get-HomieLivePayloads {
     # ConvertTo-HomieSnapshot answers "where did this settle". This answers "what went
     # past, in what order", which is the only thing that tells a command that was refused
     # apart from one that was never delivered -- both leave the store exactly as it was.
+    #
+    # Streams the payloads, and nothing at all when none went past, for the reason spelled
+    # out on Get-SmartHomePackagesConfig in Common.ps1: it pipes straight into a filter,
+    # and a caller that keeps the result collects it with @(...). Every caller here has to.
+    # Assigned bare, no payload arrives as $null, which [array]::IndexOf refuses, and one
+    # arrives as a bare string -- whose .Length is its character count, with no error at
+    # all. Until issue #136 this returned ,$payloads, whose one wrapping object is what a
+    # piped filter and @(...) then received.
     param(
         [string[]]$Lines,
         [string]$Topic
     )
 
-    $payloads = @()
     foreach ($line in $Lines) {
         # Through ConvertFrom-HomieCaptureLine rather than a second spelling of the
         # "<topic> <0|1> <payload>" layout, for the reason stated there: the layout is
@@ -1396,12 +1403,9 @@ function Get-HomieLivePayloads {
         # sequence (issue #93).
         $parsed = ConvertFrom-HomieCaptureLine -Line $line
         if ($null -ne $parsed -and $parsed.Topic -ceq $Topic -and -not $parsed.Retained) {
-            $payloads += $parsed.Payload
+            $parsed.Payload
         }
     }
-
-    # Comma so a zero- or one-element result still arrives as an array.
-    return ,$payloads
 }
 
 function Publish-HomieCommand {
@@ -2205,7 +2209,7 @@ function Measure-HomieConformance {
         -IsSettled {
             param($case, $lines)
 
-            $payloads = Get-HomieLivePayloads -Lines $lines -Topic "$node/$($case.Property)"
+            $payloads = @(Get-HomieLivePayloads -Lines $lines -Topic "$node/$($case.Property)")
             $seenPayloads[$case.Property] = $payloads
 
             # Settled as soon as EITHER payload was seen, i.e. as soon as anything was
@@ -2218,7 +2222,13 @@ function Measure-HomieConformance {
         } | Out-Null
 
     foreach ($case in $outOfFormatCases) {
-        $payloads = if ($seenPayloads.Contains($case.Property)) { $seenPayloads[$case.Property] } else { @() }
+        # @(...) around the whole if, and not only where the list was stored. An if used as
+        # a value enumerates whatever its branch emits, so a case nothing reached -- stored
+        # as an empty list, or never stored at all -- came out as $null, and
+        # [array]::IndexOf below threw on it. The "neither ... reached" failure further down
+        # was therefore never reported: the throw ended the measurement as an ERROR, with
+        # every later phase unmeasured (issue #136).
+        $payloads = @(if ($seenPayloads.Contains($case.Property)) { $seenPayloads[$case.Property] })
 
         if ([array]::IndexOf($payloads, $case.Bad) -ge 0) {
             $script:conformanceFailures += "out-of-format '$($case.Bad)' was applied to $($case.Property) and published back (saw: $($payloads -join ', '))"
@@ -2361,7 +2371,7 @@ function Measure-HomieConformance {
                 # -cne, not -ne: 'ALERT' is not the value $state already holds but a
                 # payload outside v4's vocabulary, and -ne tolerated it as the value
                 # (issue #93).
-                $statePayloads = Get-HomieLivePayloads -Lines $lines -Topic "$root/`$state"
+                $statePayloads = @(Get-HomieLivePayloads -Lines $lines -Topic "$root/`$state")
                 $moved = @($statePayloads | Where-Object { $_ -cne $step.Expect })
 
                 if ([array]::IndexOf($moved, $step.Command) -ge 0) {
@@ -2372,7 +2382,7 @@ function Measure-HomieConformance {
                 }
             }
 
-            $lifecyclePayloads = Get-HomieLivePayloads -Lines $lines -Topic "$node/lifecycle"
+            $lifecyclePayloads = @(Get-HomieLivePayloads -Lines $lines -Topic "$node/lifecycle")
 
             # The correction is looked for AFTER the reflection, not anywhere in the
             # window. The window is deliberately opened before the command, so it can

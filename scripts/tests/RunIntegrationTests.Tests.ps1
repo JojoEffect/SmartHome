@@ -666,7 +666,7 @@ Describe 'Get-HomieLivePayloads' {
     It 'returns what went past the topic, in order' {
         # This is what tells a command that was refused apart from one never delivered:
         # both leave the retained store exactly as it was.
-        Assert-ArrayEqual -Expected @('running', 'stopped') -Actual (Get-HomieLivePayloads -Lines $lines -Topic 'homie/d/n/p')
+        Assert-ArrayEqual -Expected @('running', 'stopped') -Actual @(Get-HomieLivePayloads -Lines $lines -Topic 'homie/d/n/p')
     }
 
     It 'drops the retained replay, which is from before the window opened' {
@@ -674,33 +674,74 @@ Describe 'Get-HomieLivePayloads' {
             Where-Object { $_ -eq 'idle' }).Count -Because 'the replayed value says nothing about what happened inside the window'
     }
 
-    It 'returns an array even when nothing matched' {
-        # The leading comma in the function's return: a zero- or one-element result still
-        # has to arrive as an array, or the caller's .Count throws under Set-StrictMode.
-        $payloads = Get-HomieLivePayloads -Lines $lines -Topic 'homie/d/n/nothing'
-
-        Assert-NotNull -Value $payloads
-        Assert-Equal -Expected 0 -Actual $payloads.Count
+    It 'emits nothing at all when nothing matched -- issue #136' {
+        # Not $null and not an empty array: nothing, so @(...) counts 0 and a pipeline sees
+        # no item at all. The ,$payloads return emitted an empty array, which @(...) counted
+        # as 1 -- see the matching Get-SmartHomePackagesConfig case in Common.Tests.ps1.
+        Assert-Equal -Expected 0 -Actual @(Get-HomieLivePayloads -Lines $lines -Topic 'homie/d/n/nothing').Count
+        Assert-Equal -Expected 0 -Actual (Get-HomieLivePayloads -Lines $lines -Topic 'homie/d/n/nothing' | Measure-Object).Count
     }
 
-    It 'returns an array for a single match' {
-        $payloads = Get-HomieLivePayloads -Lines $lines -Topic 'homie/d/n/other'
+    It 'streams a single match as the payload itself -- issue #136' {
+        # Why every caller collects with @(...). Assigned bare, one payload is a bare
+        # string, and the refused lifecycle step reads .Length off what it keeps -- which on
+        # a string is the character count, with no error to say so.
+        $bare = Get-HomieLivePayloads -Lines $lines -Topic 'homie/d/n/other'
+        Assert-True -Condition ($bare -is [string]) -Because 'a streamed single payload arrives unwrapped'
 
-        Assert-Equal -Expected 1 -Actual $payloads.Count
+        $payloads = @(Get-HomieLivePayloads -Lines $lines -Topic 'homie/d/n/other')
+        Assert-Equal -Expected 1 -Actual $payloads.Length
         Assert-Equal -Expected 'ignored' -Actual $payloads[0]
+    }
+
+    It 'can be piped straight into Where-Object -- issue #136' {
+        # The spelling the ,$payloads return broke. It reached the pipeline as ONE object,
+        # the whole array: -ceq filtered that array rather than comparing one payload, and
+        # a match anywhere let all three through, from a filter that reads as keeping one.
+        $kept = @(Get-HomieLivePayloads -Topic 'homie/d/n/p' -Lines @(
+                'homie/d/n/p 0 running'
+                'homie/d/n/p 0 stopped'
+                'homie/d/n/p 0 idle'
+            ) | Where-Object { $_ -ceq 'running' })
+
+        Assert-ArrayEqual -Expected @('running') -Actual $kept
     }
 
     It 'does not read a topic differing only in case as this one -- issue #93' {
         # The refused step's ordered reads of $state and lifecycle come through here, and
         # the topic comparison was -eq: a wrong-case topic's payloads were folded into the
         # right one's sequence, where they read as this device's own publishes.
-        $payloads = Get-HomieLivePayloads -Topic 'homie/d/n/p' -Lines @(
+        $payloads = @(Get-HomieLivePayloads -Topic 'homie/d/n/p' -Lines @(
             'homie/d/n/p 0 running'
             'homie/d/n/P 0 impostor'
             'homie/D/n/p 0 impostor'
-        )
+        ))
 
         Assert-ArrayEqual -Expected @('running') -Actual $payloads
+    }
+
+    It 'is collected with @(...) at every call site in the shipped script -- issue #136' {
+        # The half the cases above cannot reach: every shipped call is in
+        # Measure-HomieConformance, which runs against a device and a broker, and one that
+        # kept the result bare would fail only there -- or not at all, reading a single
+        # payload's .Length. Checked statically, so a new call site that forgets fails
+        # here, and in CI -- the way Get-AttributeFailure's call sites are for #94.
+        $isCall = {
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq 'Get-HomieLivePayloads'
+        }
+
+        $calls = @([System.Management.Automation.Language.Parser]::ParseFile($subject, [ref]$null, [ref]$null).FindAll($isCall, $true))
+        Assert-True -Condition ($calls.Count -gt 0) -Because 'a case that finds no call site passes without checking one'
+
+        foreach ($call in $calls) {
+            # The call, its pipeline, the statement block of an @(...). A pipeline carrying
+            # the call on into a filter is fine, as long as it is that pipeline which is
+            # collected.
+            $collected = $call.Parent.Parent.Parent -is [System.Management.Automation.Language.ArrayExpressionAst]
+            Assert-True -Condition $collected -Because ('line {0}: {1}' -f $call.Extent.StartLineNumber, $call.Parent.Extent.Text)
+        }
     }
 }
 
