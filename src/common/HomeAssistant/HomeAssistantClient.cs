@@ -797,6 +797,13 @@ namespace SmartHome.HomeAssistant
 
             RegisterPropertyUpdateHandlers();
 
+            // Both re-attached before the announce below, so an alert or a reading that
+            // arrives while it is being written is published rather than dropped.
+            // Unsubscribe first: this runs on every reconnect, and a double registration
+            // would publish every change twice.
+            _device.OnAlertChange -= HandleAlertChange;
+            _device.OnAlertChange += HandleAlertChange;
+
             // Re-announce. The MQTT layer restores the session and replays the
             // subscriptions, but a discovery configuration lives in the BROKER's retained
             // store, and a broker that restarted has an empty one. Without this the
@@ -827,6 +834,14 @@ namespace SmartHome.HomeAssistant
             _announcedThisSession = false;
 
             UnregisterPropertyUpdateHandlers();
+
+            // The alert handler comes off with them, and for the same reason: with no
+            // session there is nowhere to publish, so an alert raised during an outage
+            // would only produce a failed publish and an error line per change -- and a
+            // device raising one from inside its measurement loop produces a change every
+            // few seconds. Nothing is lost by staying quiet: the re-announce republishes
+            // the alert set as it stands the moment the session comes back.
+            _device.OnAlertChange -= HandleAlertChange;
         }
 
         private void RegisterConnectionChangeHandlers()
