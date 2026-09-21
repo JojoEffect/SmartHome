@@ -315,19 +315,23 @@ $axes = [ordered]@{
 }
 
 function Get-AxisHits {
+    # One hit per rule of the named group that matches the text.
+    #
+    # Streams them, and nothing at all when none matched, for the reason spelled out on
+    # Get-SmartHomePackagesConfig in Common.ps1: it pipes straight into a filter, and a
+    # caller that keeps the result collects it with @(...). Until issue #136 this returned
+    # , $hits, whose one wrapping object is what a piped filter and @(...) then received.
     param(
         [Parameter(Mandatory = $true)][string]$Axis,
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text
     )
 
-    $hits = @()
     foreach ($rule in $rules) {
         if ($rule.Axis -ne $Axis) { continue }
         if ($Text -match $rule.P) {
-            $hits += [pscustomobject]@{ Weight = $rule.W; Why = $rule.Why }
+            [pscustomobject]@{ Weight = $rule.W; Why = $rule.Why }
         }
     }
-    return , $hits
 }
 
 function Get-HitScore {
@@ -359,7 +363,7 @@ function Read-Signals {
     )
 
     foreach ($signal in $Signals) {
-        $Hits[$signal] = Get-AxisHits -Axis $signal -Text $Text
+        $Hits[$signal] = @(Get-AxisHits -Axis $signal -Text $Text)
         $Score[$signal] = Get-HitScore $Hits[$signal]
     }
 }
@@ -437,9 +441,9 @@ function Get-IssueRecord {
 
     # Risk: the worst band that fires, not a sum. A crash and a silent wrong answer are
     # not additive -- the worse one is what leaving the issue open actually costs.
-    $silentHits = Get-AxisHits -Axis 'SilentWrong' -Text $text
-    $loudHits = Get-AxisHits -Axis 'LoudFailure' -Text $text
-    $frictionHits = Get-AxisHits -Axis 'Friction' -Text $text
+    $silentHits = @(Get-AxisHits -Axis 'SilentWrong' -Text $text)
+    $loudHits = @(Get-AxisHits -Axis 'LoudFailure' -Text $text)
+    $frictionHits = @(Get-AxisHits -Axis 'Friction' -Text $text)
     $risk = 'Cosmetic'
     $riskHits = @()
     if ((Get-HitScore $frictionHits) -ge 2) { $risk = 'Friction'; $riskHits = $frictionHits }

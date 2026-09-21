@@ -88,6 +88,19 @@ If a new recurring unit of work shows up that isn't covered by an existing scrip
 `Write-Error` remediation) and give it a matching skill — that's the standing expectation for
 this repo, not a one-time cleanup.
 
+One more convention, and the one a breach of goes unnoticed longest: **a helper that returns a
+list streams it** — emits its elements, the way `Get-ChildItem` does — and a caller that keeps
+the result collects it with `@(...)`, exactly as it would a cmdlet's. Never `return ,$list`. The
+leading comma emits the whole list as *one* object, so `@(...)` counts 1 whatever came back,
+including nothing, and a piped `Where-Object` passes everything whenever anything matches —
+neither with an error (#88, #136). Streamed, a forgotten `@()` is usually loud instead: nothing
+arrives as `$null` and one element bare, and `.Count` on either throws under `Set-StrictMode
+-Version Latest`. Usually, not always — `.Length` on a bare string is its character count, with
+nothing to say so, which is why every caller collects rather than relying on the throw. The
+reasoning is written up once, on `Get-SmartHomePackagesConfig` in `Common.ps1`. A comma still
+belongs where a seam takes exactly one value and the list *is* that value: the `-Observe` block
+handed to `Invoke-CommandRetryRounds` returns one observation, which happens to be a list.
+
 ### Clearing the deployment area
 
 `nanoff` erases and writes only the image file's own byte length, so a smaller app flashed

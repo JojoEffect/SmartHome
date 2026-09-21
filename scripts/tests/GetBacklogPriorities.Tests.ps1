@@ -152,6 +152,32 @@ Describe 'The axis table' {
     }
 }
 
+Describe 'Get-AxisHits' {
+    # A two-rule table of its own rather than the shipped one, so these cases pin how hits
+    # come out and not what today's patterns happen to match. Get-AxisHits reads $rules up
+    # the dynamic scope chain, where this one is nearer than the dot-sourced one.
+    $rules = @(
+        @{ Axis = 'Probe'; W = 3; P = 'silently'; Why = 'strong' }
+        @{ Axis = 'Probe'; W = 1; P = 'maybe'; Why = 'weak' }
+    )
+
+    It 'emits nothing at all when nothing matched -- issue #136' {
+        # For the reason given on the matching Get-SmartHomePackagesConfig case in
+        # Common.Tests.ps1: an emitted $null or empty array would count 1 on both.
+        Assert-Equal -Expected 0 -Actual @(Get-AxisHits -Axis 'Probe' -Text 'Nothing to see.').Count
+        Assert-Equal -Expected 0 -Actual (Get-AxisHits -Axis 'Probe' -Text 'Nothing to see.' | Measure-Object).Count
+    }
+
+    It 'can be piped straight into Where-Object -- issue #136' {
+        # The spelling the , $hits return broke: $_ was the whole array, $_.Weight
+        # member-enumerated both weights, and -gt kept the one above 2 -- truthy, so both
+        # hits came through a filter meant to keep one.
+        $kept = @(Get-AxisHits -Axis 'Probe' -Text 'It fails silently, maybe.' | Where-Object { $_.Weight -gt 2 })
+
+        Assert-ArrayEqual -Expected @('strong') -Actual @($kept | ForEach-Object { $_.Why })
+    }
+}
+
 Describe 'Trust on thin evidence' {
     It 'marks a Trust that one matched phrase set' {
         # The shape of three of the four false positives at the top of a -Theme Trust run on
