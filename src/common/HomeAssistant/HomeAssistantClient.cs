@@ -70,6 +70,12 @@ namespace SmartHome.HomeAssistant
         // from control flow is what makes the order of those two irrelevant.
         private bool _announcedThisSession;
 
+        // Whether everything the last announcement tried to publish actually went out.
+        // Written by the state-change handler, which is where the publishing happens, and
+        // read by Announce() once the transition it triggered has returned -- the two
+        // cannot be one call because the publishing is reached *through* the model.
+        private bool _announcementComplete;
+
         /// <exception cref="ArgumentException">
         /// The device holds a property Home Assistant cannot carry -- see
         /// <see cref="DiscoveryMapper"/>. Thrown here, when the device is built, rather
@@ -354,7 +360,20 @@ namespace SmartHome.HomeAssistant
                     // though nothing about the device changed.
                     RecordAvailabilityPublished(null);
 
-                    PublishAnnouncement();
+                    if (!PublishAnnouncement())
+                    {
+                        // Some of the announcement did not go out, so the device stays
+                        // here: it does not move to Ready and nothing says 'online'.
+                        // Reporting a half-announced device as available is the worst of
+                        // the three outcomes -- Home Assistant would show whichever
+                        // entities did arrive as working, and the ones that did not would
+                        // simply be absent, with the reason in a log on the device. The
+                        // caller sees Announce() fail and can reconnect, which starts the
+                        // whole announcement again.
+                        _announcementComplete = false;
+                        _logger.LogError($"Could not announce the device '{_description.DeviceId}' completely; it stays unavailable rather than half-discovered.");
+                        return;
+                    }
 
                     // Consume the target: a first connect, and any re-announce from
                     // Ready, both land on Ready.
@@ -505,15 +524,28 @@ namespace SmartHome.HomeAssistant
             // because publishing re-enters this class through the state-change handler.
             _postInitState = postInitState;
             _announcedThisSession = true;
+            _announcementComplete = true;
 
-            if (_device.TryChangeState(DeviceState.Connecting))
+            if (!_device.TryChangeState(DeviceState.Connecting))
             {
-                return true;
+                _announcedThisSession = false;
+                _postInitState = DeviceState.Ready;
+                return false;
             }
 
-            _announcedThisSession = false;
-            _postInitState = DeviceState.Ready;
-            return false;
+            if (!_announcementComplete)
+            {
+                // Announced in name only: the handler above could not put all of it on
+                // the wire. Clearing the flag matters as much as the return value --
+                // without it this session would count as announced forever, so the
+                // configurations that failed would never be retried on it and the device
+                // would stay half-discoverable until the broker or Home Assistant
+                // restarted.
+                _announcedThisSession = false;
+                return false;
+            }
+
+            return true;
         }
 
         private void SubscribeCommandTopics()
@@ -699,7 +731,19 @@ namespace SmartHome.HomeAssistant
                 return;
             }
 
-            _logger.LogDebug($"Publishing '{topic}' -> '{Encoding.UTF8.GetString(args.Value, 0, args.Value.Length)}'");
+            // Guarded, unlike every other log line in this class, because this one is the
+            // steady-state path: a device publishes a reading every few seconds for as
+            // long as it runs. Both the interpolation and the UTF-8 decode happen before
+            // the logger is called and therefore happen whether or not anything consumes
+            // the result -- which on a five-second cycle is a throwaway string and a
+            // throwaway byte decode, forever. The Homie adapter dropped the equivalent
+            // line outright for the same reason; here it is worth keeping, because
+            // nothing else in this adapter says what went out, so it is kept behind the
+            // question of whether anyone is listening.
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                _logger.LogDebug($"Publishing '{topic}' -> '{Encoding.UTF8.GetString(args.Value, 0, args.Value.Length)}'");
+            }
 
             Publish(topic, args.Value, property.Retained);
         }
