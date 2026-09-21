@@ -289,12 +289,10 @@ src/
                             (SmartHome.Homie.V4 inside): topics, attribute rendering, the
                             $state vocabulary, the last will. Exposes no model types
     HomeAssistant/        SmartHome.HomeAssistant — the Home Assistant MQTT Discovery adapter
-                            over the same two (#111). Its own root (smarthome/), its own
-                            availability topic and last will, and no reference to
-                            SmartHome.Homie. HomeAssistantClient owns the session and
-                            implements IDeviceProtocol; DiscoveryMapper is the whole
-                            mapping and is a pure function, so CI asserts it. Alerts still
-                            go nowhere on this wire — that is the next slice
+                            over the same two (#111): its own root (smarthome/), its own
+                            availability topic and last will, alerts as a diagnostic
+                            entity, and no reference to SmartHome.Homie. See "The Home
+                            Assistant adapter" below
     Mqtt/                 SmartHome.Mqtt       — ReconnectingMqttClient: auto-reconnect and
                             subscription replay over nanoFramework.M2Mqtt. Protocol-agnostic;
                             knows nothing about Homie
@@ -597,8 +595,10 @@ replaces "the device description *is* Homie v4" with "the description is neutral
 injected adapter decides what it goes out as". As of 2026-09-15 they have a consumer: #110
 rewrote `SmartHome.Homie` as the v4 adapter over them, so `HomieClient` implements
 `IDeviceProtocol`, and `HomieClientCheck` and RoomSensor build neutral `Device`s with
-`DeviceBuilder` and never mention a Homie model type. Home Assistant follows in #111; #112 is
-what makes the adapter an injected *choice* rather than the one type an app names in a `new`.
+`DeviceBuilder` and never mention a Homie model type. Since 2026-09-20 there is a second adapter
+over the same seam — `SmartHome.HomeAssistant`, #111, described below — which is what turns
+"neutral in principle" into "two conventions, one description". #112 is what makes the adapter an
+injected *choice* rather than the one type an app names in a `new`.
 
 The contract that rewrite was held to is **byte-identical on the wire** — same topics, payloads,
 retained flags, QoS, order, last will, client id — measured on 2026-09-16 by capturing
@@ -717,6 +717,69 @@ reasoning now lives (`IHomieClient` extends it and does not restate it): a devic
 connection rather than being one, and exposing `Publish`/`Subscribe` would let an app publish an
 attribute non-retained or a state out of order. An implementation takes an
 `IReconnectingMqttClient` by constructor injection and owns the session, last will included.
+
+### The Home Assistant adapter
+
+`SmartHome.HomeAssistant` (#111) is the second adapter over that seam, and a peer of the v4 one
+rather than a layer on it: it references `SmartHome.DeviceModel`, `SmartHome.Protocol` and
+`SmartHome.Mqtt`, never `SmartHome.Homie`, and it publishes every value itself. #106 tried the
+other shape — Home Assistant pointed at Homie's topics, availability templated over `$state` —
+and that is why it was closed: two conventions that can only be stacked, never chosen between.
+Nothing constructs it yet; RoomSensor picks its adapter in #112.
+
+What it owns:
+
+| | |
+|---|---|
+| State | `smarthome/<dev>/<node>/<prop>`, retained per the property's own flag |
+| Command | `smarthome/<dev>/<node>/<prop>/set`, subscribed at least once, routed to `PropertyBase.Set` |
+| Availability | `smarthome/<dev>/status` = `online`/`offline`, its own last will, no template |
+| Alerts | one diagnostic `binary_sensor` per device: `smarthome/<dev>/problem` = `ON`/`OFF`, ids and messages as JSON on `smarthome/<dev>/alerts` |
+| Discovery | `homeassistant/<component>/<dev>_<node>_<prop>/config`, retained |
+
+Six things about it that are decisions rather than details:
+
+- **The entity id joins the three levels with `_`, and that closes #107.** A model id may contain
+  a hyphen, so joining with one is ambiguous: node `tank-level` + property `litres` and node
+  `tank` + property `level-litres` produce the same string, the same retained discovery topic, and
+  one silently surviving entity. An underscore cannot appear in an id. The device's own diagnostic
+  entity is `<dev>_problem`, which carries one separator where a property's carries two, so a node
+  called `problem` collides with nothing.
+- **The diagnostic entity is published for every device, always — including one with no nodes at
+  all.** That is not thoroughness: a device that cannot read its configuration announces no nodes
+  and raises one alert saying why (see On-device configuration above), so without an entity that
+  needs no property it would publish nothing, appear in Home Assistant not at all, and be
+  invisible in exactly the installation that has to see it. Alerts raised before `Connect()` are
+  part of the announcement for the same reason.
+- **`QuantityKind` becomes the device class, and a pair Home Assistant would reject is refused at
+  build time.** Every refusal is in `DiscoveryMapper`, throws `ArgumentException` naming the
+  property by its state topic, and happens in the client's constructor: a `DateTime`, `Duration`
+  or `Json` property; a quantity kind on something that holds no number; a unit outside the
+  device class's set, or none; a settable numeric property with no closed range; a bound or step
+  the property itself could not publish. The v4 adapter draws the same kind of line in the same
+  place, for the same reason — a configuration Home Assistant drops is invisible from the device's
+  side.
+- **A settable numeric property must declare its range, where Homie v4 is happy without one.**
+  Home Assistant's number entity always has a minimum and a maximum (its own defaults are 0 and
+  100) and *drops* any state outside them, so a property that declares nothing has its own
+  readings refused by the controller meant to display them.
+- **Sleeping stays `online`.** Home Assistant has no lifecycle attribute, and a battery device
+  that sleeps between readings is working as intended; what makes a stopped device visible is
+  `expire_after`, which is about the value going stale. Alerts do not touch availability either —
+  an alerting device is reachable and still publishing.
+- **It re-announces on two triggers**: a broker reconnect (the retained store may be empty) and
+  `homeassistant/status` = `online` (Home Assistant restarted and may not replay what it has).
+  The second does not take the device back through `connecting`: a consumer restarting is not a
+  lifecycle event for the device. `Remove()` withdraws every config with an empty retained
+  payload, and has to run *before* anything that changes an entity id, or it withdraws the new
+  ids and leaves the old entities standing.
+
+Everything Home Assistant does that the adapter is held to was read from `home-assistant/core` at
+tag `2026.9.3` rather than recalled, and three of #106's assumptions had gone stale by then (the
+number defaults, `max >= min`, and the `0.001` floor under `step`). **CI proves the mapping and
+the behaviour on the wire, and cannot prove acceptance**: a discovery config can be well-formed
+JSON with real keys and still be dropped by a validator inside Home Assistant. That is #113 (wire
+conformance) and #114 (a real Home Assistant in Docker).
 
 ### Four kinds of test, deliberately kept apart
 

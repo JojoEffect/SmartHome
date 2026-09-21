@@ -76,7 +76,23 @@ namespace SmartHome.HomeAssistant
         private const string BooleanFalse = "false";
 
         /// <summary>
-        /// Builds one discovery configuration per property of <paramref name="device"/>.
+        /// What the diagnostic entity a device's alerts are rendered as is called in its
+        /// entity id: <c>&lt;device&gt;_problem</c>.
+        /// </summary>
+        /// <remarks>
+        /// The id only. Its displayed name is written where it is used and is capitalised
+        /// ("Problem"), because the two are held to different rules: an entity id shares
+        /// its alphabet with the model's ids, which are lowercase, while a displayed name
+        /// is human-facing text that Home Assistant prefixes with the device's own name.
+        /// Deriving one from the other would tie a rename in one to a rename in the
+        /// other, and changing an entity id is a migration -- a retained configuration
+        /// under the old id outlives the device that published it.
+        /// </remarks>
+        public const string ProblemEntityName = "problem";
+
+        /// <summary>
+        /// Builds one discovery configuration per property of <paramref name="device"/>,
+        /// plus the one diagnostic entity the device itself gets.
         /// </summary>
         /// <exception cref="ArgumentException">
         /// A property cannot be published to Home Assistant. The message names it by its
@@ -118,7 +134,68 @@ namespace SmartHome.HomeAssistant
                 }
             }
 
+            entities.Add(MapAlerts(device, deviceJson, originJson, availabilityTopic, settings));
+
             return (DiscoveryEntity[])entities.ToArray(typeof(DiscoveryEntity));
+        }
+
+        /// <summary>
+        /// The device's alert set, rendered as one diagnostic entity.
+        /// </summary>
+        /// <remarks>
+        /// Home Assistant has no vocabulary for a keyed alert set. A binary sensor with
+        /// the <c>problem</c> device class carries the half it can say -- whether
+        /// anything is wrong -- and the ids and messages travel as its attributes, which
+        /// is the only place on this wire they fit. That is one-way and lossy in the
+        /// other direction, as every alert mapping is: nothing can read a set back off
+        /// an entity that is on or off.
+        ///
+        /// Published for every device, always, even one with no alerts and even one with
+        /// no properties at all. That last case is the reason it is unconditional rather
+        /// than added when the first alert is raised: a device that could not read its
+        /// configuration announces *no* nodes and one alert saying why, so without this
+        /// entity it would have no configuration to publish, no entity in Home Assistant,
+        /// and therefore no device page at all -- the failure would be invisible in
+        /// exactly the installation that needs to see it.
+        ///
+        /// A diagnostic category, so it sits with the device's own health rather than
+        /// among the readings someone put on a dashboard.
+        /// </remarks>
+        private static DiscoveryEntity MapAlerts(
+            Device device,
+            string deviceJson,
+            string originJson,
+            string availabilityTopic,
+            HomeAssistantSettings settings)
+        {
+            var objectId = HomeAssistantTopics.DeviceObjectId(device, ProblemEntityName);
+
+            var json = new JsonWriter()
+                // Capitalised, and deliberately not ProblemEntityName: see that
+                // constant's remarks for why the id and the displayed name are written
+                // separately.
+                .String("name", "Problem")
+                .String("uniq_id", objectId)
+                .String("stat_t", HomeAssistantTopics.Problem(device))
+                .String("avty_t", availabilityTopic)
+                .Int("qos", QosLevel)
+                .String("dev_cla", DeviceClass.Problem)
+                .String("ent_cat", "diagnostic")
+                // Where the ids and the messages go. Home Assistant reads a state and its
+                // attributes from separate topics, because a binary sensor's state must be
+                // exactly its on or off payload.
+                .String("json_attr_t", HomeAssistantTopics.Alerts(device));
+
+            // No expire_after, whatever the settings say: this entity publishes when
+            // something changes and then stays silent, so an expiry would report a
+            // healthy device's health as unknown. Same reasoning as a binary sensor built
+            // from a property.
+
+            json.Raw("dev", deviceJson).Raw("o", originJson);
+
+            return new DiscoveryEntity(
+                HomeAssistantTopics.ConfigTopic(settings.DiscoveryPrefix, Component.BinarySensor, objectId),
+                json.ToJson());
         }
 
         private static DiscoveryEntity MapProperty(
