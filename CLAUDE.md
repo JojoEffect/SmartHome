@@ -301,6 +301,12 @@ src/
     Homie/                SmartHome.Homie      — the Homie v4 adapter over those two
                             (SmartHome.Homie.V4 inside): topics, attribute rendering, the
                             $state vocabulary, the last will. Exposes no model types
+    HomeAssistant/        SmartHome.HomeAssistant — the Home Assistant MQTT Discovery adapter
+                            over the same two (#111). Its own root (smarthome/), its own
+                            availability topic and last will, and no reference to
+                            SmartHome.Homie. DiscoveryMapper is the whole mapping and is a
+                            pure function, so CI asserts it; the client that publishes it
+                            lands in the next slice
     Mqtt/                 SmartHome.Mqtt       — ReconnectingMqttClient: auto-reconnect and
                             subscription replay over nanoFramework.M2Mqtt. Protocol-agnostic;
                             knows nothing about Homie
