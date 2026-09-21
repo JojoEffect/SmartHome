@@ -41,6 +41,7 @@
     <Compile Include="DeviceModelGuardTests.cs" />
     <Compile Include="DeviceModelTests.cs" />
     <Compile Include="DeviceModelValueTests.cs" />
+    <Compile Include="HomeAssistantClientTests.cs" />
     <Compile Include="HomeAssistantDiscoveryTests.cs" />
     <Compile Include="HomieAdapterTests.cs" />
     <Compile Include="HomieClientTests.cs" />
