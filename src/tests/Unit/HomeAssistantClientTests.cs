@@ -430,6 +430,29 @@ namespace SmartHome.UnitTests
         }
 
         [TestMethod]
+        public void A_Half_Published_Announcement_Does_Not_Report_The_Device_Available()
+        {
+            // The worst of the three outcomes is the one this prevents: Home Assistant
+            // showing whichever entities did arrive as working, with the ones that did not
+            // simply absent and the reason in a log on the device. So a publish that fails
+            // -- a QoS 1 publish raises whenever the link is momentarily down -- stops the
+            // device short of Ready, nothing says 'online', and Connect() says so.
+            var mqttClient = new MockMqttClient { FailNextPublish = true };
+            var client = new HomeAssistantClient(BuildDevice(out _), mqttClient);
+
+            Assert.IsFalse(client.Connect(), "the connect reported the incomplete announcement");
+            Assert.AreNotEqual("online", client.Availability, "nothing said the device was available");
+            Assert.AreEqual((int)DeviceState.Disconnecting, (int)client.State, "and it did not reach Ready");
+
+            // Retrying is what a device app does with a false from Connect(), and the
+            // session that failed must not count as announced -- otherwise the
+            // configurations that never went out would never be retried on it.
+            Assert.IsTrue(client.Connect(), "the retry took");
+            Assert.AreEqual("online", client.Availability);
+            Assert.AreEqual(1, mqttClient.PayloadsFor(_configTopic).Length, "and the configuration went out exactly once, on the attempt that worked");
+        }
+
+        [TestMethod]
         public void A_Retried_Connect_Announces_Once()
         {
             // Connect() is called in a retry loop by every device app, so a handler left
