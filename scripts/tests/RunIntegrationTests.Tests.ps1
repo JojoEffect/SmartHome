@@ -488,6 +488,226 @@ Describe 'Test-DeviceConstant' {
     }
 }
 
+Describe 'Test-DeviceBrokerAddress' {
+    # The device-app half of the stale-broker pre-flight (issues #100 and #133). It
+    # replaced one literal call against RoomSensor's Program.cs whose unanchored pattern
+    # read FallbackBrokerHost as the live address, never opened the configuration file the
+    # device actually dials from, and said nothing at all about a device it had not been
+    # told about. Each case below is one way that call was wrong while looking healthy.
+
+    function New-DeviceTree {
+        # A repository root holding only what this check reads: config\<file> and
+        # src\devices\<device>\Program.cs.
+        param(
+            [hashtable]$Configurations = @{},
+            [hashtable]$Programs = @{},
+            [string]$Name = 'device-tree'
+        )
+
+        $root = New-TestDirectory -Name $Name
+        foreach ($file in $Configurations.Keys) {
+            Set-TestFileContent -Path (Join-Path $root "config\$file") -Content $Configurations[$file]
+        }
+        foreach ($device in $Programs.Keys) {
+            Set-TestFileContent -Path (Join-Path $root "src\devices\$device\Program.cs") -Content $Programs[$device]
+        }
+
+        return $root
+    }
+
+    function Invoke-BrokerCheck {
+        # The warnings and the printed inventory, kept apart. 3>&1 and 6>&1 bring both into
+        # the output, and the record type says which is which -- the inventory is
+        # Write-Host, because it is what a person reading the pre-flight sees.
+        param(
+            [string]$RepoRoot,
+            [string]$Expected = '192.168.1.238'
+        )
+
+        $warnings = @()
+        $inventory = @()
+        foreach ($record in @(Test-DeviceBrokerAddress -RepoRoot $RepoRoot -Expected $Expected 3>&1 6>&1)) {
+            if ($record -is [System.Management.Automation.WarningRecord]) {
+                $warnings += $record.Message
+            }
+            else {
+                $inventory += "$record"
+            }
+        }
+
+        return @{ Warnings = $warnings; Inventory = ($inventory -join "`n") }
+    }
+
+    It 'warns naming both values when a configuration has drifted -- issue #133' {
+        # The value the device actually dials, and the one the old check never opened.
+        $root = New-DeviceTree -Configurations @{ 'room-sensor.json' = '{ "BrokerHost": "192.168.1.99" }' }
+
+        $result = Invoke-BrokerCheck -RepoRoot $root
+
+        Assert-Equal -Expected 1 -Actual $result.Warnings.Count
+        Assert-Match -Actual $result.Warnings[0] -Pattern ([regex]::Escape('config\room-sensor.json: BrokerHost'))
+        Assert-Match -Actual $result.Warnings[0] -Pattern ([regex]::Escape("'192.168.1.99'"))
+        Assert-Match -Actual $result.Warnings[0] -Pattern ([regex]::Escape("'192.168.1.238'"))
+    }
+
+    It 'lists a configuration that agrees, and warns about nothing' {
+        $root = New-DeviceTree -Configurations @{ 'room-sensor.json' = '{ "BrokerHost": "192.168.1.238" }' }
+
+        $result = Invoke-BrokerCheck -RepoRoot $root
+
+        Assert-Equal -Expected 0 -Actual $result.Warnings.Count
+        Assert-Match -Actual $result.Inventory -Pattern ([regex]::Escape('config\room-sensor.json BrokerHost'))
+    }
+
+    It 'does not read a deploy manifest as a device configuration' {
+        # config\ keeps nanoff's manifests beside the configurations. Read as one, a
+        # manifest is a device with no BrokerHost: a warning on every run, about a file
+        # that was never meant to carry one.
+        $root = New-DeviceTree -Configurations @{
+            'room-sensor.json'        = '{ "BrokerHost": "192.168.1.238" }'
+            'room-sensor.deploy.json' = '{ "Files": [ { "DestinationFilePath": "I:\\configuration.json", "SourceFilePath": "config/room-sensor.json" } ] }'
+        }
+
+        $result = Invoke-BrokerCheck -RepoRoot $root
+
+        Assert-Equal -Expected 0 -Actual $result.Warnings.Count
+        Assert-False -Condition ($result.Inventory -match 'deploy') -Because 'a manifest is neither compared nor listed as having nothing to compare'
+    }
+
+    It 'matches the key case-sensitively, as the device does' {
+        # ConvertFrom-Json's objects answer .BrokerHost for a "brokerHost" key. The device's
+        # parser does not, and refuses the file -- so reading it that way here would call
+        # a configuration the device alerts on healthy.
+        $root = New-DeviceTree -Configurations @{ 'room-sensor.json' = '{ "brokerHost": "192.168.1.238" }' }
+
+        $result = Invoke-BrokerCheck -RepoRoot $root
+
+        Assert-Equal -Expected 1 -Actual $result.Warnings.Count
+        Assert-Match -Actual $result.Warnings[0] -Pattern '(?-i)config\\room-sensor\.json has no BrokerHost'
+        Assert-Match -Actual $result.Inventory -Pattern '(?-i)No broker address found to compare in: config\\room-sensor\.json'
+    }
+
+    It 'warns rather than aborting on a configuration that is not JSON' {
+        # A hand-edited file is the likeliest thing in config\ to be broken, and the device
+        # refuses it too: worth hearing about at a desk, not worth ending the pre-flight.
+        $root = New-DeviceTree -Configurations @{ 'room-sensor.json' = '{ "BrokerHost": "192.168.1.238", ' }
+
+        $result = Invoke-BrokerCheck -RepoRoot $root
+
+        Assert-Equal -Expected 1 -Actual $result.Warnings.Count
+        Assert-Match -Actual $result.Warnings[0] -Pattern '(?-i)config\\room-sensor\.json is not valid JSON'
+    }
+
+    It 'compares a fallback as the fallback, never as the live value -- issue #133' {
+        # The old pattern, BrokerHost\s*=, matched the tail of 'FallbackBrokerHost =' and
+        # reported this constant as the address the device uses.
+        $root = New-DeviceTree -Programs @{
+            'RoomSensor' = @('private const string FallbackBrokerHost = "10.0.0.1";')
+        }
+
+        $result = Invoke-BrokerCheck -RepoRoot $root
+
+        Assert-Equal -Expected 1 -Actual $result.Warnings.Count
+        Assert-Match -Actual $result.Warnings[0] -Pattern "(?-i)^RoomSensor: FallbackBrokerHost is '10\.0\.0\.1'"
+        Assert-Match -Actual $result.Warnings[0] -Pattern 'cannot read its configuration' -Because 'the warning has to say when this address is dialled at all'
+        Assert-Match -Actual $result.Inventory -Pattern '(?-i)\bRoomSensor FallbackBrokerHost\b'
+        Assert-False -Condition ($result.Inventory -cmatch '\bRoomSensor BrokerHost\b') -Because 'the fallback must not also be counted as the live constant'
+    }
+
+    It 'still compares a compiled-in BrokerHost, for a device with no configuration' {
+        $root = New-DeviceTree -Programs @{
+            'RainwaterCistern' = @('private const string BrokerHost = "10.0.0.1";')
+        }
+
+        $result = Invoke-BrokerCheck -RepoRoot $root
+
+        Assert-Equal -Expected 1 -Actual $result.Warnings.Count
+        Assert-Match -Actual $result.Warnings[0] -Pattern "(?-i)^RainwaterCistern: BrokerHost is '10\.0\.0\.1'"
+    }
+
+    It 'finds a device nobody named -- issue #100' {
+        # The old call named RoomSensor by path, so the next device to gain a broker was
+        # unguarded. That already happened once, on an unmerged branch.
+        $root = New-DeviceTree -Programs @{
+            'RoomSensor'       = @('private const string FallbackBrokerHost = "192.168.1.238";')
+            'RainwaterCistern' = @('private const string BrokerHost = "192.168.1.99";')
+        }
+
+        $result = Invoke-BrokerCheck -RepoRoot $root
+
+        Assert-Equal -Expected 1 -Actual $result.Warnings.Count
+        Assert-Match -Actual $result.Warnings[0] -Pattern '(?-i)^RainwaterCistern: BrokerHost'
+    }
+
+    It 'names a device whose constant was renamed, instead of passing it silently -- issue #100' {
+        # The drifted address is right there, under a name the check does not know. It
+        # cannot be a warning -- a stub with no broker at all looks exactly the same -- but
+        # it can no longer read like a device that was compared and agreed.
+        $root = New-DeviceTree -Programs @{
+            'RoomSensor'        = @('private const string MqttBrokerAddress = "192.168.1.99";')
+            'IrrigationControl' = @('Debug.WriteLine("Hello from nanoFramework!");')
+        }
+
+        $result = Invoke-BrokerCheck -RepoRoot $root
+
+        Assert-Equal -Expected 0 -Actual $result.Warnings.Count
+        Assert-Match -Actual $result.Inventory -Pattern '(?-i)compared with SMARTHOME_MQTT_BROKER \(192\.168\.1\.238\): none'
+        Assert-Match -Actual $result.Inventory -Pattern '(?-i)No broker address found to compare in: .*\bRoomSensor\b'
+        Assert-Match -Actual $result.Inventory -Pattern '(?-i)No broker address found to compare in: .*\bIrrigationControl\b'
+    }
+
+    It 'reads a checkout whose path contains brackets' {
+        # -LiteralPath throughout. On -Path a '[' turns every read into a wildcard matching
+        # nothing, and a check that finds nothing is silent -- the #71 defect class, which
+        # Test-DeviceConstant still has (#80).
+        $root = New-DeviceTree -Name 'device tree [wip]' `
+                               -Configurations @{ 'room-sensor.json' = '{ "BrokerHost": "192.168.1.99" }' } `
+                               -Programs @{ 'RoomSensor' = @('private const string FallbackBrokerHost = "192.168.1.99";') }
+
+        $result = Invoke-BrokerCheck -RepoRoot $root
+
+        Assert-Equal -Expected 2 -Actual $result.Warnings.Count
+    }
+
+    It 'finds both of RoomSensor''s broker addresses in this checkout' {
+        # Against the checkout, not a fixture, and indifferent to the values on purpose:
+        # the claim is that the live address and the fallback are both being read at all.
+        # Rename the configuration key or the constant and this fails at a desk, where
+        # before the pre-flight would quietly have compared one address fewer.
+        $repoRoot = Split-Path -Parent $scriptsDir
+
+        $result = Invoke-BrokerCheck -RepoRoot $repoRoot
+
+        Assert-Match -Actual $result.Inventory -Pattern ([regex]::Escape('config\room-sensor.json BrokerHost'))
+        Assert-Match -Actual $result.Inventory -Pattern '(?-i)\bRoomSensor FallbackBrokerHost\b'
+    }
+}
+
+Describe 'Get-DeviceConfigurationValue' {
+    It 'returns the value under the exact key' {
+        $path = Join-Path (New-TestDirectory -Name 'config-value') 'device.json'
+        Set-TestFileContent -Path $path -Content '{ "DeviceId": "room-sensor-office", "BrokerHost": "192.168.1.238" }'
+
+        Assert-Equal -Expected '192.168.1.238' -Actual (Get-DeviceConfigurationValue -Path $path -Key 'BrokerHost')
+    }
+
+    It 'calls an empty file empty, rather than handing ConvertFrom-Json a null' {
+        # -Raw reads an empty file as $null, which ConvertFrom-Json refuses as a
+        # parameter-binding error rather than as bad JSON.
+        $path = Join-Path (New-TestDirectory -Name 'config-empty') 'device.json'
+        Set-TestFileContent -Path $path -Content ''
+
+        Assert-Throws -Body { Get-DeviceConfigurationValue -Path $path -Key 'BrokerHost' } -Pattern '^is empty$' | Out-Null
+    }
+
+    It 'refuses JSON that is not an object' {
+        $path = Join-Path (New-TestDirectory -Name 'config-array') 'device.json'
+        Set-TestFileContent -Path $path -Content '[ { "BrokerHost": "192.168.1.238" } ]'
+
+        Assert-Throws -Body { Get-DeviceConfigurationValue -Path $path -Key 'BrokerHost' } -Pattern 'not a JSON object' | Out-Null
+    }
+}
+
 Describe 'The conformance lifecycle table' {
     $settings = @{ SettleSeconds = 90; RecoverySeconds = 90; CommandTimeoutSeconds = 30 }
 
