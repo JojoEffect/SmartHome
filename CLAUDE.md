@@ -670,8 +670,13 @@ options, `ColorFormats` -> `Preferred` alone since v4 declares exactly one encod
 `BooleanLabels` dropped entirely. Byte-for-byte the same for every declaration in this tree. What did change is a
 *malformed* one: the model parses it to nothing, the property therefore declares no format, the
 adapter never sees the text, and `$format` goes out empty rather than carrying something a
-controller would misread. Nothing reports the malformed text today — not the model, which parsed
-it away, and not the adapter, which cannot see it.
+controller would misread. The builder is what reports it, because it is the last thing that holds
+the text: a `WithFormat` whose text does not parse logs a warning naming the property and the text
+(#121). Empty text is how a caller says "no format" and is not reported. A warning, not a throw,
+so a malformed declaration still builds exactly as it always did — and a warning reaches nobody on
+a device that configured no logger factory, so the typed routes — `WithRange` over
+`NumericRange`'s factories, `WithOptions`, `WithLabels`, `WithFormats` — which throw on a bad
+declaration, stay the loud way to make one.
 
 **Nothing in the protocol-neutral layer names a convention, and nothing should** — not in code,
 not in comments, not in a test's name. That layer is `SmartHome.DeviceModel`,

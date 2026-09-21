@@ -29,9 +29,18 @@ namespace SmartHome.DeviceModel.Builder
         /// device author writes, e.g. <c>"off,on"</c>. Text that is not exactly two
         /// non-empty entries declares no labels.
         /// </summary>
+        /// <remarks>
+        /// Text that declares no labels is logged as a warning naming the property and
+        /// the text, for the reason <c>IntegerPropertyBuilder.WithFormat</c> gives. Empty
+        /// text means "no labels" and is not reported.
+        /// </remarks>
         public BooleanPropertyBuilder WithFormat(string format)
         {
-            BooleanLabels.TryParse(format, out _labels);
+            if (!BooleanLabels.TryParse(format, out _labels))
+            {
+                ReportUnparsedFormat(format, "a pair of labels");
+            }
+
             return this;
         }
 

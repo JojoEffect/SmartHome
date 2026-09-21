@@ -30,9 +30,18 @@ namespace SmartHome.DeviceModel.Builder
         /// Text naming an encoding that is not <c>rgb</c>, <c>hsv</c> or <c>xyz</c>
         /// declares none.
         /// </summary>
+        /// <remarks>
+        /// Text that declares none is logged as a warning naming the property and the
+        /// text, for the reason <c>IntegerPropertyBuilder.WithFormat</c> gives. Empty text
+        /// means "no encodings" and is not reported.
+        /// </remarks>
         public ColorPropertyBuilder WithFormat(string format)
         {
-            ColorFormats.TryParse(format, out _formats);
+            if (!ColorFormats.TryParse(format, out _formats))
+            {
+                ReportUnparsedFormat(format, "a list of colour encodings");
+            }
+
             return this;
         }
 
