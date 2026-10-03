@@ -33,11 +33,34 @@
        <Logging>Detailed</Logging>
        <IsRealHardware>False</IsRealHardware>
        <RealHardwarePort></RealHardwarePort>
-       <!-- Empty: use whichever CLR the nanoclr global tool installed. The workflow pins
-            that tool to an explicit version, so the runtime under the tests is
-            reproducible while the version itself lives in exactly one place, next to the
-            install step. -->
-       <CLRVersion></CLRVersion>
+       <!-- The CLR these tests run on. This is the one place it is declared, and
+            Run-Tests.ps1 reads the value from here.
+
+            It used to be empty, with a comment saying the workflow's own pin on the
+            nanoclr global tool decided the runtime. That was never true: the test adapter
+            replaces that tool with the latest published one before every virtual-device
+            run, naming no version, and then has it fetch the latest CLR. CI installs
+            1.1.122 and the run reports 1.1.311; locally, one run moved this machine's
+            tool from 1.1.289 to 1.1.311 on its own.
+
+            Which cost nothing until the latest CLR stopped matching the managed
+            baseline. On 2026-09-21 main went red with "Firmware version does not match
+            managed code version" and 1 of 170 tests executed: CoreLibrary 1.17.11, which
+            every project here references, is accepted by CLR 1.17.0.316 and by the
+            1.17.0.339 on the ESP32, and refused by 1.17.0.349 and by 1.18.0.18. Nothing
+            in the tree changed that day. Issue #162 carries the diagnosis.
+
+            1.17.0.316 is the last CLR CI ran green on with these packages, which is where
+            the number comes from. Moving the managed baseline to 1.18 instead is a
+            managed and firmware migration together, and not something a test run should
+            decide by downloading whatever shipped this morning.
+
+            PathToLocalCLRInstance is left empty on purpose: it is a machine path, and
+            Run-Tests.ps1 fills it into a resolved copy of this file per run, the way
+            Deploy-DeviceConfig.ps1 resolves nanoff's manifest. Setting CLRVersion alone
+            does not hold, because the adapter asks the tool for it under an option name
+            the current CLI does not have. -->
+       <CLRVersion>1.17.0.316</CLRVersion>
        <PathToLocalCLRInstance></PathToLocalCLRInstance>
    </nanoFrameworkAdapter>
 </RunSettings>

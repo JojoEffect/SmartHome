@@ -54,6 +54,7 @@ jobs:
           # available to everything after it.
           scopes: |
             homie
+            homeassistant
             mqtt
             networking
             roomsensor
