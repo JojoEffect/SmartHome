@@ -80,6 +80,17 @@ namespace SmartHome.UnitTests
         /// </summary>
         public bool FailNextSubscribe { get; set; } = false;
 
+        /// <summary>
+        /// Makes the next Publish() throw, the way a QoS 1 publish does whenever the link
+        /// is momentarily down.
+        /// </summary>
+        /// <remarks>
+        /// One publish, not the connection: this is the failure an adapter has to survive
+        /// *without* the session being torn down, which is the case its own guards exist
+        /// for and the only way to reach a half-published announcement from a test.
+        /// </remarks>
+        public bool FailNextPublish { get; set; } = false;
+
         // Captured from the last CONNECT so tests can assert on what the Homie client
         // actually declares -- the last will above all, which Homie v4 requires and
         // which is only ever visible in CONNECT.
@@ -260,6 +271,12 @@ namespace SmartHome.UnitTests
 
         public ushort Publish(string topic, byte[] message, string contentType, ArrayList userProperties, MqttQoSLevel qosLevel, bool retain)
         {
+            if (FailNextPublish)
+            {
+                FailNextPublish = false;
+                throw new Exception("Simulated PUBLISH failure.");
+            }
+
             Record(topic, message, retain, qosLevel);
             return 0;
         }
