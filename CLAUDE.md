@@ -1069,6 +1069,33 @@ A green CI is therefore not the same claim for every change. For a change under 
 `Run-ScriptTests.ps1` covers the desk-provable half and nothing else: the capture, the broker
 outage and the conformance verdicts are still only proved by a run on the device.
 
+### The virtual device's CLR is pinned, and has to be
+
+The nanoFramework test adapter replaces the `nanoclr` global tool with the latest published one
+before **every** virtual-device run, naming no version, and then has it fetch the latest CLR
+instance. So nothing a workflow or a desk installs decides what the unit tests run on: CI
+installs `1.1.122` and the run reports `1.1.311`, and a single local run moved this machine's
+tool from `1.1.289` to `1.1.311`.
+
+That cost nothing until the latest CLR stopped matching the managed baseline. On 2026-09-21
+`main` went red with `Firmware version does not match managed code version` and 1 of 170 tests
+executed, with no commit that day to blame: `nanoFramework.CoreLibrary` `1.17.11` is accepted by
+CLR `1.17.0.316` and by the `1.17.0.339` on the ESP32, and refused by `1.17.0.349` and by
+`1.18.0.18`. Issue #162 carries the whole diagnosis.
+
+So `src\tests\Unit\nano.ci.runsettings` pins the CLR in its `CLRVersion`, and `Run-Tests.ps1`
+resolves that against the machine before a virtual run: it fetches the version if the cache does
+not have it, copies the CLR out of the tool's own store — the adapter updates that store during
+the very run, so a copy is what makes the pin hold rather than race — and hands `vstest` a
+resolved settings file naming it in `PathToLocalCLRInstance`. Declaring `CLRVersion` alone does
+**not** hold: the adapter asks the tool for that version under an option name the current CLI
+does not have, the request fails, and the run proceeds on whatever instance is installed.
+
+Two consequences worth knowing. Bumping the managed baseline to `1.18` is a managed *and*
+firmware migration — a device flashed with `1.17.0.339` refuses assemblies built against a newer
+mscorlib at load time — so it needs a hardware run, not a package edit. And a hardware run
+(`nano.runsettings`) pins nothing here on purpose: there the CLR is the device's own firmware.
+
 ## Project skills
 
 `.claude/skills/smarthome-*` each wrap one script from the table above with the context/safety

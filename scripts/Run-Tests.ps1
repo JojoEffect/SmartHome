@@ -157,6 +157,21 @@ if ($hardwareFlag -eq 'True') {
 Write-Host ""
 Write-Host "Running tests on $target ($targetDetail) via vstest.console..." -ForegroundColor Cyan
 Write-Host "  Adapter: $adapterDir"
+
+# The CLR a virtual run loads is the one thing in this toolchain that moves on its own:
+# the adapter replaces the nanoclr global tool with the latest published one before
+# every run and has it fetch the latest CLR, whatever was installed beforehand. That is
+# how main went red on 2026-09-21 with "Firmware version does not match managed code
+# version" without a line of this repository changing (issue #162). So the settings file
+# pins a CLR and this resolves it against the machine, handing vstest a copy that names
+# the pinned instance by path -- which is the only form the adapter actually honours.
+#
+# Only for a run that uses one: on real hardware the CLR is the device's own firmware,
+# and a settings file that pins nothing is handed through untouched.
+if ($hardwareFlag -ne 'True') {
+    $runSettings = Resolve-SmartHomeVirtualClr -RunSettingsPath $runSettings
+}
+
 Write-Host "  Settings: $runSettings"
 
 # A TRX logger, not just the exit code. vstest exits 0 when every test is SKIPPED,

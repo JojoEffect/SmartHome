@@ -1303,3 +1303,190 @@ function Clear-SmartHomeDeviceDeployment {
 
     return $result
 }
+
+# ── Virtual-device CLR ────────────────────────────────────────────────────────
+#
+# What runs the unit tests when IsRealHardware is False, and the one part of this
+# repository's toolchain that moves on its own.
+#
+# The nanoFramework test adapter updates the nanoclr global tool before every
+# virtual-device run, naming no version, and then has that tool fetch the latest CLR
+# instance. So the runtime under the tests is whatever upstream published most recently,
+# whatever the workflow installed: CI installs 1.1.122 and the run reports 1.1.311, and
+# locally one run moved this machine's tool from 1.1.289 to 1.1.311.
+#
+# That was invisible until the latest CLR stopped matching the managed baseline. On
+# 2026-09-21 main went red with "Firmware version does not match managed code version"
+# and 1 of 170 tests executed: nanoFramework.CoreLibrary 1.17.11 is accepted by CLR
+# 1.17.0.316 and by the 1.17.0.339 on the ESP32, and refused by 1.17.0.349 and by
+# 1.18.0.18. Nothing in the tree changed that day. Issue #162 carries the diagnosis.
+#
+# Declaring <CLRVersion> in the settings file is not enough on its own: the adapter asks
+# the tool for that version under an option name the current CLI does not have, so the
+# request fails and the run proceeds on whatever instance is installed. What does hold is
+# <PathToLocalCLRInstance>, which the adapter passes to nanoCLR at launch, so it survives
+# the adapter's own update. That path cannot be committed, since it carries the CLI
+# version the adapter bumps, so it is resolved per run -- the way Deploy-DeviceConfig.ps1
+# resolves nanoff's manifest against this machine.
+
+function Get-SmartHomePinnedClrVersion {
+    # The CLR version a settings file pins, or '' when it pins none.
+    #
+    # SelectSingleNode rather than property access, for the reason Run-Tests.ps1 gives
+    # about IsRealHardware: under Set-StrictMode a missing element throws on property
+    # access, and a settings file is allowed to omit this one.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RunSettingsPath
+    )
+
+    [xml]$settings = Get-Content -LiteralPath $RunSettingsPath -Raw
+    $node = $settings.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/CLRVersion')
+
+    if (-not $node) {
+        return ''
+    }
+
+    return $node.InnerText.Trim()
+}
+
+function Find-SmartHomeNanoClrInstanceFile {
+    # The CLR the nanoclr global tool currently has, as a file on disk.
+    #
+    # It lives inside the tool's own store, under a directory named for the CLI version,
+    # which is why the newest one wins: the adapter installs a newer CLI beside the old
+    # one rather than replacing it, and the instance it just updated is in the newest.
+    # $null when there is none, which the caller reports as "install nanoclr" rather than
+    # guessing.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StoreRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $StoreRoot)) {
+        return $null
+    }
+
+    # Sorted by the version directory's own name, parsed as a version rather than as
+    # text: a text sort puts 1.1.9 above 1.1.311, which is the mistake
+    # Get-NanoFrameworkTestAdapterDir was rewritten to stop making (issue #79).
+    $candidates = @(Get-ChildItem -LiteralPath $StoreRoot -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $parsed = $null
+            if ([version]::TryParse($_.Name, [ref]$parsed)) {
+                [pscustomobject]@{ Version = $parsed; Directory = $_ }
+            }
+        } | Sort-Object -Property Version -Descending)
+
+    foreach ($candidate in $candidates) {
+        $instance = @(Get-ChildItem -LiteralPath $candidate.Directory.FullName -Recurse -Filter 'nanoFramework.nanoCLR.dll' -File -ErrorAction SilentlyContinue)
+        if ($instance.Count -gt 0) {
+            return $instance[0].FullName
+        }
+    }
+
+    return $null
+}
+
+function New-SmartHomeResolvedRunSettings {
+    # A copy of a settings file carrying the CLR this machine will actually run.
+    #
+    # A copy rather than an edit of the versioned file, for the reason
+    # Deploy-DeviceConfig.ps1 writes a resolved manifest: the committed file states the
+    # version, and a machine path is not something to commit or to leave behind in the
+    # working tree after a run.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RunSettingsPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ClrInstancePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+
+    [xml]$settings = Get-Content -LiteralPath $RunSettingsPath -Raw
+
+    $adapter = $settings.SelectSingleNode('/RunSettings/nanoFrameworkAdapter')
+    if (-not $adapter) {
+        throw "No <nanoFrameworkAdapter> section in '$RunSettingsPath'; there is nothing to resolve the CLR into."
+    }
+
+    $node = $settings.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/PathToLocalCLRInstance')
+    if (-not $node) {
+        $node = $settings.CreateElement('PathToLocalCLRInstance')
+        [void]$adapter.AppendChild($node)
+    }
+
+    $node.InnerText = $ClrInstancePath
+
+    $destinationDir = Split-Path -Parent $Destination
+    if ($destinationDir -and -not (Test-Path -LiteralPath $destinationDir)) {
+        [void](New-Item -ItemType Directory -Path $destinationDir -Force)
+    }
+
+    $settings.Save($Destination)
+
+    return $Destination
+}
+
+function Resolve-SmartHomeVirtualClr {
+    # Makes the pinned CLR the one the next virtual-device run loads, and hands back the
+    # settings file that says so. Returns the original path unchanged when the file pins
+    # no version, so a settings file that wants the upstream default still gets it.
+    #
+    # The CLR is copied out of the tool's store rather than pointed at in place, because
+    # the adapter updates that store during the very run this is preparing: the copy is
+    # what makes the pin hold rather than race.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RunSettingsPath,
+
+        [string]$CacheRoot = (Join-Path $env:TEMP 'SmartHome-nanoclr'),
+
+        [string]$StoreRoot = (Join-Path $env:USERPROFILE '.dotnet\tools\.store\nanoclr')
+    )
+
+    $version = Get-SmartHomePinnedClrVersion -RunSettingsPath $RunSettingsPath
+    if (-not $version) {
+        return $RunSettingsPath
+    }
+
+    $cached = Join-Path (Join-Path $CacheRoot $version) 'nanoFramework.nanoCLR.dll'
+
+    if (-not (Test-Path -LiteralPath $cached)) {
+        $nanoclr = Get-Command 'nanoclr' -ErrorAction SilentlyContinue
+        if (-not $nanoclr) {
+            throw "nanoclr is not on PATH, so the CLR '$RunSettingsPath' pins ($version) cannot be fetched. Install it with: dotnet tool install -g nanoclr"
+        }
+
+        Write-Host "  Fetching nanoCLR $version for the virtual device..."
+
+        # No 2>&1 on a native tool: in Windows PowerShell 5.1 the redirect wraps the
+        # exe's ordinary stderr in a NativeCommandError and sets $? to false, so a
+        # healthy run reports as a failure. CLAUDE.md records that trap.
+        & $nanoclr.Source instance --update --clrversion $version | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "nanoclr could not install CLR $version (exit code $LASTEXITCODE). That version is declared in '$RunSettingsPath'."
+        }
+
+        $instance = Find-SmartHomeNanoClrInstanceFile -StoreRoot $StoreRoot
+        if (-not $instance) {
+            throw "nanoclr reported success, but no nanoFramework.nanoCLR.dll was found under '$StoreRoot'."
+        }
+
+        $cachedDir = Split-Path -Parent $cached
+        if (-not (Test-Path -LiteralPath $cachedDir)) {
+            [void](New-Item -ItemType Directory -Path $cachedDir -Force)
+        }
+
+        # The whole directory, not the one file: nanoCLR loads its neighbours from beside
+        # itself, and a lone dll in an empty folder starts and then cannot find them.
+        Copy-Item -Path (Join-Path (Split-Path -Parent $instance) '*') -Destination $cachedDir -Recurse -Force
+    }
+
+    $resolved = Join-Path (Split-Path -Parent $cached) ('resolved.' + (Split-Path -Leaf $RunSettingsPath))
+
+    return New-SmartHomeResolvedRunSettings -RunSettingsPath $RunSettingsPath -ClrInstancePath $cached -Destination $resolved
+}
