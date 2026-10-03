@@ -959,3 +959,164 @@ Describe 'Device monitor project' {
         Assert-Equal -Expected (Get-SmartHomeRepoRoot) -Actual (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $projectPath)))
     }
 }
+
+Describe 'Virtual-device CLR' {
+    function New-RunSettingsFixture {
+        # A settings file in the shape the real one has, so a test can vary one element
+        # and nothing else. Written as text rather than built from an XmlDocument, for the
+        # reason the package fixtures above are: what these helpers have to survive is
+        # files on disk, an empty element and a missing one included.
+        param(
+            [string]$Name = 'runsettings',
+            [string]$ClrVersion = '1.17.0.316',
+            [switch]$NoClrVersionElement,
+            [switch]$NoLocalInstanceElement,
+            [switch]$NoAdapterSection
+        )
+
+        $root = New-TestDirectory -Name $Name
+        $path = Join-Path $root 'nano.ci.runsettings'
+
+        $lines = [System.Collections.ArrayList]@()
+        [void]$lines.Add('<?xml version="1.0" encoding="utf-8"?>')
+        [void]$lines.Add('<RunSettings>')
+        [void]$lines.Add('   <RunConfiguration>')
+        [void]$lines.Add('       <ResultsDirectory>.\TestResults</ResultsDirectory>')
+        [void]$lines.Add('   </RunConfiguration>')
+
+        if (-not $NoAdapterSection) {
+            [void]$lines.Add('   <nanoFrameworkAdapter>')
+            [void]$lines.Add('       <IsRealHardware>False</IsRealHardware>')
+            if (-not $NoClrVersionElement) {
+                [void]$lines.Add("       <CLRVersion>$ClrVersion</CLRVersion>")
+            }
+            if (-not $NoLocalInstanceElement) {
+                [void]$lines.Add('       <PathToLocalCLRInstance></PathToLocalCLRInstance>')
+            }
+            [void]$lines.Add('   </nanoFrameworkAdapter>')
+        }
+
+        [void]$lines.Add('</RunSettings>')
+
+        Set-TestFileContent -Path $path -Content $lines
+
+        return $path
+    }
+
+    It 'reads the pinned CLR version' {
+        $path = New-RunSettingsFixture -ClrVersion '  1.17.0.316  '
+
+        Assert-Equal -Expected '1.17.0.316' -Actual (Get-SmartHomePinnedClrVersion -RunSettingsPath $path) -Because 'trimmed, so a hand-edited file with whitespace still resolves'
+    }
+
+    It 'reads an empty pin as no pin at all' {
+        # Which is what the file carried before issue #162, and still a legitimate thing
+        # to ask for: it means "whatever the adapter installs".
+        $path = New-RunSettingsFixture -ClrVersion ''
+
+        Assert-Equal -Expected '' -Actual (Get-SmartHomePinnedClrVersion -RunSettingsPath $path)
+    }
+
+    It 'reads a missing element as no pin either' {
+        # Under Set-StrictMode, property access on an absent element throws, which is why
+        # the helper goes through SelectSingleNode. A caller-supplied settings file is
+        # allowed to omit it.
+        $path = New-RunSettingsFixture -NoClrVersionElement
+
+        Assert-Equal -Expected '' -Actual (Get-SmartHomePinnedClrVersion -RunSettingsPath $path)
+    }
+
+    It 'takes the newest CLI version in the store, by version and not by text' {
+        # The store keeps one directory per CLI version and the adapter installs a new one
+        # beside the old rather than replacing it, so the instance it just updated is in
+        # the newest. A text sort reads 1.1.9 as newer than 1.1.311 -- the same mistake
+        # the test-adapter lookup was rewritten to stop making (issue #79).
+        $store = New-TestDirectory -Name 'clr-store'
+        foreach ($version in @('1.1.9', '1.1.122', '1.1.311')) {
+            Set-TestFileContent -Path (Join-Path $store "$version\nanoclr\$version\tools\net8.0\any\NanoCLR\nanoFramework.nanoCLR.dll") -Content @('not a real assembly')
+        }
+
+        $found = Find-SmartHomeNanoClrInstanceFile -StoreRoot $store
+
+        Assert-Match -Pattern '1\.1\.311' -Actual $found
+    }
+
+    It 'falls through a CLI version that carries no CLR' {
+        # A tool directory can exist without the instance in it: nothing has fetched one
+        # yet. Taking the newest directory blindly would return nothing and read as
+        # "nanoclr is not installed".
+        $store = New-TestDirectory -Name 'clr-store-partial'
+        [void](New-Item -ItemType Directory -Path (Join-Path $store '1.1.311\nanoclr\1.1.311\tools') -Force)
+        Set-TestFileContent -Path (Join-Path $store '1.1.122\nanoclr\1.1.122\tools\net8.0\any\NanoCLR\nanoFramework.nanoCLR.dll') -Content @('not a real assembly')
+
+        $found = Find-SmartHomeNanoClrInstanceFile -StoreRoot $store
+
+        Assert-Match -Pattern '1\.1\.122' -Actual $found
+    }
+
+    It 'reports no instance rather than guessing when the store is absent' {
+        Assert-Null -Value (Find-SmartHomeNanoClrInstanceFile -StoreRoot (Join-Path (New-TestDirectory -Name 'clr-no-store') 'never-created'))
+    }
+
+    It 'writes a resolved copy naming the CLR, leaving the rest of the file alone' {
+        $path = New-RunSettingsFixture
+        $destination = Join-Path (Split-Path -Parent $path) 'out\resolved.runsettings'
+
+        $written = New-SmartHomeResolvedRunSettings -RunSettingsPath $path -ClrInstancePath 'C:\pinned\nanoFramework.nanoCLR.dll' -Destination $destination
+
+        Assert-Equal -Expected $destination -Actual $written
+        Assert-True -Condition (Test-Path -LiteralPath $destination) -Because 'the destination directory is created rather than required'
+
+        [xml]$resolved = Get-Content -LiteralPath $destination -Raw
+        Assert-Equal -Expected 'C:\pinned\nanoFramework.nanoCLR.dll' -Actual $resolved.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/PathToLocalCLRInstance').InnerText
+        Assert-Equal -Expected '1.17.0.316' -Actual $resolved.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/CLRVersion').InnerText -Because 'the declaration stays, so the adapter can honour it once upstream fixes its option name'
+        Assert-Equal -Expected 'False' -Actual $resolved.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/IsRealHardware').InnerText
+        Assert-Equal -Expected '.\TestResults' -Actual $resolved.SelectSingleNode('/RunSettings/RunConfiguration/ResultsDirectory').InnerText
+    }
+
+    It 'adds the element when the settings file does not carry one' {
+        $path = New-RunSettingsFixture -NoLocalInstanceElement
+        $destination = Join-Path (Split-Path -Parent $path) 'resolved.runsettings'
+
+        [void](New-SmartHomeResolvedRunSettings -RunSettingsPath $path -ClrInstancePath 'C:\pinned\nanoFramework.nanoCLR.dll' -Destination $destination)
+
+        [xml]$resolved = Get-Content -LiteralPath $destination -Raw
+        Assert-Equal -Expected 'C:\pinned\nanoFramework.nanoCLR.dll' -Actual $resolved.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/PathToLocalCLRInstance').InnerText
+    }
+
+    It 'refuses a settings file with no adapter section rather than writing a copy that pins nothing' {
+        $path = New-RunSettingsFixture -NoAdapterSection
+        $destination = Join-Path (Split-Path -Parent $path) 'resolved.runsettings'
+
+        Assert-Throws -Body { New-SmartHomeResolvedRunSettings -RunSettingsPath $path -ClrInstancePath 'C:\pinned\nanoFramework.nanoCLR.dll' -Destination $destination } -Pattern 'nanoFrameworkAdapter'
+        Assert-False -Condition (Test-Path -LiteralPath $destination)
+    }
+
+    It 'hands a settings file that pins nothing straight through' {
+        # A real hardware run reaches this with the hardware settings file, which pins no
+        # CLR because the device's own firmware is the CLR. Resolving one there would be
+        # inventing a requirement.
+        $path = New-RunSettingsFixture -ClrVersion ''
+        $cacheRoot = New-TestDirectory -Name 'clr-cache-unused'
+
+        Assert-Equal -Expected $path -Actual (Resolve-SmartHomeVirtualClr -RunSettingsPath $path -CacheRoot $cacheRoot -StoreRoot (Join-Path $cacheRoot 'no-store'))
+    }
+
+    It 'uses a cached CLR without going near nanoclr' {
+        # The second run of the day, and the shape every CI run has after the first: the
+        # pinned CLR is already copied aside, so nothing is fetched and nothing updates
+        # the tool. Asserted by pointing the store at a path that does not exist -- a run
+        # that reached the tool would fail there instead of returning.
+        $path = New-RunSettingsFixture
+        $cacheRoot = New-TestDirectory -Name 'clr-cache'
+        $cached = Join-Path $cacheRoot '1.17.0.316\nanoFramework.nanoCLR.dll'
+        Set-TestFileContent -Path $cached -Content @('not a real assembly')
+
+        $resolved = Resolve-SmartHomeVirtualClr -RunSettingsPath $path -CacheRoot $cacheRoot -StoreRoot (Join-Path $cacheRoot 'no-store')
+
+        Assert-Equal -Expected (Join-Path $cacheRoot '1.17.0.316\resolved.nano.ci.runsettings') -Actual $resolved
+
+        [xml]$settings = Get-Content -LiteralPath $resolved -Raw
+        Assert-Equal -Expected $cached -Actual $settings.SelectSingleNode('/RunSettings/nanoFrameworkAdapter/PathToLocalCLRInstance').InnerText
+    }
+}

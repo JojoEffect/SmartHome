@@ -69,18 +69,25 @@ jobs:
       - name: Build solution
         run: msbuild SmartHome.sln /p:Configuration=Debug /v:minimal /nologo /nodeReuse:false
 
-      # The virtual device: the same CLR, run on the host. This is what lets the 34 unit
+      # The virtual device: the same CLR, run on the host. This is what lets the unit
       # tests run without a board.
       #
-      # Pinned, and install-or-update rather than plain install. Pinned because an
-      # unpinned CLR means the runtime under the tests can change with
-      # no commit in this repository -- green today, red tomorrow, nothing to bisect.
-      # Bump this deliberately, like any other dependency.
+      # This step makes the tool *exist*; it does not decide which version runs, and the
+      # comment here used to claim otherwise. The test adapter replaces the global tool
+      # with the latest published one before every virtual-device run, naming no version,
+      # and then has it fetch the latest CLR -- so this job installs 1.1.122 and the run
+      # reports whatever shipped most recently. That went unnoticed until the latest CLR
+      # stopped matching the managed baseline, which is how main went red on 2026-09-21
+      # without a line of this repository changing (issue #162).
       #
-      # Install-or-update because `dotnet tool install` exits 1 when the tool is already
-      # present. A hosted runner is fresh every time so plain install works there, but it
-      # would fail on the very first re-run of the self-hosted runner in #26, where the
-      # global tool persists between jobs.
+      # The CLR the tests actually load is pinned in src\tests\Unit\nano.ci.runsettings
+      # and resolved per run by Run-Tests.ps1, which is the only form the adapter
+      # honours. Bump it there, deliberately, like any other dependency.
+      #
+      # Install-or-update rather than plain install, because `dotnet tool install` exits 1
+      # when the tool is already present. A hosted runner is fresh every time so plain
+      # install works there, but it would fail on the very first re-run of the self-hosted
+      # runner in #26, where the global tool persists between jobs.
       - name: Install nanoclr
         run: |
           $ErrorActionPreference = 'Stop'
