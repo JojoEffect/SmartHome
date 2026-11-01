@@ -1604,8 +1604,15 @@ function Get-SmartHomeGhApiFailure {
     if ($status) { $detail += ", HTTP $status" }
     if ($message) { $detail += ": $message" }
     else { $detail += ' (gh printed the reason above)' }
+    if (-not $status) { $detail += ' (the HTTP status is in the gh: line printed above)' }
 
-    if ($status -eq '401') {
+    # The status is usually not in the body: GitHub's error bodies carry `message` and
+    # `documentation_url`, and the HTTP status is in the response headers and gh's own stderr
+    # line, which this does not capture. So authentication is recognised three ways -- a body
+    # that does say 401, gh's documented exit code 4 ("authentication required"), and the two
+    # messages GitHub gives for a missing or rejected token. A 403 policy refusal matches none.
+    $unauthenticated = ($status -eq '401') -or ($ExitCode -eq 4) -or ($message -match '^(Bad credentials|Requires authentication)')
+    if ($unauthenticated) {
         $detail += ' -- not authenticated? Run: gh auth login'
     }
     return $detail

@@ -85,9 +85,21 @@ Describe 'Get-SmartHomeGhApiFailure' {
         Assert-False -Condition ($detail -match 'gh auth login') -Because 'the token was fine; the hint sends a cloud session to a command it cannot run'
     }
 
-    It 'gives the authentication hint for a 401, and only then' {
-        $detail = Get-SmartHomeGhApiFailure -ExitCode 1 -Output @('{"message":"Bad credentials","status":"401"}')
-        Assert-Match -Actual $detail -Pattern 'gh auth login'
+    It 'gives the authentication hint for a 401, and for what a real rejected token looks like' {
+        Assert-Match -Actual (Get-SmartHomeGhApiFailure -ExitCode 1 -Output @('{"message":"Bad credentials","status":"401"}')) -Pattern 'gh auth login'
+
+        # GitHub's real error body has no `status` member; gh puts the status on stderr.
+        $real = '{"message":"Bad credentials","documentation_url":"https://docs.github.com/rest"}'
+        Assert-Match -Actual (Get-SmartHomeGhApiFailure -ExitCode 1 -Output @($real)) -Pattern 'gh auth login'
+        Assert-Match -Actual (Get-SmartHomeGhApiFailure -ExitCode 4 -Output @()) -Pattern 'gh auth login'
+    }
+
+    It 'does not give the authentication hint for a policy refusal whose body carries no status' {
+        $real = '{"message":"GitHub access to this repository is not enabled for this session.","documentation_url":"https://docs.anthropic.com/x"}'
+        $detail = Get-SmartHomeGhApiFailure -ExitCode 1 -Output @($real)
+
+        Assert-Match -Actual $detail -Pattern 'not enabled for this session'
+        Assert-False -Condition ($detail -match 'gh auth login')
     }
 
     It 'still says something when gh printed nothing on stdout' {
