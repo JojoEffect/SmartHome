@@ -503,7 +503,7 @@ function Get-IssueRecord {
         Blocked      = ($labels -contains 'status: blocked')
         InProgress   = ($labels -contains 'status: in-progress')
         AgeDays      = [int]((Get-Date) - [datetime]$Issue.createdAt).TotalDays
-        Comments     = @($Issue.comments).Count
+        Comments     = [int]$Issue.commentCount
         Trust        = $trust
         EvidenceDebt = $debt
         Where        = $where
@@ -565,26 +565,24 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# Never pipe a native tool through 2>&1 in Windows PowerShell 5.1: the redirect wraps
-# ordinary stderr in a NativeCommandError and reports a healthy call as a failure. Let
-# stderr reach the console and judge by the exit code.
+# REST, not `gh issue list`: that goes through GraphQL, which a Claude Code cloud session
+# refuses with HTTP 403 (#166). `{owner}/{repo}` is gh's own placeholder, filled from the
+# working directory's remotes. A failure is reported as what GitHub said, not as a guess
+# about authentication.
 Push-Location $repoRoot
 try {
-    $raw = & gh issue list --state $State --limit $Limit --json number,title,body,labels,createdAt,updatedAt,comments,url,state
-    $ghExit = $LASTEXITCODE
+    $fetch = Get-SmartHomeGitHubIssue -Repo '{owner}/{repo}' -State $State -Limit $Limit
 }
 finally {
     Pop-Location
 }
 
-if ($ghExit -ne 0) {
-    Write-Error "gh issue list failed with exit code $ghExit. Not authenticated? Run: gh auth login (scripts\Test-Setup.ps1 reports this too)."
+if (-not $fetch.Ok) {
+    Write-Error "Could not read the backlog: $($fetch.Detail)"
     exit 1
 }
 
-# ForEach-Object, not just @(): ConvertFrom-Json in Windows PowerShell returns a single
-# object rather than a one-element array when the payload has one element.
-$issues = @($raw | ConvertFrom-Json | ForEach-Object { $_ })
+$issues = @($fetch.Items)
 
 # A cap that silently trims the backlog would make a partial ranking read as a complete
 # one -- the same "no silent caps" rule the rest of this repo holds its scripts to.
@@ -1171,7 +1169,7 @@ if ($Handoff -gt 0) {
     }
 
     Write-Host ''
-    Write-Host '  These are pointers, not briefs. Read each body (gh issue view <n> --comments)' -ForegroundColor DarkGray
+    Write-Host '  These are pointers, not briefs. Read each body (MCP issue_read, or gh api repos/{owner}/{repo}/issues/<n>/comments -- gh issue view uses GraphQL)' -ForegroundColor DarkGray
     Write-Host '  before writing a handoff prompt - a spun-off session starts cold and cannot' -ForegroundColor DarkGray
     Write-Host '  see this ranking or this conversation.' -ForegroundColor DarkGray
 }

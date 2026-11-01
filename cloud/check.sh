@@ -107,7 +107,7 @@ if command -v gh >/dev/null 2>&1; then
   if gh issue list --repo JojoEffect/SmartHome --limit 1 >/dev/null 2>&1; then
     ok "gh issue/pr list (GraphQL)" "works"
   else
-    info "gh issue/pr list (GraphQL)" "blocked -- expected; use 'gh api repos/...' or the GitHub MCP tools"
+    info "gh issue/pr list (GraphQL)" "blocked -- expected; the repo scripts read issues/PRs over REST (#166), do the same by hand"
   fi
 else
   warn "gh" "not installed"

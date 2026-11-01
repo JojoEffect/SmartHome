@@ -222,25 +222,28 @@ if (-not $NoGitHub) {
             $githubStatus = "remote '$Remote' has no URL"
         }
         else {
-            $prJson = & gh pr list --repo $remoteUrl.Lines[0] --state all --limit 300 --json number,state,headRefName,isCrossRepository
-            if ($LASTEXITCODE -ne 0) {
-                $githubStatus = 'the gh call failed (not authenticated? run: gh auth login)'
+            # REST, not `gh pr list`: that goes through GraphQL, which a Claude Code cloud
+            # session refuses with HTTP 403 (#166).
+            $slug = Get-SmartHomeGitHubSlug -RemoteUrl $remoteUrl.Lines[0]
+            if (-not $slug) {
+                $githubStatus = "could not read owner/repo out of the URL of remote '$Remote'"
             }
             else {
-                $githubStatus = 'ok'
-                # ForEach-Object, not just @(): ConvertFrom-Json in Windows PowerShell
-                # 5.1 emits a JSON array as ONE object, so @() wraps it instead of
-                # unrolling it. Without the extra pipeline the loop runs once with the
-                # whole array bound to $pr, and `$pr.isCrossRepository` -- an array of
-                # booleans -- is truthy, silently skipping every pull request.
-                foreach ($pr in @($prJson | ConvertFrom-Json | ForEach-Object { $_ })) {
-                    if ($pr.isCrossRepository) { continue }   # a fork's branch, not ours to delete
-                    $existing = if ($prByBranch.ContainsKey($pr.headRefName)) { $prByBranch[$pr.headRefName] } else { $null }
-                    # An OPEN pull request outranks any closed or merged one on the
-                    # same branch: a reused branch name must protect the branch, not
-                    # free it.
-                    if ($null -eq $existing -or $pr.state -eq 'OPEN' -or ($existing.state -ne 'OPEN' -and $pr.number -gt $existing.number)) {
-                        $prByBranch[$pr.headRefName] = $pr
+                $fetch = Get-SmartHomeGitHubPullRequest -Repo $slug -Limit 300
+                if (-not $fetch.Ok) {
+                    $githubStatus = "the GitHub call failed: $($fetch.Detail)"
+                }
+                else {
+                    $githubStatus = 'ok'
+                    foreach ($pr in @($fetch.Items)) {
+                        if ($pr.isCrossRepository) { continue }   # a fork's branch, not ours to delete
+                        $existing = if ($prByBranch.ContainsKey($pr.headRefName)) { $prByBranch[$pr.headRefName] } else { $null }
+                        # An OPEN pull request outranks any closed or merged one on the
+                        # same branch: a reused branch name must protect the branch, not
+                        # free it.
+                        if ($null -eq $existing -or $pr.state -eq 'OPEN' -or ($existing.state -ne 'OPEN' -and $pr.number -gt $existing.number)) {
+                            $prByBranch[$pr.headRefName] = $pr
+                        }
                     }
                 }
             }

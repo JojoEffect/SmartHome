@@ -33,7 +33,7 @@ function New-TestIssue {
         labels    = @($Labels | ForEach-Object { [pscustomobject]@{ name = $_ } })
         createdAt = '2026-09-01T00:00:00Z'
         updatedAt = '2026-09-01T00:00:00Z'
-        comments  = @()
+        commentCount = 0
         url       = 'https://github.com/JojoEffect/SmartHome/issues/1'
         state     = 'OPEN'
     }
