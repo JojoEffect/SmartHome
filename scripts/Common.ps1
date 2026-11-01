@@ -1543,3 +1543,186 @@ function Resolve-SmartHomeVirtualClr {
 
     return New-SmartHomeResolvedRunSettings -RunSettingsPath $RunSettingsPath -ClrInstancePath $cached -Destination $resolved
 }
+
+# ------------------------------------------------------------ GitHub (REST) ----
+#
+# Issues and pull requests are read through the REST API, never `gh issue list` / `gh pr
+# list`. Those two go through GraphQL, which a Claude Code cloud session refuses with HTTP
+# 403 while the same token reads the same data over REST without complaint (#166). One path
+# rather than "GraphQL, then REST on a 403": a fallback that only runs in the environment
+# nobody develops in is the branch that rots, and REST works on a Windows desk too.
+
+function Get-SmartHomeGitHubSlug {
+    # 'owner/repo' out of a remote URL, or $null. Takes the last two path segments, so
+    # https://github.com/o/r, git@github.com:o/r.git and a cloud session's proxy URL
+    # (http://local_proxy@127.0.0.1:PORT/git/o/r) all answer the same.
+    param([string]$RemoteUrl)
+
+    if ([string]::IsNullOrWhiteSpace($RemoteUrl)) { return $null }
+    if ($RemoteUrl.Trim() -match '[/:]([^/:@\s]+)/([^/\s]+?)(?:\.git)?/*$') {
+        return "$($Matches[1])/$($Matches[2])"
+    }
+    return $null
+}
+
+function Invoke-SmartHomeGhApi {
+    # The one place `gh api` is spelled, and the seam a test replaces. stdout only, and
+    # stderr left to the console: piping a native tool through 2>&1 in Windows PowerShell
+    # 5.1 wraps its ordinary stderr in a NativeCommandError. On an HTTP error gh prints the
+    # response body to stdout and its own "gh: <message> (HTTP <status>)" to stderr, which
+    # is why Get-SmartHomeGhApiFailure can read the reason from stdout.
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+    $output = & gh api @Arguments
+    return [pscustomobject]@{
+        ExitCode = $LASTEXITCODE
+        Output   = @($output | Where-Object { $null -ne $_ })
+    }
+}
+
+function Get-SmartHomeGhApiFailure {
+    # Names what GitHub said, not what it might have meant. The scripts used to turn every
+    # failure into "not authenticated? run: gh auth login", which sent a cloud session --
+    # whose token was fine and whose problem was a policy -- to a command it cannot run.
+    # Only a 401 earns the authentication hint.
+    param([int]$ExitCode, [string[]]$Output)
+
+    $status = ''
+    $message = ''
+    try {
+        $body = (@($Output) -join "`n") | ConvertFrom-Json
+        if ($null -ne $body -and $body -isnot [array]) {
+            if ($body.PSObject.Properties['message']) { $message = [string]$body.message }
+            if ($body.PSObject.Properties['status']) { $status = [string]$body.status }
+        }
+    }
+    catch {
+        # Not JSON (a network failure prints nothing on stdout); fall through to the bare form.
+    }
+
+    $detail = "gh api failed with exit code $ExitCode"
+    if ($status) { $detail += ", HTTP $status" }
+    if ($message) { $detail += ": $message" }
+    else { $detail += ' (gh printed the reason above)' }
+
+    if ($status -eq '401') {
+        $detail += ' -- not authenticated? Run: gh auth login'
+    }
+    return $detail
+}
+
+function Get-SmartHomeGitHubRestList {
+    # Pages through a REST list endpoint until $Limit rows have passed $Include or the list
+    # ends. Returns @{ Ok; Items; Detail }: Items is the kept rows, raw, at most $Limit of
+    # them. $Include sees one raw row and answers whether it counts toward the limit --
+    # /issues also returns pull requests, and those must not use up the cap.
+    param(
+        [Parameter(Mandatory = $true)][string]$Endpoint,
+        [hashtable]$Query = @{},
+        [int]$Limit = 200,
+        [scriptblock]$Include = { $true }
+    )
+
+    $perPage = 100
+    $kept = New-Object System.Collections.Generic.List[object]
+    $page = 1
+
+    while ($kept.Count -lt $Limit) {
+        $arguments = @('-X', 'GET', $Endpoint, '-f', "per_page=$perPage", '-f', "page=$page")
+        foreach ($key in $Query.Keys) { $arguments += @('-f', "$key=$($Query[$key])") }
+
+        $call = Invoke-SmartHomeGhApi -Arguments $arguments
+        if ($call.ExitCode -ne 0) {
+            return @{ Ok = $false; Items = @(); Detail = (Get-SmartHomeGhApiFailure -ExitCode $call.ExitCode -Output $call.Output) }
+        }
+
+        try {
+            # ForEach-Object, not just @(): Windows PowerShell's ConvertFrom-Json emits a
+            # JSON array as one object, and a one-element array as that element.
+            $rows = @((@($call.Output) -join "`n") | ConvertFrom-Json | ForEach-Object { $_ })
+        }
+        catch {
+            return @{ Ok = $false; Items = @(); Detail = "gh api returned something that is not JSON for $Endpoint page ${page}: $($_.Exception.Message)" }
+        }
+
+        foreach ($row in $rows) {
+            if ($kept.Count -ge $Limit) { break }
+            if (& $Include $row) { $kept.Add($row) }
+        }
+
+        if ($rows.Count -lt $perPage) { break }
+        $page++
+    }
+
+    return @{ Ok = $true; Items = $kept.ToArray(); Detail = '' }
+}
+
+function ConvertFrom-SmartHomeRestIssue {
+    # A REST issue in the shape the backlog script reads. Label objects keep their `name`;
+    # `comments` is a count over REST where `gh issue list` handed over the comments, so it
+    # arrives as CommentCount.
+    param([Parameter(Mandatory = $true)]$Issue)
+
+    return [pscustomobject]@{
+        number       = [int]$Issue.number
+        title        = [string]$Issue.title
+        body         = [string]$Issue.body
+        labels       = @($Issue.labels | Where-Object { $null -ne $_ } | ForEach-Object { [pscustomobject]@{ name = [string]$_.name } })
+        createdAt    = $Issue.created_at
+        updatedAt    = $Issue.updated_at
+        commentCount = [int]$Issue.comments
+        url          = [string]$Issue.html_url
+        state        = ([string]$Issue.state).ToUpperInvariant()
+    }
+}
+
+function ConvertFrom-SmartHomeRestPullRequest {
+    # A REST pull request in the shape `gh pr list --json number,state,headRefName,
+    # isCrossRepository` used to give. REST has only open/closed, with `merged_at` set on the
+    # merged ones; a head repository of null is a fork that has since been deleted, which is
+    # still not this repository's branch.
+    param([Parameter(Mandatory = $true)]$PullRequest)
+
+    $state = if ($PullRequest.state -eq 'open') { 'OPEN' }
+             elseif ($PullRequest.merged_at) { 'MERGED' }
+             else { 'CLOSED' }
+
+    $headRepo = $PullRequest.head.repo
+    $cross = ($null -eq $headRepo) -or ([string]$headRepo.full_name -ne [string]$PullRequest.base.repo.full_name)
+
+    return [pscustomobject]@{
+        number            = [int]$PullRequest.number
+        state             = $state
+        headRefName       = [string]$PullRequest.head.ref
+        isCrossRepository = $cross
+    }
+}
+
+function Get-SmartHomeGitHubIssue {
+    # -Repo 'owner/repo', or '{owner}/{repo}' to let gh resolve it from the working directory.
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [ValidateSet('open', 'closed', 'all')][string]$State = 'open',
+        [int]$Limit = 200
+    )
+
+    $result = Get-SmartHomeGitHubRestList -Endpoint "repos/$Repo/issues" -Query @{ state = $State } -Limit $Limit `
+        -Include { -not $args[0].PSObject.Properties['pull_request'] }
+    if ($result.Ok) {
+        $result['Items'] = @($result.Items | ForEach-Object { ConvertFrom-SmartHomeRestIssue -Issue $_ })
+    }
+    return $result
+}
+
+function Get-SmartHomeGitHubPullRequest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [int]$Limit = 300
+    )
+
+    $result = Get-SmartHomeGitHubRestList -Endpoint "repos/$Repo/pulls" -Query @{ state = 'all' } -Limit $Limit
+    if ($result.Ok) {
+        $result['Items'] = @($result.Items | ForEach-Object { ConvertFrom-SmartHomeRestPullRequest -PullRequest $_ })
+    }
+    return $result
+}

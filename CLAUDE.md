@@ -177,9 +177,12 @@ nobody has to find it out again:
   Framework 4.7.2), anything with a COM port, and the Windows-path scripts — `Test-Setup.ps1`,
   `Start-DevEnv.ps1`, `Deploy-*.ps1`. **CI on `windows-latest` is the only check for C# from a
   cloud session**, and the PR must say that nothing ran on hardware.
-- **Blocked for now:** `gh issue list` / `gh pr list` use GraphQL, which a cloud session refuses with
-  HTTP 403, so `Get-BacklogPriorities.ps1` and `Clean-GitBranches.ps1` fail there with a misleading
-  "not authenticated" hint (#166). Use `gh api repos/...` or the MCP tools.
+- **Works since #166:** `Get-BacklogPriorities.ps1` and `Clean-GitBranches.ps1` read issues and pull
+  requests over REST (`Get-SmartHomeGitHubIssue` / `Get-SmartHomeGitHubPullRequest` in `Common.ps1`),
+  not `gh issue list` / `gh pr list`. Those two use GraphQL, which a cloud session refuses with
+  HTTP 403 — and which the scripts used to report as "not authenticated". Do not put a `gh issue
+  list`, `gh pr list` or `gh issue view` back into a script; use `gh api repos/...` or the MCP tools.
+  A failure now names the HTTP status and message GitHub gave.
 
 ## First-time setup
 

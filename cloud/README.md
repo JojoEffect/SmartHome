@@ -34,7 +34,7 @@ ein Linux-Container ohne COM-Port. Daraus folgt:
 | `.nfproj` bauen, `Run-Tests.ps1`, Unit-Tests | **Nein** | Siehe [Warum C# nicht in der Cloud gebaut wird](#warum-c-nicht-in-der-cloud-gebaut-wird). **Die CI auf `windows-latest` ist hier die Prüfinstanz.** |
 | Deploy, Flashen, Integrationstests, Seriell-Mitschnitt | **Nein** | Kein ESP32, kein COM-Port. Ohnehin nur nach Rückfrage (Hardware-Regel in `CLAUDE.md`). |
 | `Test-Setup.ps1`, `Start-DevEnv.ps1`, `Deploy-*.ps1` | **Nein** | Windows-Pfade (`C:\…\mosquitto.exe`, `vswhere`, `.exe`). `Test-Setup.ps1` bricht unter Linux bei `Join-Path 'C:\…'` ab. Statt dessen: `cloud/check.sh`. |
-| `scripts\Get-BacklogPriorities.ps1`, `Clean-GitBranches.ps1` | **Nein, vorerst** | Sie nutzen `gh issue list` / `gh pr list` (GraphQL), und das blockiert die Cloud mit HTTP 403. REST geht. Issue #166. |
+| `scripts\Get-BacklogPriorities.ps1`, `Clean-GitBranches.ps1` | Ja | Sie lesen Issues und PRs über REST (`gh api`), nicht über `gh issue list` / `gh pr list` (GraphQL, in der Cloud HTTP 403). Issue #166. |
 
 ### Warum C# nicht in der Cloud gebaut wird
 
@@ -139,7 +139,7 @@ pwsh -NoProfile -File scripts/Sync-NanoFrameworkRepos.ps1  # vor Framework-/Firm
 ```
 
 - Pull Requests öffnen und beobachten geht über die GitHub-MCP-Tools. `gh api …` geht für REST,
-  `gh issue list` und `gh pr list` nicht (#166).
+  `gh issue list`, `gh pr list` und `gh issue view` nicht (GraphQL). Die Repo-Skripte nutzen deshalb REST (#166).
 - **Grün in der CI ist die einzige Prüfung für C#.** Die PR-Beschreibung muss sagen, dass nichts auf
   Hardware lief.
 - Skript-Änderungen sollten unter `pwsh` auf Linux **und** der Windows-CI bestehen. Fälle, die
@@ -154,7 +154,7 @@ pwsh -NoProfile -File scripts/Sync-NanoFrameworkRepos.ps1  # vor Framework-/Firm
 | `apt failed`, `Unable to locate package` | Host nicht freigegeben | Netzwerk-Tabelle oben; Hosts unter *Allowed domains* eintragen |
 | `nanoclr` stürzt mit `UriFormatException` ab | Version 1.1.122 ist installiert | `dotnet tool update -g nanoclr` (aktuelle Version läuft) |
 | `nanoclr: command not found` | `~/.dotnet/tools` ist in der Cloud nicht im PATH | `setup.sh` verlinkt nach `/usr/local/bin`; erneut ausführen |
-| `HTTP 403: GitHub GraphQL is not available` | `gh issue list` / `gh pr list` | `gh api repos/…` oder MCP-Tools; Issue #166 |
+| `HTTP 403: GitHub GraphQL is not available` | `gh issue list` / `gh pr list` / `gh issue view` direkt aufgerufen | `gh api repos/…` oder MCP-Tools; die Repo-Skripte tun das bereits (#166) |
 | `Test-Setup.ps1` bricht bei `Join-Path` auf `C:` ab | Windows-Skript | `bash cloud/check.sh` |
 | `Missing: …\scripts\local.env.ps1` | Konfigurationsdateien fehlen | `SEED_LOCAL_ENV=1` im Setup, oder die Vorlagen von Hand kopieren |
 
