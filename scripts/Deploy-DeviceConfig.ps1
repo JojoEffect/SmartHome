@@ -162,6 +162,13 @@ function Get-DeviceConfigManifestError {
         return "$Source is empty."
     }
 
+    # Strictness first, from one place: ConvertFrom-Json accepts a trailing comma under
+    # PowerShell 7 and refuses it under 5.1, so it cannot be the judge on its own.
+    $jsonError = Get-SmartHomeJsonError -Text $Json
+    if ($jsonError) {
+        return "$Source is not valid JSON: $jsonError"
+    }
+
     $manifest = $null
     try {
         $manifest = $Json | ConvertFrom-Json
@@ -215,7 +222,11 @@ so the port comes from SMARTHOME_COM_PORT in scripts\local.env.ps1 instead. Remo
             return "$label has no SourceFilePath. This script deploys files; it does not delete them from the device."
         }
 
-        if ([System.IO.Path]::IsPathRooted($source)) {
+        # IsPathRooted answers for the host it runs on, and a manifest is read on more than
+        # one: 'C:/somewhere/x.json' is not rooted to PowerShell 7 on Linux, but it is an
+        # absolute path on the Windows machine this manifest is deployed from. So a drive
+        # letter, or a leading separator, counts whichever host is asking.
+        if ([System.IO.Path]::IsPathRooted($source) -or $source -match '^([A-Za-z]:|[\\/])') {
             return "$label has an absolute SourceFilePath '$source'; paths in a manifest are relative to the repository root so the same file works from any checkout."
         }
 
@@ -231,7 +242,10 @@ so the port comes from SMARTHOME_COM_PORT in scripts\local.env.ps1 instead. Remo
                     return "$resolved is empty; a device reading it would come up alerting."
                 }
 
-                $payload | ConvertFrom-Json | Out-Null
+                $payloadError = Get-SmartHomeJsonError -Text $payload
+                if ($payloadError) {
+                    return "$resolved is not valid JSON: $payloadError"
+                }
             }
             catch {
                 return "$resolved is not valid JSON: $($_.Exception.Message)"

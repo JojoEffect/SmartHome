@@ -685,6 +685,20 @@ function Get-DeviceConfigurationValue {
         throw 'is empty'
     }
 
+    $jsonError = Get-SmartHomeJsonError -Text $text
+    if ($jsonError) {
+        throw "is not valid JSON ($jsonError)"
+    }
+
+    # Decided from the text, because the parsed value cannot say. Windows PowerShell 5.1
+    # hands a top-level array back as one Object[]; PowerShell 7 unrolls it, so a
+    # one-element array arrives as the PSCustomObject of its only element -- and the type
+    # check below then accepts '[ { "BrokerHost": ... } ]' as the object the device
+    # refuses to read.
+    if (-not $text.TrimStart().StartsWith('{')) {
+        throw 'is not a JSON object'
+    }
+
     try {
         $parsed = $text | ConvertFrom-Json
     }

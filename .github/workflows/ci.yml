@@ -19,6 +19,25 @@ permissions:
   contents: read
 
 jobs:
+  # The host-side script tests under PowerShell 7 as well. build-and-test below runs them
+  # under Windows PowerShell 5.1, which is what the scripts are written for; this is the
+  # other edition, on both operating systems, so a construct that only one of them
+  # tolerates (a backslash-only path pattern, a ConvertFrom-Json that is lenient about a
+  # trailing comma) fails here instead of on a desk. Cases that need cmd.exe skip off
+  # Windows and say so in the summary.
+  script-tests-pwsh:
+    name: Script tests (PowerShell 7, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run host-side script tests
+        shell: pwsh
+        run: ./scripts/Run-ScriptTests.ps1
+
   build-and-test:
     name: Build and unit test
     # Windows is not a preference. .nfproj is a classic MSBuild project and the

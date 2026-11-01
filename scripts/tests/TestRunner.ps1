@@ -54,6 +54,15 @@ $SmartHomeTestState = @{
     Passed    = 0
     Failed    = 0
     Skipped   = 0
+    # Cases that cannot run on this host and said so (Describe/It -Skip), as opposed to
+    # Skipped above, which is the caller's own -Name filter. Counted apart because the two
+    # mean different things: a filter is a choice made for this run, while an unsupported
+    # case is a gap in what this run proved -- and it is listed, by reason, in the summary
+    # so a green run cannot quietly mean "and a fifth of it never ran".
+    Unsupported       = 0
+    UnsupportedReason = @{}
+    # The reason in force while a skipped Describe's body is running, '' otherwise.
+    SkipReason        = ''
     Group     = ''
     Depth     = 0
     Failures  = @()
@@ -387,19 +396,62 @@ function Assert-Throws {
     Assert-Fail -Message ($prefix + 'expected a terminating error, but the body completed')
 }
 
+function Get-WindowsOnlyReason {
+    # '' where the host is Windows, otherwise a reason to hand to -Skip. For the cases whose
+    # subject needs something only Windows has: cmd.exe, a drive letter, a .exe on PATH.
+    #
+    # Asked of the platform rather than of $IsWindows: that variable does not exist in
+    # Windows PowerShell 5.1, and reading it there throws under Set-StrictMode. Win32NT is
+    # what both editions report on Windows and neither reports anywhere else.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Because
+    )
+
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        return ''
+    }
+
+    return "needs Windows: $Because"
+}
+
+function Add-UnsupportedCase {
+    param([string]$Reason)
+
+    $state = $SmartHomeTestState
+    $state.Unsupported++
+    if ($state.UnsupportedReason.ContainsKey($Reason)) {
+        $state.UnsupportedReason[$Reason]++
+    }
+    else {
+        $state.UnsupportedReason[$Reason] = 1
+    }
+}
+
 function Describe {
     # A group. Nesting is allowed and shows as 'outer / inner'; an error escaping the body
     # itself (rather than an It) is recorded as a failure of the group instead of ending
     # the file, so one broken group does not hide every test after it.
+    #
+    # -Skip takes the reason this group cannot run here ('' runs it). The body still
+    # executes -- its helper functions and fixtures are declarations -- but every It inside
+    # it is counted as unsupported with that reason instead of being run.
     param(
         [Parameter(Mandatory = $true, Position = 0)]
         [string]$Name,
 
         [Parameter(Mandatory = $true, Position = 1)]
-        [scriptblock]$Body
+        [scriptblock]$Body,
+
+        [string]$Skip = ''
     )
 
     $state = $SmartHomeTestState
+    $previousSkipReason = $state.SkipReason
+    if ($Skip -and -not $previousSkipReason) {
+        $state.SkipReason = $Skip
+    }
+    $unsupportedBefore = $state.Unsupported
     $previousGroup = $state.Group
     $state.Group = if ($previousGroup) { "$previousGroup / $Name" } else { $Name }
     $state.Depth++
@@ -421,11 +473,14 @@ function Describe {
         $indent = '  ' * ($state.Depth - 1)
         $label = "{0}{1}" -f $indent, $Name
         $counts = if ($failed -gt 0) { "{0} passed, {1} FAILED" -f $passed, $failed } else { "{0} passed" -f $passed }
+        $unsupported = $state.Unsupported - $unsupportedBefore
+        if ($unsupported -gt 0) { $counts += ", {0} skipped" -f $unsupported }
         $colour = if ($failed -gt 0) { 'Red' } else { 'DarkGray' }
         Write-Host ("  {0,-62} {1}" -f $label, $counts) -ForegroundColor $colour
 
         $state.Depth--
         $state.Group = $previousGroup
+        $state.SkipReason = $previousSkipReason
     }
 }
 
@@ -471,7 +526,9 @@ function It {
         [string]$Name,
 
         [Parameter(Mandatory = $true, Position = 1)]
-        [scriptblock]$Body
+        [scriptblock]$Body,
+
+        [string]$Skip = ''
     )
 
     $state = $SmartHomeTestState
@@ -479,6 +536,16 @@ function It {
 
     if ($state.Filter -and ($full -notlike $state.Filter)) {
         $state.Skipped++
+        return
+    }
+
+    # A group's reason wins over the case's own: either one is enough to not run it.
+    $reason = if ($state.SkipReason) { $state.SkipReason } else { $Skip }
+    if ($reason) {
+        Add-UnsupportedCase -Reason $reason
+        if ($state.Detailed) {
+            Write-Host ("      skip {0} ({1})" -f $Name, $reason) -ForegroundColor Yellow
+        }
         return
     }
 
