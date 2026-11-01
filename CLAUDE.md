@@ -160,6 +160,27 @@ The 0xFF pad survives as the fallback for one case: the device could not be reac
 holding the debugger connection is the usual reason), where the image is padded to the whole
 partition and the flash goes ahead with a warning.
 
+## Cloud sessions (Linux)
+
+A Claude Code cloud session is an Ubuntu container with no COM port and none of the Windows
+tooling the rest of this file assumes. [`cloud/README.md`](cloud/README.md) is the setup guide
+(German); [`cloud/setup.sh`](cloud/setup.sh) is what the environment's *Setup script* field holds
+and [`cloud/check.sh`](cloud/check.sh) reports whether it worked. Measured on 2026-11-01, so
+nobody has to find it out again:
+
+- **Works:** `pwsh scripts/Run-ScriptTests.ps1` (345 passed, 17 skipped — the `cmd.exe` cases skip
+  off Windows with their reason in the summary), `pwsh scripts/Sync-NanoFrameworkRepos.ps1` (1.6 GB,
+  about five minutes; clones `main`, the tag pins are still the `nanoframework-sync` subagent's job),
+  `dotnet build tools/DeviceDebugMonitor`, PR work through the GitHub MCP tools, `gh api` (REST).
+- **Does not:** building `.nfproj` and so `Run-Tests.ps1` and the unit tests (the build components
+  ship only in a VSIX that is a blocked GitHub release asset, and their task assemblies are .NET
+  Framework 4.7.2), anything with a COM port, and the Windows-path scripts — `Test-Setup.ps1`,
+  `Start-DevEnv.ps1`, `Deploy-*.ps1`. **CI on `windows-latest` is the only check for C# from a
+  cloud session**, and the PR must say that nothing ran on hardware.
+- **Blocked for now:** `gh issue list` / `gh pr list` use GraphQL, which a cloud session refuses with
+  HTTP 403, so `Get-BacklogPriorities.ps1` and `Clean-GitBranches.ps1` fail there with a misleading
+  "not authenticated" hint (#166). Use `gh api repos/...` or the MCP tools.
+
 ## First-time setup
 
 Everything in this section lives **outside the repository** — on the machine the session is
