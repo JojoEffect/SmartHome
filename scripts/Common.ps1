@@ -207,9 +207,23 @@ function Get-SmartHomePackagesConfig {
     # a sibling '.claude\worktrees-something' is a different folder and stays in.
     $worktreesDir = (Join-Path $RepoRoot '.claude\worktrees') + [System.IO.Path]::DirectorySeparatorChar
 
-    Get-ChildItem -LiteralPath $RepoRoot -Filter 'packages.config' -Recurse -File |
+    # [\\/] rather than '\\': Windows PowerShell 5.1 on Windows only ever hands back
+    # backslashes, but PowerShell 7 on Linux and macOS hands back '/', and a pattern that
+    # names only one of them excludes nothing on the other.
+    #
+    # -Force off Windows only. A directory is hidden there by attribute, and the walk has
+    # never entered one; on Linux and macOS it is hidden by a leading dot, which would put
+    # '.claude' -- the folder the worktrees exclusion below is about -- out of the walk
+    # altogether, so the exclusion could neither be exercised nor be told apart from not
+    # looking. Windows keeps exactly the enumeration it always had.
+    $enumeration = @{}
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        $enumeration['Force'] = $true
+    }
+
+    Get-ChildItem -LiteralPath $RepoRoot -Filter 'packages.config' -Recurse -File @enumeration |
         Where-Object {
-            $_.FullName -notmatch '\\(bin|obj)\\' -and
+            $_.FullName -notmatch '[\\/](bin|obj)[\\/]' -and
             -not $_.FullName.StartsWith($worktreesDir, [StringComparison]::OrdinalIgnoreCase)
         }
 }
@@ -795,6 +809,45 @@ function New-SmartHomeProcessRecord {
         Name      = $Process.ProcessName
         StartTime = $Process.StartTime.ToString('o')
         Tree      = [bool]$Tree
+    }
+}
+
+function Get-SmartHomeJsonError {
+    # $null when $Text is strictly valid JSON, otherwise the parser's reason.
+    #
+    # Exists because ConvertFrom-Json is not the same parser on the two PowerShells this
+    # repository runs under. Windows PowerShell 5.1 rejects a trailing comma
+    # ('{ "a": 1, }'), which is exactly the slip a hand-edited device configuration
+    # carries; PowerShell 7 reads it without complaint, so a check built on ConvertFrom-Json
+    # alone passes a file under 7 that it refuses under 5.1. System.Text.Json is strict
+    # (trailing commas and comments are errors unless asked for) and is part of .NET on
+    # PowerShell 7, so that is what 7 uses; 5.1 has no such type and keeps ConvertFrom-Json,
+    # which is already strict there. Either way the answer is the stricter one.
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    if ($null -ne ('System.Text.Json.JsonDocument' -as [type])) {
+        try {
+            [System.Text.Json.JsonDocument]::Parse($Text).Dispose()
+            return $null
+        }
+        catch {
+            # The inner exception is the JsonException with the line and position; the
+            # outer one is reflection's "Exception calling Parse".
+            $inner = if ($_.Exception.InnerException) { $_.Exception.InnerException } else { $_.Exception }
+            return $inner.Message
+        }
+    }
+
+    try {
+        $Text | ConvertFrom-Json | Out-Null
+        return $null
+    }
+    catch {
+        return $_.Exception.Message
     }
 }
 

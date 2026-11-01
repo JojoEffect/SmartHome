@@ -142,9 +142,21 @@ if ($SmartHomeTestState.Failures.Count -gt 0) {
     }
 }
 
+# Said before the verdict, by reason: a case that cannot run here is a claim this run did
+# not make, and the count alone would not say which claim.
+foreach ($reason in ($SmartHomeTestState.UnsupportedReason.Keys | Sort-Object)) {
+    Write-Host ("  skipped {0,3} case(s) -- {1}" -f $SmartHomeTestState.UnsupportedReason[$reason], $reason) -ForegroundColor Yellow
+}
+if ($SmartHomeTestState.Unsupported -gt 0) {
+    Write-Host ""
+}
+
 $summary = "{0} passed, {1} failed" -f $SmartHomeTestState.Passed, $SmartHomeTestState.Failed
 if ($SmartHomeTestState.Skipped -gt 0) {
     $summary += ", {0} skipped by -Name" -f $SmartHomeTestState.Skipped
+}
+if ($SmartHomeTestState.Unsupported -gt 0) {
+    $summary += ", {0} skipped as unsupported on this host" -f $SmartHomeTestState.Unsupported
 }
 $summary += " in {0:n1}s" -f $elapsed
 

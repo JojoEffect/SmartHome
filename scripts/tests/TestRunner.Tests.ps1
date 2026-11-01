@@ -235,3 +235,96 @@ Describe 'New-TestDirectory' {
         Assert-True -Condition ((New-TestDirectory) -ne (New-TestDirectory))
     }
 }
+
+Describe 'Describe / It -Skip' {
+    # The runner's way of saying "this case cannot run on this host" without either
+    # failing it or letting it count as a pass. A case that never ran must not read as one
+    # that did, so the claim worth testing is that a skipped body is NOT executed and the
+    # counters say so.
+
+    function Invoke-WithRestoredCounters {
+        # The nested groups below record into the same state as the run they are part of.
+        # Put the counters back afterwards, or this group would add phantom passes and
+        # skips to the totals of the whole suite.
+        param([scriptblock]$Body)
+
+        $state = $SmartHomeTestState
+        $saved = @{
+            Total       = $state.Total
+            Passed      = $state.Passed
+            Failed      = $state.Failed
+            Unsupported = $state.Unsupported
+            Reasons     = $state.UnsupportedReason.Clone()
+        }
+        try {
+            & $Body
+        }
+        finally {
+            $state.Total       = $saved.Total
+            $state.Passed      = $saved.Passed
+            $state.Failed      = $saved.Failed
+            $state.Unsupported = $saved.Unsupported
+            $state.UnsupportedReason = $saved.Reasons
+            $state.SkipReason  = ''
+        }
+    }
+
+    It 'does not run the body of a skipped It, and counts it as unsupported' {
+        Invoke-WithRestoredCounters {
+            $script:ran = $false
+            $before = $SmartHomeTestState.Unsupported
+
+            It 'inner' -Skip 'no such host' { $script:ran = $true }
+
+            Assert-False -Condition $script:ran -Because 'a skipped case must not execute'
+            Assert-Equal -Expected ($before + 1) -Actual $SmartHomeTestState.Unsupported
+            Assert-Equal -Expected 1 -Actual $SmartHomeTestState.UnsupportedReason['no such host']
+        }
+    }
+
+    It 'skips every It inside a skipped Describe, and still runs a later group' {
+        Invoke-WithRestoredCounters {
+            $script:ranInside = 0
+            $totalBefore = $SmartHomeTestState.Total
+            $passedBefore = $SmartHomeTestState.Passed
+
+            Describe 'inner group' -Skip 'no such host' {
+                It 'one' { $script:ranInside++ }
+                It 'two' { $script:ranInside++ }
+            } 6>$null
+
+            Assert-Equal -Expected 0 -Actual $script:ranInside
+            Assert-Equal -Expected 2 -Actual $SmartHomeTestState.UnsupportedReason['no such host']
+            Assert-Equal -Expected $totalBefore -Actual $SmartHomeTestState.Total -Because 'a skipped case is not a run case'
+            Assert-Equal -Expected '' -Actual $SmartHomeTestState.SkipReason -Because 'the reason must not leak into the next group'
+
+            Describe 'next group' {
+                It 'runs' { $script:ranInside = 10 }
+            } 6>$null
+            Assert-Equal -Expected 10 -Actual $script:ranInside
+            Assert-Equal -Expected ($passedBefore + 1) -Actual $SmartHomeTestState.Passed
+        }
+    }
+
+    It 'treats an empty reason as "run it"' {
+        Invoke-WithRestoredCounters {
+            $script:ran = $false
+            It 'inner' -Skip '' { $script:ran = $true }
+            Assert-True -Condition $script:ran
+        }
+    }
+}
+
+Describe 'Get-WindowsOnlyReason' {
+    It 'is empty exactly where the host is Windows, and names the reason elsewhere' {
+        $onWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+        $reason = Get-WindowsOnlyReason -Because 'it launches cmd.exe'
+
+        if ($onWindows) {
+            Assert-Equal -Expected '' -Actual $reason
+        }
+        else {
+            Assert-Match -Pattern 'needs Windows: it launches cmd\.exe' -Actual $reason
+        }
+    }
+}

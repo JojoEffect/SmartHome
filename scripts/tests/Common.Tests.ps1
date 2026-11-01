@@ -44,8 +44,8 @@ Describe 'Get-SmartHomePackagesConfig' {
         $found = @(Get-SmartHomePackagesConfig -RepoRoot $root)
 
         Assert-Equal -Expected 3 -Actual $found.Count -Because 'two real references plus the worktrees-archive one'
-        Assert-Equal -Expected 0 -Actual @($found | Where-Object { $_.FullName -match '\\(bin|obj)\\' }).Count
-        Assert-Equal -Expected 0 -Actual @($found | Where-Object { $_.FullName -match '\\worktrees\\' }).Count
+        Assert-Equal -Expected 0 -Actual @($found | Where-Object { $_.FullName -match '[\\/](bin|obj)[\\/]' }).Count
+        Assert-Equal -Expected 0 -Actual @($found | Where-Object { $_.FullName -match '[\\/]worktrees[\\/]' }).Count
     }
 
     It 'keeps a sibling whose name merely starts with the excluded one' {
@@ -92,7 +92,7 @@ Describe 'Get-SmartHomePackagesConfig' {
         # rather than testing one path, and a match anywhere let the whole array through --
         # all three files, from a filter that reads as keeping one.
         $root = New-PackagesConfigFixture
-        $kept = @(Get-SmartHomePackagesConfig -RepoRoot $root | Where-Object { $_.FullName -match '\\RoomSensor\\' })
+        $kept = @(Get-SmartHomePackagesConfig -RepoRoot $root | Where-Object { $_.FullName -match '[\\/]RoomSensor[\\/]' })
 
         Assert-ArrayEqual -Expected @((Join-Path $root 'src\devices\RoomSensor\packages.config')) `
                           -Actual @($kept | ForEach-Object { $_.FullName })
@@ -151,8 +151,11 @@ Describe 'Get-SmartHomeReferencedPackage' {
     It 'returns one record per distinct reference, across every config in the checkout' {
         $referenced = @(Get-SmartHomeReferencedPackage -RepoRoot (New-ReferenceFixture))
 
-        Assert-ArrayEqual -Expected @('nanoFramework.CoreLibrary.1.17.11', 'nanoFramework.M2Mqtt.5.1.221', 'nanoFramework.Hardware.Esp32.1.6.42') `
-                          -Actual @($referenced | ForEach-Object { $_.Name }) `
+        # Sorted on both sides: the order records arrive in is the order the filesystem
+        # lists the config files in, which NTFS keeps alphabetical and ext4 does not. The
+        # claim is "once each", and no caller depends on the order.
+        Assert-ArrayEqual -Expected @('nanoFramework.CoreLibrary.1.17.11', 'nanoFramework.Hardware.Esp32.1.6.42', 'nanoFramework.M2Mqtt.5.1.221') `
+                          -Actual @($referenced | ForEach-Object { $_.Name } | Sort-Object) `
                           -Because 'CoreLibrary is referenced twice and must appear once'
     }
 
@@ -426,7 +429,7 @@ Describe 'Get-NanoFrameworkTestAdapterDir' {
         # costs: a green vstest run that executed nothing, unnoticed for three commits.
         $root = New-AdapterFixture -Restored @('3.0.9', '3.0.80') -Referenced @('3.0.80')
 
-        Assert-Match -Pattern '(?-i)nanoFramework\.TestFramework\.3\.0\.80\\' -Actual (Get-NanoFrameworkTestAdapterDir -RepoRoot $root)
+        Assert-Match -Pattern '(?-i)nanoFramework\.TestFramework\.3\.0\.80[\\/]' -Actual (Get-NanoFrameworkTestAdapterDir -RepoRoot $root)
     }
 
     It 'refuses to guess when the checkout references two test framework versions' {
@@ -450,7 +453,7 @@ Describe 'Get-NanoFrameworkTestAdapterDir' {
             Path    = (Join-Path $root 'packages\nanoFramework.TestFramework.3.0.9')
         })
 
-        Assert-Match -Pattern '(?-i)nanoFramework\.TestFramework\.3\.0\.9\\' `
+        Assert-Match -Pattern '(?-i)nanoFramework\.TestFramework\.3\.0\.9[\\/]' `
                      -Actual (Get-NanoFrameworkTestAdapterDir -RepoRoot $root -ReferencedPackage $handed)
     }
 
@@ -759,6 +762,33 @@ Describe 'Get-SmartHomeMosquittoTool' {
                      -Because 'nothing after the guard may run'
         Assert-Match -Pattern 'SMARTHOME_MOSQUITTO_DIR' `
                      -Actual ((Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue) -join ' ')
+    }
+}
+
+Describe 'Get-SmartHomeJsonError' {
+    # ConvertFrom-Json is not one parser across the two PowerShells this repository runs
+    # under: 5.1 refuses a trailing comma and 7 reads it, so a check built on it alone
+    # passes under one a file it refuses under the other. These cases hold the answer to
+    # the stricter of the two on whichever host runs them.
+    It 'returns $null for valid JSON' {
+        Assert-Null -Value (Get-SmartHomeJsonError -Text '{ "DeviceId": "room-sensor-office", "Pins": [1, 2] }')
+    }
+
+    It 'refuses a trailing comma in an object' {
+        Assert-NotNull -Value (Get-SmartHomeJsonError -Text '{ "DeviceId": "room-sensor-office", }')
+    }
+
+    It 'refuses a trailing comma in an array' {
+        Assert-NotNull -Value (Get-SmartHomeJsonError -Text '{ "Pins": [1, 2, ] }')
+    }
+
+    It 'refuses text that is not JSON at all' {
+        Assert-NotNull -Value (Get-SmartHomeJsonError -Text 'not json')
+        Assert-NotNull -Value (Get-SmartHomeJsonError -Text '{ "unterminated": ')
+    }
+
+    It 'gives a reason that says something' {
+        Assert-True -Condition ((Get-SmartHomeJsonError -Text '{ "a": 1, }').Length -gt 0)
     }
 }
 

@@ -1709,7 +1709,7 @@ Describe 'Invoke-BrokerOutageCheck' {
     }
 }
 
-Describe 'The snapshot capture window' {
+Describe 'The snapshot capture window' -Skip (Get-WindowsOnlyReason 'the subscriber is a scripted cmd.exe, and Start-HomieCapture launches it through cmd.exe') {
     # Start-HomieCapture, Stop-HomieCapture and the Get-HomieRetainedSnapshot that is the
     # two of them plus a parse. This is the pair issue #84 names first among the
     # uncovered, and the pair a conformance verdict is computed from: what the window
