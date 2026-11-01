@@ -38,6 +38,14 @@ jobs:
         shell: pwsh
         run: ./scripts/Run-ScriptTests.ps1
 
+      # cloud/setup.sh is pasted into an environment setting and cannot be tried before a
+      # session starts, so a syntax slip would only show up as a session with no tools.
+      # shellcheck is preinstalled on the Linux runner.
+      - name: Lint the cloud environment scripts
+        if: runner.os == 'Linux'
+        shell: bash
+        run: shellcheck cloud/*.sh
+
   build-and-test:
     name: Build and unit test
     # Windows is not a preference. .nfproj is a classic MSBuild project and the
