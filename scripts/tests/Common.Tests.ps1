@@ -151,8 +151,11 @@ Describe 'Get-SmartHomeReferencedPackage' {
     It 'returns one record per distinct reference, across every config in the checkout' {
         $referenced = @(Get-SmartHomeReferencedPackage -RepoRoot (New-ReferenceFixture))
 
-        Assert-ArrayEqual -Expected @('nanoFramework.CoreLibrary.1.17.11', 'nanoFramework.M2Mqtt.5.1.221', 'nanoFramework.Hardware.Esp32.1.6.42') `
-                          -Actual @($referenced | ForEach-Object { $_.Name }) `
+        # Sorted on both sides: the order records arrive in is the order the filesystem
+        # lists the config files in, which NTFS keeps alphabetical and ext4 does not. The
+        # claim is "once each", and no caller depends on the order.
+        Assert-ArrayEqual -Expected @('nanoFramework.CoreLibrary.1.17.11', 'nanoFramework.Hardware.Esp32.1.6.42', 'nanoFramework.M2Mqtt.5.1.221') `
+                          -Actual @($referenced | ForEach-Object { $_.Name } | Sort-Object) `
                           -Because 'CoreLibrary is referenced twice and must appear once'
     }
 
