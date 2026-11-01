@@ -143,24 +143,32 @@ fi
 # --- dotnet global tools ---------------------------------------------------------------
 # Installed with -g and linked into /usr/local/bin, because ~/.dotnet/tools is on no PATH
 # in a cloud session and a PATH edit would not reach every shell.
+#
+# These tools are conveniences, so a failed install (a flaky NuGet fetch, say) warns and
+# returns 1 instead of aborting: under `set -e` a bare failing command would end the whole
+# setup, and a fully usable environment (pwsh, dotnet, mosquitto) would be reported as a
+# failed one. Callers add `|| true` for the same reason -- `set -e` looks at the call too.
 install_dotnet_tool() { # <name> [version]
-  local name="$1" version="${2:-}"
+  local name="$1" version="${2:-}" out
   if [ -x "$HOME/.dotnet/tools/$name" ]; then
     log "dotnet tool $name already installed"
   else
     log "dotnet tool install: $name ${version:+($version)}"
     if [ -n "$version" ]; then
-      dotnet tool install -g "$name" --version "$version" >/dev/null
+      out="$(dotnet tool install -g "$name" --version "$version" 2>&1)" || {
+        warn "could not install $name: $(printf '%s' "$out" | head -n 1)"; return 1; }
     else
-      dotnet tool install -g "$name" >/dev/null
+      out="$(dotnet tool install -g "$name" 2>&1)" || {
+        warn "could not install $name: $(printf '%s' "$out" | head -n 1)"; return 1; }
     fi
   fi
-  $SUDO ln -sf "$HOME/.dotnet/tools/$name" "/usr/local/bin/$name"
+  $SUDO ln -sf "$HOME/.dotnet/tools/$name" "/usr/local/bin/$name" \
+    || { warn "could not link $name into /usr/local/bin"; return 1; }
 }
 
 if command -v dotnet >/dev/null 2>&1; then
-  if [ "$INSTALL_NANOCLR" = 1 ]; then install_dotnet_tool nanoclr; fi
-  if [ "$INSTALL_NANOFF" = 1 ]; then install_dotnet_tool nanoff "$NANOFF_VERSION"; fi
+  if [ "$INSTALL_NANOCLR" = 1 ]; then install_dotnet_tool nanoclr || true; fi
+  if [ "$INSTALL_NANOFF" = 1 ]; then install_dotnet_tool nanoff "$NANOFF_VERSION" || true; fi
 fi
 
 # --- repository-level seeding ----------------------------------------------------------
@@ -179,7 +187,8 @@ fi
 if [ -n "$REPO" ] && [ "$SYNC_SIBLINGS" = 1 ]; then
   if command -v pwsh >/dev/null 2>&1; then
     log "syncing the nanoFramework companion repos (this takes a while)"
-    pwsh -NoProfile -File "$REPO/scripts/Sync-NanoFrameworkRepos.ps1"
+    pwsh -NoProfile -File "$REPO/scripts/Sync-NanoFrameworkRepos.ps1" \
+      || warn "the sibling sync failed; run it again by hand when the network allows"
   else
     warn "SYNC_SIBLINGS=1 but pwsh is not installed"
   fi
@@ -203,7 +212,7 @@ for tool in pwsh dotnet mosquitto_sub nanoclr nanoff; do
 done
 
 # The one thing the rest of the day depends on. A missing pwsh is a failed setup; the
-# other tools are conveniences and have already warned if they could not be installed.
+# other tools are conveniences: a failed install has already warned and did not stop the run.
 if [ "$INSTALL_POWERSHELL" = 1 ] && ! command -v pwsh >/dev/null 2>&1; then
   warn "pwsh is missing: scripts/Run-ScriptTests.ps1 cannot run"
   exit 1
